@@ -1,0 +1,15 @@
+
+The dashboard should show:
+
+- Upstox connection status;
+- selected instrument;
+- latest traded price;
+- bid and ask when provided by the feed mode;
+- current one-minute OHLC candle;
+- live line chart;
+- newest raw ticks;
+- locally stored tick and candle counts.
+
+## 7. Local database
+
+SQLite creates these files automatically:

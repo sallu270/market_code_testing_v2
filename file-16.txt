@@ -1,0 +1,6 @@
+
+Keep `.env` private. The included `.gitignore` prevents it from being committed.
+
+## 4. Create a Python virtual environment
+
+Windows PowerShell:

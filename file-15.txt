@@ -1,0 +1,7 @@
+
+Open `.env` and replace:
+
+- `YOUR_UPSTOX_ACCESS_TOKEN`
+- `YOUR_NIFTY_INSTRUMENT_KEY`
+
+Several keys use a comma-separated list:
