@@ -1290,20 +1290,31 @@ async function loadStrategyStatus() {
         const res = await fetchJson("/api/strategy/status");
         if (!res) return;
 
-        // Position
-        const pos = res.current_position;
+        // Positions (Per Instrument: NIFTY, BANKNIFTY, SENSEX)
+        const openPositions = Object.values(res.current_positions || {}).filter(p => p && p.status === "OPEN");
+        if (openPositions.length === 0 && res.current_position && res.current_position.status === "OPEN") {
+            openPositions.push(res.current_position);
+        }
+
         if (elements.stratCurrentPosition) {
-            if (pos && pos.status === "OPEN") {
-                const isCe = pos.side === "BUY_CE";
-                elements.stratCurrentPosition.innerHTML = `
-                    <span class="${isCe ? 'text--up' : 'text--down'}">
-                        ${escapeHtml(pos.side)}: ${escapeHtml(pos.symbol)}
-                    </span>
-                `;
-                elements.stratPositionDetail.textContent = `Entry @ ${formatNumber(pos.entry_price, 2)} (${pos.entry_time_ist})`;
+            if (openPositions.length > 0) {
+                elements.stratCurrentPosition.innerHTML = openPositions.map(p => {
+                    const isCe = p.side === "BUY_CE";
+                    return `
+                        <div style="font-size: 0.95em; margin-bottom: 2px;">
+                            <span class="${isCe ? 'text--up' : 'text--down'}">
+                                ${escapeHtml(p.side)}: ${escapeHtml(p.symbol)}
+                            </span>
+                        </div>
+                    `;
+                }).join("");
+
+                elements.stratPositionDetail.textContent = openPositions.map(p => 
+                    `${p.symbol.split(' ')[0]}: @ ${formatNumber(p.entry_price, 2)} (${p.entry_time_ist})`
+                ).join(" | ");
             } else {
-                elements.stratCurrentPosition.textContent = "FLAT (NO POSITION)";
-                elements.stratPositionDetail.textContent = "Scanning 1% ITM contracts";
+                elements.stratCurrentPosition.textContent = "FLAT (NO POSITIONS)";
+                elements.stratPositionDetail.textContent = "Scanning NIFTY, BANKNIFTY & SENSEX (1 trade each)";
             }
         }
 
@@ -1413,7 +1424,7 @@ async function loadStrategySignals() {
         if (!signals.length) {
             elements.stratSignalsBody.innerHTML = `
                 <tr>
-                    <td colspan="13" class="table-empty">
+                    <td colspan="14" class="table-empty">
                         No buy pressure signals triggered yet.
                     </td>
                 </tr>
@@ -1423,6 +1434,8 @@ async function loadStrategySignals() {
 
         elements.stratSignalsBody.innerHTML = signals.map(s => {
             const isCe = s.side === "CE";
+            const instName = s.instrument_name || (s.strike >= 70000 ? "SENSEX" : s.strike >= 45000 ? "BANKNIFTY" : "NIFTY");
+            const instColor = instName === "BANKNIFTY" ? "#c084fc" : instName === "SENSEX" ? "#60a5fa" : "#34d399";
             const bidAsk = (s.bid_price || s.ask_price)
                 ? `${formatNumber(s.bid_price, 2)} / ${formatNumber(s.ask_price, 2)}`
                 : "— / —";
@@ -1432,6 +1445,11 @@ async function loadStrategySignals() {
             return `
                 <tr>
                     <td style="text-align: left;">${escapeHtml(s.timestamp_ist)}</td>
+                    <td style="text-align: center;">
+                        <span style="display: inline-block; padding: 2px 7px; border-radius: 6px; font-weight: 750; font-size: 0.72rem; letter-spacing: 0.04em; background: rgba(255,255,255,0.06); color: ${instColor}; border: 1px solid ${instColor}40;">
+                            ${escapeHtml(instName)}
+                        </span>
+                    </td>
                     <td style="text-align: center;">
                         <span class="badge ${isCe ? 'badge--atm' : 'badge--closed'}">${escapeHtml(s.side)}</span>
                     </td>

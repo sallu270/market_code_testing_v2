@@ -42,6 +42,17 @@ INDEX_CONFIG: dict[str, dict[str, Any]] = {
 }
 
 
+def get_underlying_key_for_trade(trade: dict[str, Any]) -> str:
+    if trade.get("underlying_key"):
+        return trade["underlying_key"]
+    sym = str(trade.get("symbol") or "")
+    if "BANKNIFTY" in sym:
+        return "NSE_INDEX|Nifty Bank"
+    elif "SENSEX" in sym:
+        return "BSE_INDEX|SENSEX"
+    return "NSE_INDEX|Nifty 50"
+
+
 class PressureStrategyEngine:
     def __init__(self, database: MarketDatabase, base_dir: Path) -> None:
         self.database = database
@@ -68,13 +79,27 @@ class PressureStrategyEngine:
         #          "last_signaled_vol": float}
         self.contract_history: dict[str, dict[str, float]] = {}
 
-        # Position tracking
-        self.current_position: dict[str, Any] | None = None
+        # Position tracking per underlying index:
+        # e.g., "NSE_INDEX|Nifty 50": dict | None
+        self.current_positions: dict[str, dict[str, Any] | None] = {
+            "NSE_INDEX|Nifty 50": None,
+            "NSE_INDEX|Nifty Bank": None,
+            "BSE_INDEX|SENSEX": None,
+        }
         self._trade_counter: int = 1
         self._eod_timer: threading.Timer | None = None
         self._init_csv()
         self._resume_open_position()
         self._schedule_eod_squareoff()
+
+    @property
+    def current_position(self) -> dict[str, Any] | None:
+        """Returns the primary active open position for backwards compatibility."""
+        with self._lock:
+            for pos in self.current_positions.values():
+                if pos is not None and pos.get("status") == "OPEN":
+                    return pos
+            return None
 
     def _init_csv(self) -> None:
         try:
@@ -93,14 +118,15 @@ class PressureStrategyEngine:
 
     def _resume_open_position(self) -> None:
         try:
-            trades = self.database.get_strategy_trades(limit=10)
+            trades = self.database.get_strategy_trades(limit=50)
             if trades:
                 self._trade_counter = len(trades) + 1
             for t in trades:
                 if t.get("status") == "OPEN":
-                    self.current_position = t
-                    LOGGER.info("Resumed open paper trade: %s", t["trade_id"])
-                    break
+                    u_key = get_underlying_key_for_trade(t)
+                    if self.current_positions.get(u_key) is None:
+                        self.current_positions[u_key] = t
+                        LOGGER.info("Resumed open paper trade for %s: %s", u_key, t["trade_id"])
         except Exception as exc:
             LOGGER.error("Failed to resume open position: %s", exc)
 
@@ -125,31 +151,34 @@ class PressureStrategyEngine:
             LOGGER.error("Failed to schedule EOD square-off timer: %s", exc)
 
     def _force_eod_squareoff(self) -> None:
-        """Called by the background Timer at 15:15:00 IST to force-close any open position."""
+        """Called by the background Timer at 15:15:00 IST to force-close any open positions across all instruments."""
         with self._lock:
-            if self.current_position is not None:
-                now_dt = datetime.now(IST)
-                now_ms = int(time.time() * 1000)
-                # #9 millisecond timestamp
-                time_ist = now_dt.strftime("%H:%M:%S.%f")[:-3]
-                LOGGER.info("EOD Timer fired at %s — forcing square-off.", time_ist)
-                # Use last known LTP as fallback exit price (bid fallback)
-                key = self.current_position.get("instrument_key", "")
-                hist = self.contract_history.get(key, {})
-                exit_price = float(hist.get("ltp", 0.0))
-                if exit_price > 0:
-                    # Simulate bid = ltp * 0.999
-                    exit_price = round(exit_price * 0.999, 2)
-                else:
-                    exit_price = float(self.current_position.get("entry_price", 0.0))
-                self._exit_position(
-                    exit_price=exit_price,
-                    reason="EOD_1515",
-                    timestamp_ms=now_ms,
-                    time_ist=time_ist,
-                )
+            now_dt = datetime.now(IST)
+            now_ms = int(time.time() * 1000)
+            # #9 millisecond timestamp
+            time_ist = now_dt.strftime("%H:%M:%S.%f")[:-3]
+            open_count = sum(1 for p in self.current_positions.values() if p is not None and p.get("status") == "OPEN")
+            if open_count > 0:
+                LOGGER.info("EOD Timer fired at %s — forcing square-off on %d active positions.", time_ist, open_count)
+                for u_key, pos in list(self.current_positions.items()):
+                    if pos is not None and pos.get("status") == "OPEN":
+                        key = pos.get("instrument_key", "")
+                        hist = self.contract_history.get(key, {})
+                        exit_price = float(hist.get("ltp", 0.0))
+                        if exit_price > 0:
+                            exit_price = round(exit_price * 0.999, 2)
+                        else:
+                            exit_price = float(pos.get("entry_price", 0.0))
+                        self._exit_position(
+                            pos=pos,
+                            exit_price=exit_price,
+                            reason="EOD_1515",
+                            timestamp_ms=now_ms,
+                            time_ist=time_ist,
+                            underlying_key=u_key,
+                        )
             else:
-                LOGGER.info("EOD Timer fired at 15:15 — no open position to square off.")
+                LOGGER.info("EOD Timer fired at 15:15 — no open positions to square off.")
 
     def get_config(self) -> dict[str, Any]:
         with self._lock:
@@ -215,6 +244,7 @@ class PressureStrategyEngine:
             return {
                 "enabled": self.enabled,
                 "current_position": self.current_position,
+                "current_positions": {k: v for k, v in self.current_positions.items() if v is not None and v.get("status") == "OPEN"},
                 "today_date": today_str,
                 # Today metrics (what "TRADES MADE TODAY" and "TODAY P&L" should show)
                 "today_trades": len(today_trades),
@@ -264,13 +294,16 @@ class PressureStrategyEngine:
             # EOD square-off is handled by the background Timer (_force_eod_squareoff).
             # This poll-based check is a safety net only.
             if now_time_hms >= self.end_time:
-                if self.current_position is not None:
-                    LOGGER.info("15:15 EOD safety-net square-off triggered via poll.")
+                pos = self.current_positions.get(instrument_key)
+                if pos is not None and pos.get("status") == "OPEN":
+                    LOGGER.info("15:15 EOD safety-net square-off triggered via poll for %s.", instrument_key)
                     self._exit_position(
-                        exit_price=self._find_current_price(self.current_position["instrument_key"], strikes, is_exit=True),
+                        pos=pos,
+                        exit_price=self._find_current_price(pos["instrument_key"], strikes, is_exit=True),
                         reason="EOD_1515",
                         timestamp_ms=now_ms,
                         time_ist=now_time_str,
+                        underlying_key=instrument_key,
                     )
                 return None
 
@@ -296,7 +329,7 @@ class PressureStrategyEngine:
                 if strike < spot_price and (spot_price - strike) <= one_percent:
                     call_opt = item.get("call_options")
                     if call_opt:
-                        sig = self._evaluate_contract(call_opt, "CE", strike, spot_price, atm_strike, strike_map, now_time_str, now_ms, idx_cfg)
+                        sig = self._evaluate_contract(call_opt, "CE", strike, spot_price, atm_strike, strike_map, now_time_str, now_ms, idx_cfg, instrument_key)
                         if sig:
                             return sig
 
@@ -304,7 +337,7 @@ class PressureStrategyEngine:
                 if strike > spot_price and (strike - spot_price) <= one_percent:
                     put_opt = item.get("put_options")
                     if put_opt:
-                        sig = self._evaluate_contract(put_opt, "PE", strike, spot_price, atm_strike, strike_map, now_time_str, now_ms, idx_cfg)
+                        sig = self._evaluate_contract(put_opt, "PE", strike, spot_price, atm_strike, strike_map, now_time_str, now_ms, idx_cfg, instrument_key)
                         if sig:
                             return sig
 
@@ -342,6 +375,7 @@ class PressureStrategyEngine:
         now_time_str: str,
         now_ms: int,
         idx_cfg: dict[str, Any] | None = None,
+        underlying_key: str = "NSE_INDEX|Nifty 50",
     ) -> dict[str, Any] | None:
         key = str(opt.get("instrument_key") or "")
         mkt = opt.get("market_data") or {}
@@ -430,10 +464,13 @@ class PressureStrategyEngine:
         conditions_met = sum([bool(cond1), bool(cond2), bool(cond3), bool(cond4)])
         confidence = "HIGH" if conditions_met == 4 else "MEDIUM" if conditions_met == 3 else "LOW"
 
+        inst_name = (idx_cfg.get("name") if idx_cfg else None) or ("SENSEX" if strike >= 70000 else "BANKNIFTY" if strike >= 45000 else "NIFTY")
+
         # SIGNAL DETECTED!
         signal_data = {
             "timestamp_ist": now_time_str,   # #9 — already HH:MM:SS.mmm
             "timestamp_ms": now_ms,
+            "instrument_name": inst_name,
             "side": side,
             "strike": strike,
             "contract_key": key,
@@ -452,32 +489,34 @@ class PressureStrategyEngine:
             "action_taken": "",
         }
 
-        # Step 2: Decide side & actions
-        if self.current_position is None:
-            # First signal -> Enter trade!
+        # Step 2: Decide side & actions for this specific underlying instrument
+        curr_pos = self.current_positions.get(underlying_key)
+
+        if curr_pos is None:
+            # First signal for this instrument -> Enter trade!
             signal_data["action_taken"] = f"ENTERED_{side}"
             self.database.insert_strategy_signal(signal_data)
-            self._enter_position(side, atm_strike, strike_map, now_time_str, now_ms, spot_price, idx_cfg)
+            self._enter_position(side, atm_strike, strike_map, now_time_str, now_ms, spot_price, idx_cfg, underlying_key)
             return signal_data
 
-        current_side = self.current_position["side"]  # 'BUY_CE' or 'BUY_PE'
+        current_side = curr_pos["side"]  # 'BUY_CE' or 'BUY_PE'
         if (current_side == "BUY_CE" and side == "CE") or (current_side == "BUY_PE" and side == "PE"):
-            # Same side signal while already in position -> ignore!
+            # Same side signal while already in position for this instrument -> ignore!
             signal_data["action_taken"] = "IGNORED_SAME_SIDE"
             self.database.insert_strategy_signal(signal_data)
             return signal_data
 
-        # Opposite side signal -> Step 4: Exit current and reverse!
+        # Opposite side signal for this instrument -> Step 4: Exit current and reverse!
         signal_data["action_taken"] = f"REVERSED_TO_{side}"
         self.database.insert_strategy_signal(signal_data)
 
-        # 1. Exit current
-        curr_key = self.current_position["instrument_key"]
+        # 1. Exit current instrument's position
+        curr_key = curr_pos["instrument_key"]
         exit_price = self._find_current_price(curr_key, list(strike_map.values()), is_exit=True)
-        self._exit_position(exit_price, f"REVERSAL_{side}", now_ms, now_time_str)
+        self._exit_position(curr_pos, exit_price, f"REVERSAL_{side}", now_ms, now_time_str, underlying_key)
 
-        # 2. Enter opposite side
-        self._enter_position(side, atm_strike, strike_map, now_time_str, now_ms, spot_price, idx_cfg)
+        # 2. Enter opposite side for this instrument
+        self._enter_position(side, atm_strike, strike_map, now_time_str, now_ms, spot_price, idx_cfg, underlying_key)
         return signal_data
 
     def _enter_position(
@@ -489,6 +528,7 @@ class PressureStrategyEngine:
         timestamp_ms: int,
         spot_price: float = 0.0,
         idx_cfg: dict[str, Any] | None = None,
+        underlying_key: str = "NSE_INDEX|Nifty 50",
     ) -> None:
         if idx_cfg is None:
             idx_cfg = INDEX_CONFIG["NSE_INDEX|Nifty 50"]
@@ -545,6 +585,7 @@ class PressureStrategyEngine:
             "side": f"BUY_{side}",
             "symbol": symbol,
             "instrument_key": key,
+            "underlying_key": underlying_key,
             "strike": target_strike,
             "lot_size": lot_size,
             "entry_time_ist": time_ist,       # #9 — already HH:MM:SS.mmm
@@ -562,7 +603,7 @@ class PressureStrategyEngine:
             "atm_strike": round(atm_strike, 2),
         }
 
-        self.current_position = trade
+        self.current_positions[underlying_key] = trade
         self.database.insert_strategy_trade(trade)
         self._append_csv(trade)
         LOGGER.info(
@@ -572,18 +613,22 @@ class PressureStrategyEngine:
 
     def _exit_position(
         self,
+        pos: dict[str, Any] | None,
         exit_price: float,
         reason: str,
         timestamp_ms: int,
         time_ist: str,
+        underlying_key: str | None = None,
     ) -> None:
-        if not self.current_position:
+        if not pos:
+            pos = self.current_position
+        if not pos:
             return
 
-        pos = self.current_position
         entry_price = float(pos["entry_price"])
+        lot_size = int(pos.get("lot_size", self.lot_size))
         pnl_points = round(exit_price - entry_price, 2)
-        net_pnl = round(pnl_points * self.lot_size, 2)
+        net_pnl = round(pnl_points * lot_size, 2)
 
         pos["exit_time_ist"] = time_ist
         pos["exit_price"] = round(exit_price, 2)
@@ -596,7 +641,15 @@ class PressureStrategyEngine:
         self.database.update_strategy_trade(pos)
         self._append_csv(pos)
         LOGGER.info("CLOSED PAPER TRADE: %s | PnL: %s pts (Rs %s)", pos["trade_id"], pnl_points, net_pnl)
-        self.current_position = None
+
+        # Clear active position slot for this instrument
+        u_key = underlying_key or get_underlying_key_for_trade(pos)
+        if u_key in self.current_positions:
+            self.current_positions[u_key] = None
+        else:
+            for k, p in list(self.current_positions.items()):
+                if p and p.get("trade_id") == pos.get("trade_id"):
+                    self.current_positions[k] = None
 
     def _find_current_price(self, key: str, strikes: list[dict[str, Any]], is_exit: bool = False) -> float:
         for item in strikes:

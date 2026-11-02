@@ -434,14 +434,16 @@ def api_strategy_export_signals() -> Response:
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "Timestamp (IST)", "Timestamp (ms)", "Side", "Strike", "Contract Key",
+        "Timestamp (IST)", "Timestamp (ms)", "Instrument", "Side", "Strike", "Contract Key",
         "LTP", "Prev LTP", "Qty Delta", "Value (Lakhs)", "Day High", "Prev Close",
         "Bid Price", "Ask Price", "Spread %", "OI Change", "Confidence", "Action Taken",
     ])
     for s in signals:
+        inst = s.get("instrument_name") or ("SENSEX" if (s.get("strike") or 0) >= 70000 else "BANKNIFTY" if (s.get("strike") or 0) >= 45000 else "NIFTY")
         writer.writerow([
             s.get("timestamp_ist", ""),
             s.get("timestamp_ms", ""),
+            inst,
             s.get("side", ""),
             s.get("strike", ""),
             s.get("contract_key", ""),

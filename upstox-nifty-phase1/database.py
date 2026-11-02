@@ -82,6 +82,7 @@ class MarketDatabase:
                     side TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     instrument_key TEXT NOT NULL,
+                    underlying_key TEXT,
                     strike REAL NOT NULL,
                     lot_size INTEGER NOT NULL DEFAULT 65,
                     entry_time_ist TEXT NOT NULL,
@@ -102,6 +103,7 @@ class MarketDatabase:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp_ist TEXT NOT NULL,
                     timestamp_ms INTEGER NOT NULL,
+                    instrument_name TEXT,
                     side TEXT NOT NULL,
                     strike REAL NOT NULL,
                     contract_key TEXT NOT NULL,
@@ -124,21 +126,45 @@ class MarketDatabase:
 
             # --- Live migration: add new columns to existing tables if missing ---
             self._add_column_if_missing("strategy_trades", "trade_date", "TEXT")
+            self._add_column_if_missing("strategy_trades", "underlying_key", "TEXT")
             self._add_column_if_missing("strategy_trades", "spot_price", "REAL")
             self._add_column_if_missing("strategy_trades", "atm_strike", "REAL")
+            self._add_column_if_missing("strategy_signals", "instrument_name", "TEXT")
             self._add_column_if_missing("strategy_signals", "bid_price", "REAL")
             self._add_column_if_missing("strategy_signals", "ask_price", "REAL")
             self._add_column_if_missing("strategy_signals", "spread_pct", "REAL")
             self._add_column_if_missing("strategy_signals", "oi_change", "REAL")
             self._add_column_if_missing("strategy_signals", "confidence", "TEXT")
 
-            # Backfill trade_date for any existing trades from their entry_timestamp_ms (IST +330m)
+            # Backfill trade_date and underlying_key for any existing trades
             try:
                 self._connection.execute(
                     """
                     UPDATE strategy_trades
                     SET trade_date = strftime('%Y-%m-%d', datetime(entry_timestamp_ms / 1000, 'unixepoch', '+330 minutes'))
                     WHERE trade_date IS NULL AND entry_timestamp_ms IS NOT NULL;
+                    """
+                )
+                self._connection.execute(
+                    """
+                    UPDATE strategy_trades
+                    SET underlying_key = CASE
+                        WHEN symbol LIKE '%BANKNIFTY%' THEN 'NSE_INDEX|Nifty Bank'
+                        WHEN symbol LIKE '%SENSEX%' THEN 'BSE_INDEX|SENSEX'
+                        ELSE 'NSE_INDEX|Nifty 50'
+                    END
+                    WHERE underlying_key IS NULL;
+                    """
+                )
+                self._connection.execute(
+                    """
+                    UPDATE strategy_signals
+                    SET instrument_name = CASE
+                        WHEN strike >= 70000 THEN 'SENSEX'
+                        WHEN strike >= 45000 THEN 'BANKNIFTY'
+                        ELSE 'NIFTY'
+                    END
+                    WHERE instrument_name IS NULL;
                     """
                 )
                 self._connection.commit()
@@ -382,11 +408,11 @@ class MarketDatabase:
             self._connection.execute(
                 """
                 INSERT OR REPLACE INTO strategy_trades (
-                    trade_id, trade_date, side, symbol, instrument_key, strike,
-                    lot_size, entry_time_ist, entry_price, entry_timestamp_ms,
+                    trade_id, trade_date, side, symbol, instrument_key, underlying_key,
+                    strike, lot_size, entry_time_ist, entry_price, entry_timestamp_ms,
                     exit_time_ist, exit_price, exit_timestamp_ms, exit_reason,
                     pnl_points, net_pnl, status, spot_price, atm_strike
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade["trade_id"],
@@ -394,6 +420,7 @@ class MarketDatabase:
                     trade["side"],
                     trade["symbol"],
                     trade["instrument_key"],
+                    trade.get("underlying_key"),
                     trade["strike"],
                     trade.get("lot_size", 65),
                     trade["entry_time_ist"],
@@ -456,15 +483,16 @@ class MarketDatabase:
             self._connection.execute(
                 """
                 INSERT INTO strategy_signals (
-                    timestamp_ist, timestamp_ms, side, strike,
+                    timestamp_ist, timestamp_ms, instrument_name, side, strike,
                     contract_key, ltp, prev_ltp, qty_delta,
                     val_lakhs, day_high, prev_close, action_taken,
                     bid_price, ask_price, spread_pct, oi_change, confidence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sig["timestamp_ist"],
                     sig["timestamp_ms"],
+                    sig.get("instrument_name"),
                     sig["side"],
                     sig["strike"],
                     sig["contract_key"],
