@@ -5,3 +5,36 @@ Open `.env` and replace:
 - `YOUR_NIFTY_INSTRUMENT_KEY`
 
 Several keys use a comma-separated list:
+
+Please forward the following:
+Price ↑ + OI ↑ = Long Buildup
+Price ↓ + OI ↑ = Short Buildup
+Price ↑ + OI ↓ = Short Covering
+Price ↓ + OI ↓ = Long Unwinding
+
+Strongest OI Conditions (Buyer)
+
+CE Buy
+⭐⭐⭐ PE SB + CE SC → Best, full lots
+⭐⭐ PE SB + CE LB → Normal lots
+⭐⭐ PE LU + CE SC → Quick scalp only
+⭐ Only 1 side confirms → Skip
+
+PE Buy
+⭐⭐⭐ CE SB + PE SC → Best, full lots
+⭐⭐ CE SB + PE LB → Normal lots
+⭐⭐ CE LU + PE SC → Quick scalp only
+⭐ Only 1 side confirms → Skip
+
+Avoid
+❌ Both CE & PE premiums falling
+❌ CE & PE both Short Buildup at ATM (range market)
+❌ Expiry day after 1:30 PM (except ⭐⭐⭐)
+
+Extra confirmation
+✅ OI change at ATM ±1 strike
+✅ Volume spike
+✅ Spot above VWAP (CE) / below VWAP (PE)
+
+
+Please show the Rank (⭐⭐⭐ / ⭐⭐ / ⭐) with each signal on the dashboard with automatic entry alerts, and keep lot size user-defined per rank. 🙏
