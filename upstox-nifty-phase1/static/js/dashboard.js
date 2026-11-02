@@ -1,5 +1,7 @@
 "use strict";
 
+const IST_OFFSET_SEC = 19800; // 5 hours 30 minutes in seconds (IST = UTC + 5:30)
+
 const state = {
     selectedInstrument: "",
     chart: null,
@@ -12,6 +14,12 @@ const state = {
     lastTickTimeSec: 0,
     candles: new Map(),
     ticks: [],
+    latestIndexPrices: {
+        nifty: null,
+        banknifty: null,
+        sensex: null,
+    },
+    tickSnapshots: [],
     eventSource: null,
     activeView: "optionChain",
     optionExpiries: [],
@@ -100,6 +108,7 @@ function mapElements() {
         "strikeRangeSelect",
         "chainAutoRefresh",
         "btnRefreshChain",
+        "btnRefreshChart",
         "chainStatusMsg",
         "optionChainBody",
         // Strategy elements
@@ -185,10 +194,55 @@ function bindEvents() {
     if (elements.instrumentSelect) {
         elements.instrumentSelect.addEventListener("change", async (event) => {
             state.selectedInstrument = event.target.value;
-            elements.selectedInstrument.textContent =
-                state.selectedInstrument || "Waiting for data";
+            if (elements.selectedInstrument) {
+                elements.selectedInstrument.textContent =
+                    state.selectedInstrument || "Waiting for data";
+            }
+
+            // Reset active candle, map, and chart series data to prevent price scale squish/collision
+            state.activeCandle = null;
+            state.lastTickTimeSec = 0;
+            state.candles.clear();
+            if (state.areaSeries) state.areaSeries.setData([]);
+            if (state.candleSeries) state.candleSeries.setData([]);
+            if (state.volumeSeries) state.volumeSeries.setData([]);
+            if (state.tvChart) {
+                state.tvChart.priceScale("right").applyOptions({ autoScale: true });
+            }
+
             await loadCandles();
             refreshVisibleTick();
+
+            if (state.tvChart) {
+                state.tvChart.timeScale().resetTimeScale();
+                state.tvChart.timeScale().fitContent();
+            }
+        });
+    }
+
+    // Refresh & Reset Chart button
+    if (elements.btnRefreshChart) {
+        elements.btnRefreshChart.addEventListener("click", async () => {
+            const icon = elements.btnRefreshChart.querySelector("svg");
+            if (icon) {
+                icon.style.transition = "transform 0.5s ease";
+                icon.style.transform = "rotate(360deg)";
+                setTimeout(() => { icon.style.transform = ""; }, 500);
+            }
+
+            state.activeCandle = null;
+            state.lastTickTimeSec = 0;
+            if (state.tvChart) {
+                state.tvChart.priceScale("right").applyOptions({ autoScale: true });
+            }
+
+            await loadCandles();
+            refreshVisibleTick();
+
+            if (state.tvChart) {
+                state.tvChart.timeScale().resetTimeScale();
+                state.tvChart.timeScale().fitContent();
+            }
         });
     }
 
@@ -257,6 +311,10 @@ function initialiseChart() {
             fontSize: 12,
             fontFamily: "'Inter', system-ui, sans-serif",
         },
+        localization: {
+            locale: "en-IN",
+            dateFormat: "dd MMM yyyy",
+        },
         grid: {
             vertLines: { color: "rgba(148, 163, 184, 0.06)" },
             horzLines: { color: "rgba(148, 163, 184, 0.06)" },
@@ -276,6 +334,7 @@ function initialiseChart() {
         },
         rightPriceScale: {
             borderColor: "rgba(148, 163, 184, 0.15)",
+            autoScale: true,
             scaleMargins: {
                 top: 0.08,
                 bottom: 0.16,
@@ -342,36 +401,60 @@ async function switchTimeframe(tf) {
         btn.classList.toggle("tf-btn--active", btn.getAttribute("data-timeframe") === tf);
     });
 
+    state.activeCandle = null;
+    state.lastTickTimeSec = 0;
+
     if (state.tvChart) {
         state.tvChart.applyOptions({
             timeScale: {
                 secondsVisible: tf === "tick",
             },
         });
+        state.tvChart.priceScale("right").applyOptions({ autoScale: true });
     }
 
     if (tf === "tick") {
-        if (state.candleSeries) state.candleSeries.applyOptions({ visible: false });
-        if (state.volumeSeries) state.volumeSeries.applyOptions({ visible: false });
-        if (state.areaSeries) state.areaSeries.applyOptions({ visible: true });
+        if (state.candleSeries) {
+            state.candleSeries.applyOptions({ visible: false });
+            state.candleSeries.setData([]);
+        }
+        if (state.volumeSeries) {
+            state.volumeSeries.applyOptions({ visible: false });
+            state.volumeSeries.setData([]);
+        }
+        if (state.areaSeries) {
+            state.areaSeries.applyOptions({ visible: true });
+        }
     } else {
-        if (state.areaSeries) state.areaSeries.applyOptions({ visible: false });
-        if (state.candleSeries) state.candleSeries.applyOptions({ visible: true });
-        if (state.volumeSeries) state.volumeSeries.applyOptions({ visible: true });
+        if (state.areaSeries) {
+            state.areaSeries.applyOptions({ visible: false });
+            state.areaSeries.setData([]);
+        }
+        if (state.candleSeries) {
+            state.candleSeries.applyOptions({ visible: true });
+        }
+        if (state.volumeSeries) {
+            state.volumeSeries.applyOptions({ visible: true });
+        }
     }
 
     await loadCandles();
+    if (state.tvChart) {
+        state.tvChart.timeScale().resetTimeScale();
+        state.tvChart.timeScale().fitContent();
+    }
 }
 
 async function loadInitialData() {
     try {
         const [instrumentsResult, ticksResult] = await Promise.all([
             fetchJson("/api/instruments"),
-            fetchJson("/api/ticks?limit=40"),
+            fetchJson("/api/ticks?limit=150"),
         ]);
 
         populateInstrumentSelect(instrumentsResult.instruments || []);
         state.ticks = ticksResult.ticks || [];
+        rebuildTickSnapshots(state.ticks);
         renderTicks();
         refreshVisibleTick();
         await loadCandles();
@@ -413,7 +496,7 @@ async function loadCandles() {
                 const ltp = toNumber(t.ltp);
                 if (ltp === null) continue;
 
-                let sec = Math.floor(tsMs / 1000);
+                let sec = Math.floor(tsMs / 1000) + IST_OFFSET_SEC;
                 if (sec <= lastSec) {
                     sec = lastSec + 1;
                 }
@@ -428,6 +511,7 @@ async function loadCandles() {
             }
             if (elements.chartEmpty) elements.chartEmpty.hidden = cleanPoints.length > 0;
             if (state.tvChart && cleanPoints.length > 0) {
+                state.tvChart.priceScale("right").applyOptions({ autoScale: true });
                 state.tvChart.timeScale().fitContent();
             }
         } catch (err) {
@@ -453,7 +537,7 @@ async function loadCandles() {
 
         for (const candle of result.candles || []) {
             state.candles.set(Number(candle.candle_start_ms), candle);
-            const timeSec = Math.floor(Number(candle.candle_start_ms) / 1000);
+            const timeSec = Math.floor(Number(candle.candle_start_ms) / 1000) + IST_OFFSET_SEC;
             if (timeSec <= lastTimeSec) continue;
             lastTimeSec = timeSec;
 
@@ -480,6 +564,7 @@ async function loadCandles() {
 
         if (elements.chartEmpty) elements.chartEmpty.hidden = candleList.length > 0;
         if (state.tvChart && candleList.length > 0) {
+            state.tvChart.priceScale("right").applyOptions({ autoScale: true });
             state.tvChart.timeScale().fitContent();
         }
 
@@ -547,8 +632,9 @@ function handleTick(tick) {
     }
 
     state.ticks.unshift(tick);
-    state.ticks = state.ticks.slice(0, 40);
+    state.ticks = state.ticks.slice(0, 100);
 
+    updateTickSnapshot(tick);
     renderTicks();
 
     // LIVE MILLISECOND OPTION CHAIN UPDATES
@@ -561,7 +647,7 @@ function handleTick(tick) {
         const ltp = toNumber(tick.ltp);
         if (ltp !== null && state.tvChart) {
             if (state.timeframe === "tick" && state.areaSeries) {
-                const nowSec = Math.floor(Date.now() / 1000);
+                const nowSec = Math.floor(Date.now() / 1000) + IST_OFFSET_SEC;
                 const tSec = Math.max(nowSec, (state.lastTickTimeSec || 0) + 1);
                 state.lastTickTimeSec = tSec;
                 state.areaSeries.update({ time: tSec, value: ltp });
@@ -569,14 +655,16 @@ function handleTick(tick) {
             } else if (state.candleSeries && (state.timeframe === "1m" || state.timeframe === "5m")) {
                 const bucketDurationSec = state.timeframe === "5m" ? 300 : 60;
                 const tsMs = Number(tick.exchange_timestamp_ms || Date.now());
-                const bucketSec = Math.floor(tsMs / (bucketDurationSec * 1000)) * bucketDurationSec;
+                const rawBucketSec = Math.floor(tsMs / (bucketDurationSec * 1000)) * bucketDurationSec;
+                const chartBucketSec = rawBucketSec + IST_OFFSET_SEC;
 
                 let candle = state.activeCandle;
-                if (!candle || candle.time !== bucketSec) {
-                    const existing = state.candles.get(bucketSec * 1000);
+                if (!candle || candle.time !== chartBucketSec || candle.instrumentKey !== instrumentKey) {
+                    const existing = state.candles.get(rawBucketSec * 1000);
                     if (existing) {
                         candle = {
-                            time: bucketSec,
+                            instrumentKey: instrumentKey,
+                            time: chartBucketSec,
                             open: toNumber(existing.open),
                             high: Math.max(toNumber(existing.high), ltp),
                             low: Math.min(toNumber(existing.low), ltp),
@@ -584,7 +672,8 @@ function handleTick(tick) {
                         };
                     } else {
                         candle = {
-                            time: bucketSec,
+                            instrumentKey: instrumentKey,
+                            time: chartBucketSec,
                             open: ltp,
                             high: ltp,
                             low: ltp,
@@ -597,7 +686,13 @@ function handleTick(tick) {
                     candle.close = ltp;
                 }
                 state.activeCandle = candle;
-                state.candleSeries.update(candle);
+                state.candleSeries.update({
+                    time: candle.time,
+                    open: candle.open,
+                    high: candle.high,
+                    low: candle.low,
+                    close: candle.close,
+                });
                 if (elements.chartEmpty) elements.chartEmpty.hidden = true;
             }
         }
@@ -618,7 +713,7 @@ function handleCandle(candle) {
     }
 
     if (state.candleSeries && state.timeframe === "1m") {
-        const timeSec = Math.floor(Number(candle.candle_start_ms) / 1000);
+        const timeSec = Math.floor(Number(candle.candle_start_ms) / 1000) + IST_OFFSET_SEC;
         const open = toNumber(candle.open);
         const high = toNumber(candle.high);
         const low = toNumber(candle.low);
@@ -770,11 +865,55 @@ function orderedCandles() {
     );
 }
 
+function updateTickSnapshot(tick) {
+    const inst = String(tick.instrument_key || "");
+    const ltp = toNumber(tick.ltp);
+    if (ltp === null) return;
+
+    if (inst.includes("Nifty 50")) {
+        state.latestIndexPrices.nifty = ltp;
+    } else if (inst.includes("Bank")) {
+        state.latestIndexPrices.banknifty = ltp;
+    } else if (inst.includes("SENSEX") || inst.includes("Sensex")) {
+        state.latestIndexPrices.sensex = ltp;
+    }
+
+    const tsMs = Number(tick.exchange_timestamp_ms || tick.received_timestamp_ms || Date.now());
+    const sec = Math.floor(tsMs / 1000);
+
+    if (!state.tickSnapshots.length || state.tickSnapshots[0].sec !== sec) {
+        state.tickSnapshots.unshift({
+            sec: sec,
+            timeMs: tsMs,
+            nifty: state.latestIndexPrices.nifty,
+            banknifty: state.latestIndexPrices.banknifty,
+            sensex: state.latestIndexPrices.sensex,
+        });
+        if (state.tickSnapshots.length > 50) {
+            state.tickSnapshots.pop();
+        }
+    } else {
+        const current = state.tickSnapshots[0];
+        current.timeMs = tsMs;
+        if (inst.includes("Nifty 50")) current.nifty = ltp;
+        else if (inst.includes("Bank")) current.banknifty = ltp;
+        else if (inst.includes("SENSEX") || inst.includes("Sensex")) current.sensex = ltp;
+    }
+}
+
+function rebuildTickSnapshots(rawTicksDesc) {
+    state.tickSnapshots = [];
+    const ticksAsc = [...rawTicksDesc].reverse();
+    for (const tick of ticksAsc) {
+        updateTickSnapshot(tick);
+    }
+}
+
 function renderTicks() {
-    if (!state.ticks.length) {
+    if (!state.tickSnapshots || !state.tickSnapshots.length) {
         elements.ticksBody.innerHTML = `
             <tr>
-                <td colspan="7" class="table-empty">
+                <td colspan="4" class="table-empty">
                     No market ticks received yet.
                 </td>
             </tr>
@@ -782,17 +921,20 @@ function renderTicks() {
         return;
     }
 
-    elements.ticksBody.innerHTML = state.ticks.map((tick) => `
+    elements.ticksBody.innerHTML = state.tickSnapshots.map((snap) => `
         <tr>
-            <td>${escapeHtml(formatTime(tick.exchange_timestamp_ms))}</td>
-            <td title="${escapeHtml(String(tick.instrument_key || ""))}">
-                ${escapeHtml(shortInstrument(tick.instrument_key))}
+            <td style="font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.8rem;">
+                ${escapeHtml(formatTime(snap.timeMs))}
             </td>
-            <td>${escapeHtml(formatNumber(tick.ltp))}</td>
-            <td>${escapeHtml(formatNumber(tick.bid_price))}</td>
-            <td>${escapeHtml(formatNumber(tick.ask_price))}</td>
-            <td>${escapeHtml(formatNumber(tick.volume, 0))}</td>
-            <td>${escapeHtml(formatNumber(tick.open_interest, 0))}</td>
+            <td style="font-variant-numeric: tabular-nums; font-weight: 600; color: #53e0c1; font-size: 0.85rem;">
+                ${snap.nifty !== null && snap.nifty !== undefined ? '₹' + escapeHtml(formatNumber(snap.nifty)) : '—'}
+            </td>
+            <td style="font-variant-numeric: tabular-nums; font-weight: 600; color: #60a5fa; font-size: 0.85rem;">
+                ${snap.banknifty !== null && snap.banknifty !== undefined ? '₹' + escapeHtml(formatNumber(snap.banknifty)) : '—'}
+            </td>
+            <td style="font-variant-numeric: tabular-nums; font-weight: 600; color: #f59e0b; font-size: 0.85rem;">
+                ${snap.sensex !== null && snap.sensex !== undefined ? '₹' + escapeHtml(formatNumber(snap.sensex)) : '—'}
+            </td>
         </tr>
     `).join("");
 }

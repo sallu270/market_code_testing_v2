@@ -428,6 +428,13 @@
                     <button type="button" class="tf-btn" data-timeframe="5m">5m</button>
                 </div>
 
+                <button id="btnRefreshChart" class="button button--secondary" type="button" title="Refresh &amp; Reset Chart Scale" style="padding: 6px 12px; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 6px; border-radius: 8px;">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                    </svg>
+                    <span>Refresh</span>
+                </button>
+
                 <label class="field field--compact" style="min-width: 220px; margin: 0;">
                     <span style="font-size: 0.72rem; color: var(--muted);">Instrument</span>
                     <select id="instrumentSelect" aria-label="Select instrument">
@@ -525,27 +532,24 @@
         <div class="panel__heading">
             <div>
                 <p class="eyebrow">RAW MARKET EVENTS</p>
-                <h2>Latest ticks</h2>
+                <h2>Live Index Prices (Multi-Instrument Feed)</h2>
             </div>
-            <span class="table-note">Newest tick first</span>
+            <span class="table-note">Newest second first</span>
         </div>
 
         <div class="table-wrap">
             <table>
                 <thead>
                 <tr>
-                    <th scope="col">Time</th>
-                    <th scope="col">Instrument</th>
-                    <th scope="col">LTP</th>
-                    <th scope="col">Bid</th>
-                    <th scope="col">Ask</th>
-                    <th scope="col">Volume</th>
-                    <th scope="col">Open interest</th>
+                    <th scope="col" style="min-width: 130px;">Time (IST)</th>
+                    <th scope="col" style="color: var(--primary); font-weight: 700;">Nifty 50</th>
+                    <th scope="col" style="color: #60a5fa; font-weight: 700;">Bank Nifty</th>
+                    <th scope="col" style="color: #f59e0b; font-weight: 700;">Sensex</th>
                 </tr>
                 </thead>
                 <tbody id="ticksBody">
                 <tr>
-                    <td colspan="7" class="table-empty">
+                    <td colspan="4" class="table-empty">
                         No market ticks received yet.
                     </td>
                 </tr>
