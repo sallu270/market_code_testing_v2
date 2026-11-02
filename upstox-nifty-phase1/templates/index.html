@@ -119,6 +119,15 @@
             <div class="chain-controls-bar">
                 <div class="chain-controls-group">
                     <label class="field field--compact">
+                        <span>Underlying Index</span>
+                        <select id="optionIndexSelect" aria-label="Select underlying index">
+                            <option value="NSE_INDEX|Nifty 50" selected>NIFTY 50</option>
+                            <option value="NSE_INDEX|Nifty Bank">BANKNIFTY</option>
+                            <option value="BSE_INDEX|SENSEX">SENSEX</option>
+                        </select>
+                    </label>
+
+                    <label class="field field--compact">
                         <span>Expiry Date</span>
                         <select id="optionExpirySelect" aria-label="Select expiry date">
                             <option value="">Loading expiries...</option>
@@ -268,8 +277,16 @@
                         Save Rules
                     </button>
 
-                    <a id="btnExportCsv" href="/api/strategy/export" class="button button--secondary" download="paper_trades.csv">
-                        📥 Download CSV
+                    <a id="btnExportCsv" href="/api/strategy/export" class="button button--secondary" download="paper_trades.csv" title="Download trades summary CSV">
+                        📥 Trades CSV
+                    </a>
+
+                    <a id="btnExportSignalsCsv" href="/api/strategy/export-signals" class="button button--secondary" download="strategy_signals.csv" title="Download signals event log CSV">
+                        📥 Signals CSV
+                    </a>
+
+                    <a id="btnExportTicksCsv" href="/api/strategy/export-ticks" class="button button--secondary" download="today_ticks.csv" title="Download raw market ticks CSV">
+                        📥 Ticks CSV
                     </a>
 
                     <span id="stratConfigStatus" class="chain-status-text">Paper engine running</span>
@@ -292,6 +309,7 @@
                     <thead>
                         <tr>
                             <th scope="col" style="text-align: left;">Trade ID</th>
+                            <th scope="col" style="text-align: center;">Date</th>
                             <th scope="col" style="text-align: center;">Side</th>
                             <th scope="col" style="text-align: left;">Contract Symbol</th>
                             <th scope="col" style="text-align: right;">Strike</th>
@@ -304,11 +322,13 @@
                             <th scope="col" style="text-align: right;">P&L (Pts)</th>
                             <th scope="col" style="text-align: right;">Net P&L (₹)</th>
                             <th scope="col" style="text-align: center;">Status</th>
+                            <th scope="col" style="text-align: right;">Spot</th>
+                            <th scope="col" style="text-align: right;">ATM</th>
                         </tr>
                     </thead>
                     <tbody id="stratTradesBody">
                         <tr>
-                            <td colspan="13" class="table-empty">
+                            <td colspan="16" class="table-empty">
                                 No paper trades triggered yet. Watching 1% ITM contracts...
                             </td>
                         </tr>
@@ -339,12 +359,16 @@
                             <th scope="col" style="text-align: right;">Value (Lakhs)</th>
                             <th scope="col" style="text-align: right;">Day High</th>
                             <th scope="col" style="text-align: right;">Prev Close</th>
+                            <th scope="col" style="text-align: right;">Bid / Ask</th>
+                            <th scope="col" style="text-align: right;">Spread %</th>
+                            <th scope="col" style="text-align: right;">OI Chg</th>
+                            <th scope="col" style="text-align: center;">Confidence</th>
                             <th scope="col" style="text-align: center;">Action Taken</th>
                         </tr>
                     </thead>
                     <tbody id="stratSignalsBody">
                         <tr>
-                            <td colspan="9" class="table-empty">
+                            <td colspan="13" class="table-empty">
                                 No signals recorded yet.
                             </td>
                         </tr>

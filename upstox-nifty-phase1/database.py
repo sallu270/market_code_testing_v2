@@ -78,6 +78,7 @@ class MarketDatabase:
                 CREATE TABLE IF NOT EXISTS strategy_trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     trade_id TEXT UNIQUE NOT NULL,
+                    trade_date TEXT,
                     side TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     instrument_key TEXT NOT NULL,
@@ -92,7 +93,9 @@ class MarketDatabase:
                     exit_reason TEXT,
                     pnl_points REAL,
                     net_pnl REAL,
-                    status TEXT NOT NULL
+                    status TEXT NOT NULL,
+                    spot_price REAL,
+                    atm_strike REAL
                 );
 
                 CREATE TABLE IF NOT EXISTS strategy_signals (
@@ -108,11 +111,57 @@ class MarketDatabase:
                     val_lakhs REAL,
                     day_high REAL,
                     prev_close REAL,
-                    action_taken TEXT NOT NULL
+                    action_taken TEXT NOT NULL,
+                    bid_price REAL,
+                    ask_price REAL,
+                    spread_pct REAL,
+                    oi_change REAL,
+                    confidence TEXT
                 );
                 """
             )
             self._connection.commit()
+
+            # --- Live migration: add new columns to existing tables if missing ---
+            self._add_column_if_missing("strategy_trades", "trade_date", "TEXT")
+            self._add_column_if_missing("strategy_trades", "spot_price", "REAL")
+            self._add_column_if_missing("strategy_trades", "atm_strike", "REAL")
+            self._add_column_if_missing("strategy_signals", "bid_price", "REAL")
+            self._add_column_if_missing("strategy_signals", "ask_price", "REAL")
+            self._add_column_if_missing("strategy_signals", "spread_pct", "REAL")
+            self._add_column_if_missing("strategy_signals", "oi_change", "REAL")
+            self._add_column_if_missing("strategy_signals", "confidence", "TEXT")
+
+            # Backfill trade_date for any existing trades from their entry_timestamp_ms (IST +330m)
+            try:
+                self._connection.execute(
+                    """
+                    UPDATE strategy_trades
+                    SET trade_date = strftime('%Y-%m-%d', datetime(entry_timestamp_ms / 1000, 'unixepoch', '+330 minutes'))
+                    WHERE trade_date IS NULL AND entry_timestamp_ms IS NOT NULL;
+                    """
+                )
+                self._connection.commit()
+            except Exception:
+                pass
+
+    def _add_column_if_missing(self, table: str, column: str, col_type: str) -> None:
+        """ALTER TABLE … ADD COLUMN when the column does not yet exist (idempotent)."""
+        try:
+            existing = {
+                row[1]
+                for row in self._connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if column not in existing:
+                self._connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+                )
+                self._connection.commit()
+        except Exception as exc:
+            import logging
+            logging.getLogger("database").warning(
+                "Could not add column %s.%s: %s", table, column, exc
+            )
 
     def insert_tick(self, tick: dict[str, Any]) -> None:
         with self._lock:
@@ -333,14 +382,15 @@ class MarketDatabase:
             self._connection.execute(
                 """
                 INSERT OR REPLACE INTO strategy_trades (
-                    trade_id, side, symbol, instrument_key, strike,
+                    trade_id, trade_date, side, symbol, instrument_key, strike,
                     lot_size, entry_time_ist, entry_price, entry_timestamp_ms,
                     exit_time_ist, exit_price, exit_timestamp_ms, exit_reason,
-                    pnl_points, net_pnl, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    pnl_points, net_pnl, status, spot_price, atm_strike
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade["trade_id"],
+                    trade.get("trade_date"),
                     trade["side"],
                     trade["symbol"],
                     trade["instrument_key"],
@@ -356,6 +406,8 @@ class MarketDatabase:
                     trade.get("pnl_points"),
                     trade.get("net_pnl"),
                     trade["status"],
+                    trade.get("spot_price"),
+                    trade.get("atm_strike"),
                 ),
             )
             self._connection.commit()
@@ -406,8 +458,9 @@ class MarketDatabase:
                 INSERT INTO strategy_signals (
                     timestamp_ist, timestamp_ms, side, strike,
                     contract_key, ltp, prev_ltp, qty_delta,
-                    val_lakhs, day_high, prev_close, action_taken
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    val_lakhs, day_high, prev_close, action_taken,
+                    bid_price, ask_price, spread_pct, oi_change, confidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sig["timestamp_ist"],
@@ -422,6 +475,11 @@ class MarketDatabase:
                     sig.get("day_high"),
                     sig.get("prev_close"),
                     sig["action_taken"],
+                    sig.get("bid_price"),
+                    sig.get("ask_price"),
+                    sig.get("spread_pct"),
+                    sig.get("oi_change"),
+                    sig.get("confidence"),
                 ),
             )
             self._connection.commit()

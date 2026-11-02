@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import atexit
+import csv
+import io
 import json
 import logging
 import queue
@@ -8,10 +10,12 @@ import signal
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from typing import Any
 
 from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from candle_builder import OneMinuteCandleBuilder
@@ -105,6 +109,83 @@ housekeeping_thread = threading.Thread(
     daemon=True,
 )
 housekeeping_thread.start()
+
+def fetch_option_chain_data(
+    instrument_key: str, expiry_date: str = ""
+) -> tuple[int, Any, float | None, list[dict[str, Any]], str]:
+    if not settings.access_token:
+        return 400, "UPSTOX_ACCESS_TOKEN is missing", None, [], ""
+
+    encoded_key = urllib.parse.quote(instrument_key, safe="|")
+    if not expiry_date:
+        try:
+            exp_url = f"https://api.upstox.com/v2/option/contract?instrument_key={encoded_key}"
+            status, exp_payload = _fetch_upstox_json(exp_url, settings.access_token)
+            if status == 200 and isinstance(exp_payload, dict):
+                contracts = exp_payload.get("data") or []
+                expiries = sorted(list({c["expiry"] for c in contracts if c.get("expiry")}))
+                if expiries:
+                    expiry_date = expiries[0]
+        except Exception:
+            pass
+
+    if not expiry_date:
+        return 400, "expiry_date is required", None, [], ""
+
+    try:
+        url = f"https://api.upstox.com/v2/option/chain?instrument_key={encoded_key}&expiry_date={expiry_date}"
+        status, payload = _fetch_upstox_json(url, settings.access_token)
+        if status != 200 or not isinstance(payload, dict):
+            return status, payload, None, [], expiry_date
+
+        data = payload.get("data") or []
+        spot_price = None
+        for item in data:
+            if item.get("underlying_spot_price"):
+                spot_price = item.get("underlying_spot_price")
+                break
+
+        return status, payload, spot_price, data, expiry_date
+    except Exception as exc:
+        return 500, str(exc), None, [], expiry_date
+
+def strategy_background_worker() -> None:
+    """Automated background worker that evaluates option chain and pre-warms history without UI dependency."""
+    LOGGER.info("Strategy automated background worker started.")
+    time.sleep(2)
+    # Pre-warm all subscribed indices at startup
+    if settings.configured and settings.access_token:
+        for inst_key in settings.instrument_keys:
+            try:
+                status, _, spot, strikes, _ = fetch_option_chain_data(inst_key)
+                if status == 200 and strikes:
+                    strategy_engine._warmup_strikes(strikes)
+                    LOGGER.info("Pre-warmed %s strikes for %s", len(strikes), inst_key)
+            except Exception as exc:
+                LOGGER.debug("Pre-warm failed for %s: %s", inst_key, exc)
+
+    while True:
+        try:
+            now_dt = datetime.now(IST)
+            now_time = now_dt.strftime("%H:%M:%S")
+            # Run between 09:14:00 (pre-warm) and 15:15:05 IST
+            if "09:14:00" <= now_time <= "15:15:05" and strategy_engine.enabled and settings.access_token:
+                for inst_key in settings.instrument_keys:
+                    status, _, spot_price, data, _ = fetch_option_chain_data(inst_key)
+                    if status == 200 and spot_price and data:
+                        sig = strategy_engine.process_option_chain_snapshot(spot_price, data, inst_key)
+                        if sig:
+                            publish("strategy_signal", sig)
+        except Exception:
+            LOGGER.exception("Error in strategy background worker loop")
+        time.sleep(1.0)
+
+strategy_worker_thread = threading.Thread(
+    target=strategy_background_worker,
+    name="strategy-background-worker",
+    daemon=True,
+)
+strategy_worker_thread.start()
 
 if settings.configured:
     feed.start()
@@ -250,8 +331,10 @@ def _fetch_upstox_json(url: str, token: str) -> tuple[int, dict | str]:
 def api_option_expiries() -> Response:
     if not settings.access_token:
         return jsonify({"error": "UPSTOX_ACCESS_TOKEN is missing"}), 400
+    # #2 — support dynamic instrument_key query param (default: NIFTY 50)
+    instrument_key = request.args.get("instrument_key", "NSE_INDEX|Nifty 50").strip()
     try:
-        url = "https://api.upstox.com/v2/option/contract?instrument_key=NSE_INDEX|Nifty%2050"
+        url = f"https://api.upstox.com/v2/option/contract?instrument_key={urllib.parse.quote(instrument_key, safe='|')}"
         status, payload = _fetch_upstox_json(url, settings.access_token)
         if status != 200 or not isinstance(payload, dict):
             return jsonify({"error": f"Upstox API error: {status}", "detail": payload}), status
@@ -267,49 +350,24 @@ def api_option_chain() -> Response:
     if not settings.access_token:
         return jsonify({"error": "UPSTOX_ACCESS_TOKEN is missing"}), 400
 
+    instrument_key = request.args.get("instrument_key", "NSE_INDEX|Nifty 50").strip()
     expiry_date = request.args.get("expiry_date", "").strip()
-    if not expiry_date:
-        try:
-            exp_url = "https://api.upstox.com/v2/option/contract?instrument_key=NSE_INDEX|Nifty%2050"
-            status, exp_payload = _fetch_upstox_json(exp_url, settings.access_token)
-            if status == 200 and isinstance(exp_payload, dict):
-                contracts = exp_payload.get("data") or []
-                expiries = sorted(list({c["expiry"] for c in contracts if c.get("expiry")}))
-                if expiries:
-                    expiry_date = expiries[0]
-        except Exception:
-            pass
 
-    if not expiry_date:
-        return jsonify({"error": "expiry_date is required"}), 400
+    status, payload, spot_price, data, resolved_expiry = fetch_option_chain_data(instrument_key, expiry_date)
+    if status != 200:
+        return jsonify({"error": f"Upstox API error: {status}", "detail": payload}), status
 
-    try:
-        url = f"https://api.upstox.com/v2/option/chain?instrument_key=NSE_INDEX|Nifty%2050&expiry_date={expiry_date}"
-        status, payload = _fetch_upstox_json(url, settings.access_token)
-        if status != 200 or not isinstance(payload, dict):
-            return jsonify({"error": f"Upstox API error: {status}", "detail": payload}), status
+    if spot_price and data and strategy_engine.enabled:
+        sig = strategy_engine.process_option_chain_snapshot(spot_price, data, instrument_key)
+        if sig:
+            publish("strategy_signal", sig)
 
-        data = payload.get("data") or []
-        spot_price = None
-        for item in data:
-            if item.get("underlying_spot_price"):
-                spot_price = item.get("underlying_spot_price")
-                break
-
-        if spot_price and data and strategy_engine.enabled:
-            sig = strategy_engine.process_option_chain_snapshot(spot_price, data)
-            if sig:
-                publish("strategy_signal", sig)
-
-        return jsonify({
-            "status": "success",
-            "expiry_date": expiry_date,
-            "spot_price": spot_price,
-            "strikes": data,
-        })
-    except Exception as exc:
-        LOGGER.exception("Failed to fetch option chain")
-        return jsonify({"error": str(exc)}), 500
+    return jsonify({
+        "status": "success",
+        "expiry_date": resolved_expiry,
+        "spot_price": spot_price,
+        "strikes": data,
+    })
 
 @app.get("/api/strategy/status")
 def api_strategy_status() -> Response:
@@ -334,15 +392,111 @@ def api_strategy_signals() -> Response:
     return jsonify({"signals": signals})
 
 @app.get("/api/strategy/export")
-def api_strategy_export():
-    if strategy_engine.csv_path.exists():
-        return send_file(
-            strategy_engine.csv_path,
-            as_attachment=True,
-            download_name="paper_trades.csv",
-            mimetype="text/csv",
-        )
-    return jsonify({"error": "No trades CSV generated yet"}), 404
+def api_strategy_export() -> Response:
+    trades = database.get_strategy_trades(limit=1000)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Trade ID", "Trade Date", "Side", "Symbol", "Strike", "Lot Size",
+        "Entry Time (IST)", "Entry Price", "Exit Time (IST)", "Exit Price",
+        "Exit Reason", "P&L Points", "Net P&L (INR)", "Status",
+        "Spot at Entry", "ATM at Entry",
+    ])
+    for t in trades:
+        writer.writerow([
+            t.get("trade_id", ""),
+            t.get("trade_date", ""),
+            t.get("side", ""),
+            t.get("symbol", ""),
+            t.get("strike", ""),
+            t.get("lot_size", 65),
+            t.get("entry_time_ist", ""),
+            t.get("entry_price", ""),
+            t.get("exit_time_ist", ""),
+            t.get("exit_price", ""),
+            t.get("exit_reason", ""),
+            t.get("pnl_points", ""),
+            t.get("net_pnl", ""),
+            t.get("status", ""),
+            t.get("spot_price", ""),
+            t.get("atm_strike", ""),
+        ])
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=paper_trades.csv"},
+    )
+
+@app.get("/api/strategy/export-signals")
+def api_strategy_export_signals() -> Response:
+    signals = database.get_strategy_signals(limit=2000)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Timestamp (IST)", "Timestamp (ms)", "Side", "Strike", "Contract Key",
+        "LTP", "Prev LTP", "Qty Delta", "Value (Lakhs)", "Day High", "Prev Close",
+        "Bid Price", "Ask Price", "Spread %", "OI Change", "Confidence", "Action Taken",
+    ])
+    for s in signals:
+        writer.writerow([
+            s.get("timestamp_ist", ""),
+            s.get("timestamp_ms", ""),
+            s.get("side", ""),
+            s.get("strike", ""),
+            s.get("contract_key", ""),
+            s.get("ltp", ""),
+            s.get("prev_ltp", ""),
+            s.get("qty_delta", ""),
+            s.get("val_lakhs", ""),
+            s.get("day_high", ""),
+            s.get("prev_close", ""),
+            s.get("bid_price", ""),
+            s.get("ask_price", ""),
+            s.get("spread_pct", ""),
+            s.get("oi_change", ""),
+            s.get("confidence", ""),
+            s.get("action_taken", ""),
+        ])
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=strategy_signals.csv"},
+    )
+
+@app.get("/api/strategy/export-ticks")
+def api_strategy_export_ticks() -> Response:
+    limit = request.args.get("limit", default=5000, type=int)
+    ticks = database.latest_ticks(limit=limit)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Instrument Key", "Exchange Time (ms)", "Received Time (ms)",
+        "LTP", "Last Qty", "Avg Price", "Volume", "OI",
+        "Bid Price", "Bid Qty", "Ask Price", "Ask Qty",
+    ])
+    for t in ticks:
+        writer.writerow([
+            t.get("instrument_key", ""),
+            t.get("exchange_timestamp_ms", ""),
+            t.get("received_timestamp_ms", ""),
+            t.get("ltp", ""),
+            t.get("last_quantity", ""),
+            t.get("average_price", ""),
+            t.get("volume", ""),
+            t.get("open_interest", ""),
+            t.get("bid_price", ""),
+            t.get("bid_quantity", ""),
+            t.get("ask_price", ""),
+            t.get("ask_quantity", ""),
+        ])
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=today_ticks.csv"},
+    )
 
 @app.get("/api/stream")
 def api_stream() -> Response:

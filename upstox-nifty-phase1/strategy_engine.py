@@ -4,7 +4,7 @@ import csv
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -13,6 +13,33 @@ from database import MarketDatabase
 
 LOGGER = logging.getLogger("strategy_engine")
 IST = ZoneInfo("Asia/Kolkata")
+
+# --- Multi-index configuration ---
+# key  : Upstox instrument_key for the underlying
+# step : strike spacing in points
+# itm  : number of steps ITM from ATM for entry
+# lot  : lot size
+# name : label used in symbol string
+INDEX_CONFIG: dict[str, dict[str, Any]] = {
+    "NSE_INDEX|Nifty 50": {
+        "step": 50.0,
+        "itm_steps": 2,
+        "lot": 65,
+        "name": "NIFTY",
+    },
+    "NSE_INDEX|Nifty Bank": {
+        "step": 100.0,
+        "itm_steps": 2,
+        "lot": 15,
+        "name": "BANKNIFTY",
+    },
+    "BSE_INDEX|SENSEX": {
+        "step": 100.0,
+        "itm_steps": 2,
+        "lot": 10,
+        "name": "SENSEX",
+    },
+}
 
 
 class PressureStrategyEngine:
@@ -37,14 +64,17 @@ class PressureStrategyEngine:
         self.lot_size: int = 65
 
         # Contract tracking state:
-        # key -> {"volume": float, "ltp": float, "day_high": float, "prev_close": float}
+        # key -> {"volume": float, "ltp": float, "day_high": float, "prev_close": float,
+        #          "last_signaled_vol": float}
         self.contract_history: dict[str, dict[str, float]] = {}
 
         # Position tracking
         self.current_position: dict[str, Any] | None = None
         self._trade_counter: int = 1
+        self._eod_timer: threading.Timer | None = None
         self._init_csv()
         self._resume_open_position()
+        self._schedule_eod_squareoff()
 
     def _init_csv(self) -> None:
         try:
@@ -52,10 +82,11 @@ class PressureStrategyEngine:
                 with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow([
-                        "Trade ID", "Side", "Symbol", "Strike", "Lot Size",
+                        "Trade ID", "Date", "Side", "Symbol", "Strike", "Lot Size",
                         "Entry Time (IST)", "Entry Price",
                         "Exit Time (IST)", "Exit Price", "Exit Reason",
-                        "P&L Points", "Net P&L (INR)", "Status"
+                        "P&L Points", "Net P&L (INR)", "Status",
+                        "Spot at Entry", "ATM at Entry",
                     ])
         except Exception as exc:
             LOGGER.error("Failed to init paper_trades.csv: %s", exc)
@@ -72,6 +103,53 @@ class PressureStrategyEngine:
                     break
         except Exception as exc:
             LOGGER.error("Failed to resume open position: %s", exc)
+
+    # --- #5 Background EOD Square-off at 15:15:00 IST sharp ---
+    def _schedule_eod_squareoff(self) -> None:
+        """Schedule a background Timer to fire at exactly 15:15:00 IST."""
+        try:
+            now = datetime.now(IST)
+            target = now.replace(hour=15, minute=15, second=0, microsecond=0)
+            if now >= target:
+                # Already past 15:15 today — schedule for tomorrow (no-op for trading)
+                target += timedelta(days=1)
+            delay = (target - now).total_seconds()
+            if self._eod_timer is not None:
+                self._eod_timer.cancel()
+            self._eod_timer = threading.Timer(delay, self._force_eod_squareoff)
+            self._eod_timer.daemon = True
+            self._eod_timer.name = "eod-squareoff-timer"
+            self._eod_timer.start()
+            LOGGER.info("EOD square-off timer set: fires in %.1f seconds (at 15:15:00 IST)", delay)
+        except Exception as exc:
+            LOGGER.error("Failed to schedule EOD square-off timer: %s", exc)
+
+    def _force_eod_squareoff(self) -> None:
+        """Called by the background Timer at 15:15:00 IST to force-close any open position."""
+        with self._lock:
+            if self.current_position is not None:
+                now_dt = datetime.now(IST)
+                now_ms = int(time.time() * 1000)
+                # #9 millisecond timestamp
+                time_ist = now_dt.strftime("%H:%M:%S.%f")[:-3]
+                LOGGER.info("EOD Timer fired at %s — forcing square-off.", time_ist)
+                # Use last known LTP as fallback exit price (bid fallback)
+                key = self.current_position.get("instrument_key", "")
+                hist = self.contract_history.get(key, {})
+                exit_price = float(hist.get("ltp", 0.0))
+                if exit_price > 0:
+                    # Simulate bid = ltp * 0.999
+                    exit_price = round(exit_price * 0.999, 2)
+                else:
+                    exit_price = float(self.current_position.get("entry_price", 0.0))
+                self._exit_position(
+                    exit_price=exit_price,
+                    reason="EOD_1515",
+                    timestamp_ms=now_ms,
+                    time_ist=time_ist,
+                )
+            else:
+                LOGGER.info("EOD Timer fired at 15:15 — no open position to square off.")
 
     def get_config(self) -> dict[str, Any]:
         with self._lock:
@@ -112,19 +190,53 @@ class PressureStrategyEngine:
     def get_status(self) -> dict[str, Any]:
         with self._lock:
             trades = self.database.get_strategy_trades(limit=200)
-            closed_trades = [t for t in trades if t.get("status") == "CLOSED"]
-            total_pnl = sum(float(t.get("net_pnl") or 0.0) for t in closed_trades)
-            win_trades = sum(1 for t in closed_trades if float(t.get("net_pnl") or 0.0) > 0)
-            loss_trades = sum(1 for t in closed_trades if float(t.get("net_pnl") or 0.0) < 0)
+            now_ist = datetime.now(IST)
+            today_str = now_ist.strftime("%Y-%m-%d")
+            today_start_ms = int(datetime(now_ist.year, now_ist.month, now_ist.day, tzinfo=IST).timestamp() * 1000)
+
+            # --- TODAY'S TRADES & P&L ---
+            today_trades = [
+                t for t in trades
+                if t.get("trade_date") == today_str or (t.get("entry_timestamp_ms") or 0) >= today_start_ms
+            ]
+            today_closed = [t for t in today_trades if t.get("status") == "CLOSED"]
+            today_pnl = sum(float(t.get("net_pnl") or 0.0) for t in today_closed)
+            today_pnl_pts = sum(float(t.get("pnl_points") or 0.0) for t in today_closed)
+            today_wins = sum(1 for t in today_closed if float(t.get("net_pnl") or 0.0) > 0)
+            today_losses = sum(1 for t in today_closed if float(t.get("net_pnl") or 0.0) < 0)
+
+            # --- LIFETIME TRADES & P&L ---
+            all_closed = [t for t in trades if t.get("status") == "CLOSED"]
+            lifetime_pnl = sum(float(t.get("net_pnl") or 0.0) for t in all_closed)
+            lifetime_pnl_pts = sum(float(t.get("pnl_points") or 0.0) for t in all_closed)
+            lifetime_wins = sum(1 for t in all_closed if float(t.get("net_pnl") or 0.0) > 0)
+            lifetime_losses = sum(1 for t in all_closed if float(t.get("net_pnl") or 0.0) < 0)
 
             return {
                 "enabled": self.enabled,
                 "current_position": self.current_position,
-                "total_trades": len(trades),
-                "closed_trades": len(closed_trades),
-                "win_trades": win_trades,
-                "loss_trades": loss_trades,
-                "net_pnl_inr": round(total_pnl, 2),
+                "today_date": today_str,
+                # Today metrics (what "TRADES MADE TODAY" and "TODAY P&L" should show)
+                "today_trades": len(today_trades),
+                "today_closed_trades": len(today_closed),
+                "today_win_trades": today_wins,
+                "today_loss_trades": today_losses,
+                "today_net_pnl_inr": round(today_pnl, 2),
+                "today_pnl_points": round(today_pnl_pts, 2),
+                # Lifetime metrics
+                "lifetime_trades": len(trades),
+                "lifetime_closed_trades": len(all_closed),
+                "lifetime_win_trades": lifetime_wins,
+                "lifetime_loss_trades": lifetime_losses,
+                "lifetime_net_pnl_inr": round(lifetime_pnl, 2),
+                "lifetime_pnl_points": round(lifetime_pnl_pts, 2),
+                # Compatibility fields (now mapped directly to TODAY)
+                "total_trades": len(today_trades),
+                "closed_trades": len(today_closed),
+                "win_trades": today_wins,
+                "loss_trades": today_losses,
+                "net_pnl_inr": round(today_pnl, 2),
+                "pnl_points_total": round(today_pnl_pts, 2),
                 "config": self.get_config(),
                 "csv_path": str(self.csv_path),
             }
@@ -132,33 +244,42 @@ class PressureStrategyEngine:
     def process_option_chain_snapshot(
         self,
         spot_price: float | None,
-        strikes: list[dict[str, Any]]
+        strikes: list[dict[str, Any]],
+        instrument_key: str = "NSE_INDEX|Nifty 50",
     ) -> dict[str, Any] | None:
         if not self.enabled or not spot_price or not strikes:
             return None
 
+        # Resolve per-index config
+        idx_cfg = INDEX_CONFIG.get(instrument_key, INDEX_CONFIG["NSE_INDEX|Nifty 50"])
+        step = idx_cfg["step"]
+
         with self._lock:
             now_dt = datetime.now(IST)
-            now_time_str = now_dt.strftime("%H:%M:%S")
+            # #9 — millisecond timestamp in all time strings
+            now_time_str = now_dt.strftime("%H:%M:%S.%f")[:-3]
+            now_time_hms = now_dt.strftime("%H:%M:%S")  # for comparisons only
             now_ms = int(time.time() * 1000)
 
-            # EOD Square-off at 15:15
-            if now_time_str >= self.end_time:
+            # EOD square-off is handled by the background Timer (_force_eod_squareoff).
+            # This poll-based check is a safety net only.
+            if now_time_hms >= self.end_time:
                 if self.current_position is not None:
-                    LOGGER.info("15:15 EOD Square-off triggered.")
+                    LOGGER.info("15:15 EOD safety-net square-off triggered via poll.")
                     self._exit_position(
                         exit_price=self._find_current_price(self.current_position["instrument_key"], strikes, is_exit=True),
                         reason="EOD_1515",
                         timestamp_ms=now_ms,
-                        time_ist=now_time_str
+                        time_ist=now_time_str,
                     )
                 return None
 
-            # Skip before 09:15
-            if now_time_str < self.start_time:
+            # Skip before 09:15, but pre-warm contract baseline so 09:15:00.xxx ticks can trigger immediately
+            if now_time_hms < self.start_time:
+                self._warmup_strikes(strikes)
                 return None
 
-            atm_strike = round(spot_price / 50.0) * 50.0
+            atm_strike = round(spot_price / step) * step
             one_percent = spot_price * 0.01
 
             # Build fast lookup map: strike -> item
@@ -175,7 +296,7 @@ class PressureStrategyEngine:
                 if strike < spot_price and (spot_price - strike) <= one_percent:
                     call_opt = item.get("call_options")
                     if call_opt:
-                        sig = self._evaluate_contract(call_opt, "CE", strike, spot_price, atm_strike, strike_map, now_time_str, now_ms)
+                        sig = self._evaluate_contract(call_opt, "CE", strike, spot_price, atm_strike, strike_map, now_time_str, now_ms, idx_cfg)
                         if sig:
                             return sig
 
@@ -183,11 +304,32 @@ class PressureStrategyEngine:
                 if strike > spot_price and (strike - spot_price) <= one_percent:
                     put_opt = item.get("put_options")
                     if put_opt:
-                        sig = self._evaluate_contract(put_opt, "PE", strike, spot_price, atm_strike, strike_map, now_time_str, now_ms)
+                        sig = self._evaluate_contract(put_opt, "PE", strike, spot_price, atm_strike, strike_map, now_time_str, now_ms, idx_cfg)
                         if sig:
                             return sig
 
             return None
+
+    def _warmup_strikes(self, strikes: list[dict[str, Any]]) -> None:
+        """Seed contract history baseline before market open so 09:15:00.xxx ticks can trigger immediately."""
+        for item in strikes:
+            for opt_key in ("call_options", "put_options"):
+                opt = item.get(opt_key) or {}
+                key = str(opt.get("instrument_key") or "")
+                mkt = opt.get("market_data") or {}
+                ltp = float(mkt.get("ltp") or 0.0)
+                vol = float(mkt.get("volume") or 0.0)
+                prev_close = float(mkt.get("close_price") or 0.0)
+                oi = float(mkt.get("oi") or mkt.get("open_interest") or 0.0)
+                if key and ltp > 0:
+                    self.contract_history[key] = {
+                        "volume": vol,
+                        "ltp": ltp,
+                        "day_high": ltp,
+                        "prev_close": prev_close,
+                        "oi": oi,
+                        "last_signaled_vol": vol,
+                    }
 
     def _evaluate_contract(
         self,
@@ -199,12 +341,17 @@ class PressureStrategyEngine:
         strike_map: dict[float, dict[str, Any]],
         now_time_str: str,
         now_ms: int,
+        idx_cfg: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         key = str(opt.get("instrument_key") or "")
         mkt = opt.get("market_data") or {}
         ltp = float(mkt.get("ltp") or 0.0)
         vol = float(mkt.get("volume") or 0.0)
         prev_close = float(mkt.get("close_price") or 0.0)
+        # #7 — extract bid, ask, OI for signal logging
+        bid_price = float(mkt.get("bid_price") or 0.0)
+        ask_price_raw = float(mkt.get("ask_price") or 0.0)
+        oi = float(mkt.get("oi") or mkt.get("open_interest") or 0.0)
 
         if ltp <= 0 or not key:
             return None
@@ -212,12 +359,14 @@ class PressureStrategyEngine:
         # Retrieve history
         history = self.contract_history.get(key)
         if history is None:
-            # First observation of this contract: record baseline
+            # #1 Pre-warm: First observation — record baseline, never emit signal
             self.contract_history[key] = {
                 "volume": vol,
                 "ltp": ltp,
                 "day_high": ltp,
                 "prev_close": prev_close,
+                "oi": oi,
+                "last_signaled_vol": vol,  # #4 dedup seed
             }
             return None
 
@@ -226,12 +375,32 @@ class PressureStrategyEngine:
 
         prev_vol = history["volume"]
         prev_ltp = history["ltp"]
-        qty_delta = max(0.0, vol - prev_vol) if vol >= prev_vol else 0.0
-        val_lakhs = (ltp * qty_delta) / 100000.0
+        prev_oi = history.get("oi", 0.0)
+
+        # #3 — qty delta: only count new trades this tick, zero on first delta
+        if prev_vol == 0:
+            qty_delta = 0.0
+        else:
+            qty_delta = max(0.0, vol - prev_vol) if vol >= prev_vol else 0.0
+        # Sanity cap: a single tick cannot have >50 000 contracts
+        qty_delta = min(qty_delta, 50_000.0)
+
+        oi_change = oi - prev_oi
+        val_lakhs = (ltp * qty_delta) / 100_000.0
+
+        # Spread %
+        if bid_price > 0 and ask_price_raw > 0:
+            spread_pct = round(((ask_price_raw - bid_price) / ((bid_price + ask_price_raw) / 2.0)) * 100.0, 3)
+        else:
+            spread_pct = 0.0
+
+        # Confidence label based on how many conditions beyond cond1 pass
+        # (will be finalised after condition checks below)
 
         # Update latest readings
         history["volume"] = vol
         history["ltp"] = ltp
+        history["oi"] = oi
 
         # Condition 1: Qty Delta OR Value in Lakhs
         cond_qty = (self.use_qty_condition and qty_delta >= self.qty_threshold)
@@ -251,9 +420,19 @@ class PressureStrategyEngine:
         if not (cond1 and cond2 and cond3 and cond4):
             return None
 
+        # #4 — Deduplication: only emit signal if new volume traded since last signal
+        last_signaled_vol = history.get("last_signaled_vol", 0.0)
+        if vol <= last_signaled_vol:
+            return None  # Same tick repeated — suppress
+        history["last_signaled_vol"] = vol
+
+        # Confidence label
+        conditions_met = sum([bool(cond1), bool(cond2), bool(cond3), bool(cond4)])
+        confidence = "HIGH" if conditions_met == 4 else "MEDIUM" if conditions_met == 3 else "LOW"
+
         # SIGNAL DETECTED!
         signal_data = {
-            "timestamp_ist": now_time_str,
+            "timestamp_ist": now_time_str,   # #9 — already HH:MM:SS.mmm
             "timestamp_ms": now_ms,
             "side": side,
             "strike": strike,
@@ -264,6 +443,12 @@ class PressureStrategyEngine:
             "val_lakhs": round(val_lakhs, 2),
             "day_high": day_high,
             "prev_close": prev_close,
+            # #7 — new signal fields
+            "bid_price": round(bid_price, 2),
+            "ask_price": round(ask_price_raw, 2),
+            "spread_pct": spread_pct,
+            "oi_change": round(oi_change, 0),
+            "confidence": confidence,
             "action_taken": "",
         }
 
@@ -272,7 +457,7 @@ class PressureStrategyEngine:
             # First signal -> Enter trade!
             signal_data["action_taken"] = f"ENTERED_{side}"
             self.database.insert_strategy_signal(signal_data)
-            self._enter_position(side, atm_strike, strike_map, now_time_str, now_ms)
+            self._enter_position(side, atm_strike, strike_map, now_time_str, now_ms, spot_price, idx_cfg)
             return signal_data
 
         current_side = self.current_position["side"]  # 'BUY_CE' or 'BUY_PE'
@@ -292,7 +477,7 @@ class PressureStrategyEngine:
         self._exit_position(exit_price, f"REVERSAL_{side}", now_ms, now_time_str)
 
         # 2. Enter opposite side
-        self._enter_position(side, atm_strike, strike_map, now_time_str, now_ms)
+        self._enter_position(side, atm_strike, strike_map, now_time_str, now_ms, spot_price, idx_cfg)
         return signal_data
 
     def _enter_position(
@@ -302,13 +487,22 @@ class PressureStrategyEngine:
         strike_map: dict[float, dict[str, Any]],
         time_ist: str,
         timestamp_ms: int,
+        spot_price: float = 0.0,
+        idx_cfg: dict[str, Any] | None = None,
     ) -> None:
-        # Step 3: Pick ITM+2 strike (ATM minus 2 steps for CE, ATM plus 2 steps for PE)
-        # Step size = 50 points
+        if idx_cfg is None:
+            idx_cfg = INDEX_CONFIG["NSE_INDEX|Nifty 50"]
+
+        step = idx_cfg["step"]
+        itm_steps = idx_cfg["itm_steps"]
+        lot_size = idx_cfg["lot"]
+        index_name = idx_cfg["name"]
+
+        # Step 3: Pick ITM+itm_steps strike (ATM minus steps for CE, ATM plus steps for PE)
         if side == "CE":
-            target_strike = atm_strike - 100.0
+            target_strike = atm_strike - step * itm_steps
         else:
-            target_strike = atm_strike + 100.0
+            target_strike = atm_strike + step * itm_steps
 
         item = strike_map.get(target_strike)
         if not item and strike_map:
@@ -326,10 +520,15 @@ class PressureStrategyEngine:
 
         key = opt.get("instrument_key", "")
         mkt = opt.get("market_data") or {}
-        # Buy limit at best ask (or LTP)
+        # #10 — Buy at Ask; fallback: ltp * 1.001 (never flat LTP)
         ask_price = float(mkt.get("ask_price") or 0.0)
         ltp = float(mkt.get("ltp") or 0.0)
-        entry_price = ask_price if ask_price > 0 else ltp
+        if ask_price > 0:
+            entry_price = ask_price
+        elif ltp > 0:
+            entry_price = round(ltp * 1.001, 2)
+        else:
+            entry_price = 0.0
 
         if entry_price <= 0:
             LOGGER.warning("Invalid entry price for %s: %s", key, entry_price)
@@ -337,16 +536,18 @@ class PressureStrategyEngine:
 
         trade_id = f"TRD-{now_timestamp_id()}-{self._trade_counter}"
         self._trade_counter += 1
-        symbol = f"NIFTY {int(target_strike)} {side}"
+        symbol = f"{index_name} {int(target_strike)} {side}"
+        trade_date = datetime.now(IST).strftime("%Y-%m-%d")
 
         trade = {
             "trade_id": trade_id,
+            "trade_date": trade_date,
             "side": f"BUY_{side}",
             "symbol": symbol,
             "instrument_key": key,
             "strike": target_strike,
-            "lot_size": self.lot_size,
-            "entry_time_ist": time_ist,
+            "lot_size": lot_size,
+            "entry_time_ist": time_ist,       # #9 — already HH:MM:SS.mmm
             "entry_price": round(entry_price, 2),
             "entry_timestamp_ms": timestamp_ms,
             "exit_time_ist": None,
@@ -356,12 +557,18 @@ class PressureStrategyEngine:
             "pnl_points": None,
             "net_pnl": None,
             "status": "OPEN",
+            # #8 — log spot and ATM at entry
+            "spot_price": round(spot_price, 2),
+            "atm_strike": round(atm_strike, 2),
         }
 
         self.current_position = trade
         self.database.insert_strategy_trade(trade)
         self._append_csv(trade)
-        LOGGER.info("ENTERED PAPER TRADE: %s %s at %s", trade_id, symbol, entry_price)
+        LOGGER.info(
+            "ENTERED PAPER TRADE: %s %s at %s | Spot=%.2f ATM=%.2f",
+            trade_id, symbol, entry_price, spot_price, atm_strike,
+        )
 
     def _exit_position(
         self,
@@ -397,24 +604,34 @@ class PressureStrategyEngine:
                 opt = item.get(opt_key) or {}
                 if opt.get("instrument_key") == key:
                     mkt = opt.get("market_data") or {}
+                    ltp = float(mkt.get("ltp") or 0.0)
                     if is_exit:
-                        # Exit at best bid (or LTP)
+                        # #10 — Exit at best bid; fallback: ltp * 0.999 (never flat LTP)
                         bid = float(mkt.get("bid_price") or 0.0)
                         if bid > 0:
                             return bid
+                        if ltp > 0:
+                            return round(ltp * 0.999, 2)
                     else:
+                        # #10 — Entry at best ask; fallback: ltp * 1.001
                         ask = float(mkt.get("ask_price") or 0.0)
                         if ask > 0:
                             return ask
-                    return float(mkt.get("ltp") or 0.0)
+                        if ltp > 0:
+                            return round(ltp * 1.001, 2)
         return 0.0
 
     def _append_csv(self, trade: dict[str, Any]) -> None:
         try:
+            trade_date = trade.get("trade_date")
+            if not trade_date and trade.get("entry_timestamp_ms"):
+                trade_date = datetime.fromtimestamp(trade["entry_timestamp_ms"] / 1000, tz=IST).strftime("%Y-%m-%d")
+
             with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow([
                     trade["trade_id"],
+                    trade_date or "",
                     trade["side"],
                     trade["symbol"],
                     trade["strike"],
@@ -427,10 +644,13 @@ class PressureStrategyEngine:
                     trade.get("pnl_points") or "",
                     trade.get("net_pnl") or "",
                     trade["status"],
+                    trade.get("spot_price") or "",   # #8 — Spot at entry
+                    trade.get("atm_strike") or "",   # #8 — ATM at entry
                 ])
         except Exception as exc:
             LOGGER.error("Failed to write trade to CSV: %s", exc)
 
 
 def now_timestamp_id() -> str:
-    return datetime.now(IST).strftime("%m%d%H%M%S")
+    # #9 — include milliseconds in trade ID timestamp
+    return datetime.now(IST).strftime("%m%d%H%M%S%f")[:-3]

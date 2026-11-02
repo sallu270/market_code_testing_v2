@@ -16,6 +16,7 @@ const state = {
     activeView: "optionChain",
     optionExpiries: [],
     selectedExpiry: "",
+    selectedOptionIndex: "NSE_INDEX|Nifty 50",
     strikeRange: "15",
     chainAutoRefresh: true,
     chainData: null,
@@ -94,6 +95,7 @@ function mapElements() {
         "chainPcrSentiment",
         "chainTotalOi",
         "chainOiSplit",
+        "optionIndexSelect",
         "optionExpirySelect",
         "strikeRangeSelect",
         "chainAutoRefresh",
@@ -142,6 +144,15 @@ function bindEvents() {
     }
 
     // Option chain controls
+    if (elements.optionIndexSelect) {
+        elements.optionIndexSelect.addEventListener("change", async (e) => {
+            state.selectedOptionIndex = e.target.value;
+            state.selectedExpiry = "";
+            state.chainData = null;
+            await loadOptionExpiries();
+        });
+    }
+
     if (elements.optionExpirySelect) {
         elements.optionExpirySelect.addEventListener("change", (e) => {
             state.selectedExpiry = e.target.value;
@@ -917,7 +928,8 @@ function escapeHtml(value) {
 
 async function loadOptionExpiries() {
     try {
-        const response = await fetchJson("/api/option-chain/expiries");
+        const idx = state.selectedOptionIndex || "NSE_INDEX|Nifty 50";
+        const response = await fetchJson(`/api/option-chain/expiries?instrument_key=${encodeURIComponent(idx)}`);
         const expiries = response.expiries || [];
         state.optionExpiries = expiries;
 
@@ -965,7 +977,8 @@ async function loadOptionChain(force = false) {
     }
 
     try {
-        const url = `/api/option-chain?expiry_date=${encodeURIComponent(state.selectedExpiry)}`;
+        const idx = state.selectedOptionIndex || "NSE_INDEX|Nifty 50";
+        const url = `/api/option-chain?instrument_key=${encodeURIComponent(idx)}&expiry_date=${encodeURIComponent(state.selectedExpiry)}`;
         const result = await fetchJson(url);
 
         if (result.error) {
@@ -1294,17 +1307,29 @@ async function loadStrategyStatus() {
             }
         }
 
-        // Summary
+        // Summary (Distinguish Today vs Lifetime)
+        const todayTrades = res.today_trades !== undefined ? res.today_trades : (res.total_trades || 0);
+        const lifetimeTrades = res.lifetime_trades !== undefined ? res.lifetime_trades : todayTrades;
+        const todayWins = res.today_win_trades || 0;
+        const todayLosses = res.today_loss_trades || 0;
+        const todayPnl = Number(res.today_net_pnl_inr !== undefined ? res.today_net_pnl_inr : (res.net_pnl_inr || 0));
+        const todayPts = Number(res.today_pnl_points !== undefined ? res.today_pnl_points : (res.pnl_points_total || 0));
+        const lifetimePnl = Number(res.lifetime_net_pnl_inr !== undefined ? res.lifetime_net_pnl_inr : todayPnl);
+        const lot = res.config?.lot_size || 65;
+
         if (elements.stratTotalTrades) {
-            elements.stratTotalTrades.textContent = `${res.total_trades || 0} Trades Today`;
+            elements.stratTotalTrades.textContent = `${todayTrades} Trade${todayTrades === 1 ? '' : 's'} Today`;
         }
         if (elements.stratWinLossRatio) {
-            elements.stratWinLossRatio.textContent = `${res.win_trades || 0} Wins / ${res.loss_trades || 0} Losses`;
+            elements.stratWinLossRatio.textContent = `${todayWins} Wins / ${todayLosses} Losses (Overall: ${lifetimeTrades} trades)`;
         }
         if (elements.stratNetPnl) {
-            const pnl = Number(res.net_pnl_inr || 0);
-            elements.stratNetPnl.textContent = `${pnl >= 0 ? '+' : ''}₹${formatNumber(pnl, 2)}`;
-            elements.stratNetPnl.className = pnl >= 0 ? "text--up" : "text--down";
+            elements.stratNetPnl.textContent = `${todayPnl >= 0 ? '+' : ''}₹${formatNumber(todayPnl, 2)}`;
+            elements.stratNetPnl.className = todayPnl >= 0 ? "text--up" : "text--down";
+        }
+        if (elements.stratPnlPoints) {
+            elements.stratPnlPoints.textContent = `${todayPts >= 0 ? '+' : ''}${formatNumber(todayPts, 2)} Pts Today (Overall: ${lifetimePnl >= 0 ? '+' : ''}₹${formatNumber(lifetimePnl, 2)})`;
+            elements.stratPnlPoints.className = todayPts >= 0 ? "text--up" : "text--down";
         }
 
         // Config inputs
@@ -1332,7 +1357,7 @@ async function loadStrategyTrades() {
         if (!trades.length) {
             elements.stratTradesBody.innerHTML = `
                 <tr>
-                    <td colspan="13" class="table-empty">
+                    <td colspan="16" class="table-empty">
                         No paper trades recorded yet. Scanning 1% ITM contracts between 09:15 and 15:15...
                     </td>
                 </tr>
@@ -1345,10 +1370,12 @@ async function loadStrategyTrades() {
             const pnl = toNumber(t.net_pnl);
             const pnlPts = toNumber(t.pnl_points);
             const isOpen = t.status === "OPEN";
+            const tradeDate = t.trade_date || (t.entry_timestamp_ms ? new Date(t.entry_timestamp_ms).toISOString().slice(0, 10) : '—');
 
             return `
                 <tr>
                     <td style="text-align: left; font-weight: 600;">${escapeHtml(t.trade_id)}</td>
+                    <td style="text-align: center; color: var(--muted); font-size: 0.85em;">${escapeHtml(tradeDate)}</td>
                     <td style="text-align: center;">
                         <span class="badge ${isCe ? 'badge--atm' : 'badge--closed'}">${escapeHtml(t.side)}</span>
                     </td>
@@ -1367,6 +1394,8 @@ async function loadStrategyTrades() {
                     <td style="text-align: center;">
                         <span class="badge ${isOpen ? 'badge--atm' : 'badge--closed'}">${isOpen ? 'OPEN' : 'CLOSED'}</span>
                     </td>
+                    <td style="text-align: right; color: var(--muted);">${t.spot_price ? formatNumber(t.spot_price, 2) : '—'}</td>
+                    <td style="text-align: right; color: var(--muted);">${t.atm_strike ? formatNumber(t.atm_strike, 0) : '—'}</td>
                 </tr>
             `;
         }).join("");
@@ -1384,7 +1413,7 @@ async function loadStrategySignals() {
         if (!signals.length) {
             elements.stratSignalsBody.innerHTML = `
                 <tr>
-                    <td colspan="9" class="table-empty">
+                    <td colspan="13" class="table-empty">
                         No buy pressure signals triggered yet.
                     </td>
                 </tr>
@@ -1394,6 +1423,12 @@ async function loadStrategySignals() {
 
         elements.stratSignalsBody.innerHTML = signals.map(s => {
             const isCe = s.side === "CE";
+            const bidAsk = (s.bid_price || s.ask_price)
+                ? `${formatNumber(s.bid_price, 2)} / ${formatNumber(s.ask_price, 2)}`
+                : "— / —";
+            const spreadPct = s.spread_pct != null ? `${formatNumber(s.spread_pct, 2)}%` : "—";
+            const oiChg = s.oi_change != null ? (s.oi_change >= 0 ? "+" : "") + formatInteger(s.oi_change) : "—";
+            const confColor = s.confidence === "HIGH" ? "var(--primary)" : s.confidence === "MEDIUM" ? "#f59e0b" : "var(--muted)";
             return `
                 <tr>
                     <td style="text-align: left;">${escapeHtml(s.timestamp_ist)}</td>
@@ -1406,7 +1441,11 @@ async function loadStrategySignals() {
                     <td style="text-align: right;">₹${formatNumber(s.val_lakhs, 2)}L</td>
                     <td style="text-align: right;">${formatNumber(s.day_high, 2)}</td>
                     <td style="text-align: right;">${formatNumber(s.prev_close, 2)}</td>
-                    <td style="text-align: center; font-weight: 700; color: ${s.action_taken.includes('ENTER') || s.action_taken.includes('REVERS') ? 'var(--primary)' : 'var(--muted)'};">
+                    <td style="text-align: right; font-size: 0.8em;">${bidAsk}</td>
+                    <td style="text-align: right;">${spreadPct}</td>
+                    <td style="text-align: right;">${oiChg}</td>
+                    <td style="text-align: center; font-weight: 700; color: ${confColor};">${escapeHtml(s.confidence || '—')}</td>
+                    <td style="text-align: center; font-weight: 700; color: ${s.action_taken && (s.action_taken.includes('ENTER') || s.action_taken.includes('REVERS')) ? 'var(--primary)' : 'var(--muted)'};">
                         ${escapeHtml(s.action_taken)}
                     </td>
                 </tr>
