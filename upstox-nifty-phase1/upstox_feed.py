@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import threading
 import time
@@ -11,6 +12,8 @@ from zoneinfo import ZoneInfo
 import upstox_client
 
 from config import Settings
+
+LOGGER = logging.getLogger("upstox_feed")
 
 TickCallback = Callable[[dict[str, Any]], None]
 StatusCallback = Callable[[dict[str, Any]], None]

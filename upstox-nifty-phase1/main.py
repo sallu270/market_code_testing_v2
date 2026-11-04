@@ -40,6 +40,15 @@ strategy_engine = GapEntryStrategyEngine(
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+@app.after_request
+def add_cache_headers(response: Response) -> Response:
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 subscribers: set[queue.Queue[dict[str, Any]]] = set()
 subscribers_lock = threading.RLock()
@@ -239,6 +248,7 @@ def index() -> str:
         configured=settings.configured,
         instrument_keys=list(settings.instrument_keys),
         feed_mode=settings.feed_mode,
+        now_ts=int(time.time()),
     )
 
 @app.get("/api/health")
@@ -282,15 +292,34 @@ def api_ticks() -> Response:
     ]
     return jsonify({"ticks": cleaned_values})
 
-def _aggregate_to_5m(candles_1m: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[int, dict[str, Any]] = {}
+def _aggregate_candles(candles_1m: list[dict[str, Any]], timeframe: str) -> list[dict[str, Any]]:
+    if timeframe == "1m":
+        return candles_1m
+
+    bucket_ms_map = {
+        "3m": 3 * 60 * 1000,
+        "5m": 5 * 60 * 1000,
+        "15m": 15 * 60 * 1000,
+    }
+    is_daily = timeframe in ("d", "1d", "day")
+
+    grouped: dict[Any, dict[str, Any]] = {}
     for c in candles_1m:
         start_ms = int(c["candle_start_ms"])
-        bucket = (start_ms // 300000) * 300000
-        if bucket not in grouped:
-            grouped[bucket] = {
+        if is_daily:
+            dt = datetime.fromtimestamp(start_ms / 1000, tz=IST)
+            bucket_key = dt.strftime("%Y-%m-%d")
+            midnight_dt = dt.replace(hour=9, minute=15, second=0, microsecond=0)
+            bucket_ms = int(midnight_dt.timestamp() * 1000)
+        else:
+            dur = bucket_ms_map.get(timeframe, 60 * 1000)
+            bucket_ms = (start_ms // dur) * dur
+            bucket_key = bucket_ms
+
+        if bucket_key not in grouped:
+            grouped[bucket_key] = {
                 "instrument_key": c.get("instrument_key"),
-                "candle_start_ms": bucket,
+                "candle_start_ms": bucket_ms,
                 "open": c["open"],
                 "high": c["high"],
                 "low": c["low"],
@@ -302,13 +331,14 @@ def _aggregate_to_5m(candles_1m: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "updated_at_ms": c.get("updated_at_ms", start_ms),
             }
         else:
-            g = grouped[bucket]
+            g = grouped[bucket_key]
             g["high"] = max(float(g["high"]), float(c["high"]))
             g["low"] = min(float(g["low"]), float(c["low"]))
             g["close"] = c["close"]
             g["volume"] = float(g.get("volume", 0)) + float(c.get("volume", 0))
             g["tick_count"] = int(g.get("tick_count", 0)) + int(c.get("tick_count", 0))
             g["updated_at_ms"] = max(int(g.get("updated_at_ms", 0)), int(c.get("updated_at_ms", 0)))
+            g["is_closed"] = c.get("is_closed", g.get("is_closed", 0))
     return list(grouped.values())
 
 @app.get("/api/candles")
@@ -322,14 +352,22 @@ def api_candles() -> Response:
     )
     limit = max(1, min(limit or settings.ui_candle_limit, 1000))
 
-    multiplier = 5 if timeframe == "5m" else 1
+    multipliers = {
+        "1m": 1,
+        "3m": 3,
+        "5m": 5,
+        "15m": 15,
+        "d": 400,
+        "1d": 400,
+    }
+    multiplier = multipliers.get(timeframe, 1)
     values = database.latest_candles(
         instrument_key=instrument_key,
-        limit=limit * multiplier,
+        limit=min(limit * multiplier, 2000),
     )
 
-    if timeframe == "5m":
-        values = _aggregate_to_5m(values)
+    if timeframe in ("3m", "5m", "15m", "d", "1d"):
+        values = _aggregate_candles(values, timeframe)
         if len(values) > limit:
             values = values[-limit:]
 
@@ -387,10 +425,25 @@ def api_option_chain() -> Response:
     if status != 200:
         return jsonify({"error": f"Upstox API error: {status}", "detail": payload}), status
 
-    if spot_price and data and strategy_engine.enabled:
+    if hasattr(strategy_engine, "process_option_chain_snapshot") and spot_price and data and getattr(strategy_engine, "enabled", False):
         sig = strategy_engine.process_option_chain_snapshot(spot_price, data, instrument_key)
         if sig:
             publish("strategy_signal", sig)
+
+    if data and hasattr(feed, "subscribe"):
+        try:
+            keys_to_sub = []
+            for item in data[:40]:
+                call_k = item.get("call_options", {}).get("instrument_key")
+                put_k = item.get("put_options", {}).get("instrument_key")
+                if call_k:
+                    keys_to_sub.append(call_k)
+                if put_k:
+                    keys_to_sub.append(put_k)
+            if keys_to_sub:
+                feed.subscribe(keys_to_sub)
+        except Exception as ex:
+            LOGGER.warning("Could not auto-subscribe option chain keys: %s", ex)
 
     return jsonify({
         "status": "success",

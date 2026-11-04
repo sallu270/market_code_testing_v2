@@ -41,13 +41,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     connectEventStream();
     window.setInterval(refreshHealth, 10000);
 
-    // Initialise Option Chain with 1-second live polling + real-time WebSocket tick integration
-    await loadOptionExpiries();
-    state.chainTimer = window.setInterval(() => {
-        if (!document.hidden && state.activeView === "optionChain") {
-            loadOptionChain();
-        }
-    }, 1000);
+    // Initialise Option Chain structure (real-time streaming via WebSocket ticks)
+    loadOptionExpiries();
 
     // Initialise GChart & Strategy live polling
     loadStrategyStatus();
@@ -192,14 +187,11 @@ function bindEvents() {
     });
 
     // Chart Timeframe Period Keypad
-    document.querySelectorAll(".gchart-key-btn").forEach(btn => {
+    document.querySelectorAll(".gchart-key-btn, .tf-btn").forEach(btn => {
         btn.addEventListener("click", () => {
-            document.querySelectorAll(".gchart-key-btn").forEach(b => b.classList.remove("active"));
-            btn.classList.add("active");
             const tf = btn.getAttribute("data-timeframe");
             if (tf) {
-                state.timeframe = tf;
-                loadCandles();
+                switchTimeframe(tf);
             }
         });
     });
@@ -357,15 +349,7 @@ function bindEvents() {
         });
     }
 
-    // TradingView Timeframe buttons
-    document.querySelectorAll(".tf-btn").forEach((btn) => {
-        btn.addEventListener("click", () => {
-            const tf = btn.getAttribute("data-timeframe");
-            if (tf && tf !== state.timeframe) {
-                switchTimeframe(tf);
-            }
-        });
-    });
+
 }
 
 function switchView(viewName) {
@@ -448,27 +432,16 @@ function initialiseChart() {
             autoScale: true,
             scaleMargins: {
                 top: 0.08,
-                bottom: 0.16,
+                bottom: 0.08,
             },
         },
         timeScale: {
             borderColor: "#1e293b",
             timeVisible: true,
-            secondsVisible: true,
-        },
-    });
-
-    state.volumeSeries = state.tvChart.addHistogramSeries({
-        color: "rgba(0, 255, 102, 0.25)",
-        priceFormat: {
-            type: "volume",
-        },
-        priceScaleId: "",
-    });
-    state.volumeSeries.priceScale().applyOptions({
-        scaleMargins: {
-            top: 0.82,
-            bottom: 0,
+            secondsVisible: false,
+            barSpacing: 14,
+            minBarSpacing: 4,
+            rightOffset: 8,
         },
     });
 
@@ -479,25 +452,15 @@ function initialiseChart() {
         borderDownColor: "#ff2a4b",
         wickUpColor: "#00ff66",
         wickDownColor: "#ff2a4b",
+        priceLineColor: "#00ff66",
+        priceLineWidth: 1,
+        priceLineStyle: LightweightCharts.LineStyle.Dashed,
     });
 
-    // Auto-fit on resize
-    if (window.ResizeObserver) {
-        const ro = new ResizeObserver(() => {
-            if (state.tvChart && container.clientWidth > 0) {
-                state.tvChart.applyOptions({
-                    width: container.clientWidth,
-                    height: container.clientHeight || 520,
-                });
-            }
-        });
-        ro.observe(container);
-    }
-
     state.areaSeries = state.tvChart.addAreaSeries({
-        topColor: "rgba(8, 153, 129, 0.4)",
-        bottomColor: "rgba(8, 153, 129, 0.02)",
-        lineColor: "#089981",
+        topColor: "rgba(0, 255, 102, 0.35)",
+        bottomColor: "rgba(0, 255, 102, 0.02)",
+        lineColor: "#00ff66",
         lineWidth: 2,
         priceLineVisible: true,
         lastValueVisible: true,
@@ -521,30 +484,40 @@ function initialiseChart() {
 async function switchTimeframe(tf) {
     state.timeframe = tf;
 
-    document.querySelectorAll(".tf-btn").forEach((btn) => {
-        btn.classList.toggle("tf-btn--active", btn.getAttribute("data-timeframe") === tf);
+    document.querySelectorAll(".gchart-key-btn, .tf-btn").forEach((btn) => {
+        const matches = btn.getAttribute("data-timeframe") === tf;
+        btn.classList.toggle("active", matches);
+        btn.classList.toggle("tf-btn--active", matches);
     });
 
     state.activeCandle = null;
     state.lastTickTimeSec = 0;
 
+    const isTick = tf === "tick" || tf === "0";
+
     if (state.tvChart) {
         state.tvChart.applyOptions({
             timeScale: {
-                secondsVisible: tf === "tick",
+                timeVisible: true,
+                secondsVisible: isTick,
+                barSpacing: isTick ? 6 : 14,
+                minBarSpacing: isTick ? 2 : 4,
+                rightOffset: isTick ? 4 : 8,
             },
         });
-        state.tvChart.priceScale("right").applyOptions({ autoScale: true });
+        state.tvChart.priceScale("right").applyOptions({
+            autoScale: true,
+            scaleMargins: {
+                top: 0.08,
+                bottom: 0.08,
+            },
+        });
     }
 
-    if (tf === "tick") {
+    if (isTick) {
         if (state.candleSeries) {
             state.candleSeries.applyOptions({ visible: false });
             state.candleSeries.setData([]);
-        }
-        if (state.volumeSeries) {
-            state.volumeSeries.applyOptions({ visible: false });
-            state.volumeSeries.setData([]);
         }
         if (state.areaSeries) {
             state.areaSeries.applyOptions({ visible: true });
@@ -556,9 +529,6 @@ async function switchTimeframe(tf) {
         }
         if (state.candleSeries) {
             state.candleSeries.applyOptions({ visible: true });
-        }
-        if (state.volumeSeries) {
-            state.volumeSeries.applyOptions({ visible: true });
         }
     }
 
@@ -656,7 +626,6 @@ async function loadCandles() {
         state.candles.clear();
 
         const candleList = [];
-        const volumeList = [];
         let lastTimeSec = 0;
 
         for (const candle of result.candles || []) {
@@ -669,21 +638,12 @@ async function loadCandles() {
             const high = toNumber(candle.high);
             const low = toNumber(candle.low);
             const close = toNumber(candle.close);
-            const vol = toNumber(candle.volume) || 0;
 
             candleList.push({ time: timeSec, open, high, low, close });
-            volumeList.push({
-                time: timeSec,
-                value: vol,
-                color: close >= open ? "rgba(8, 153, 129, 0.4)" : "rgba(242, 54, 69, 0.4)",
-            });
         }
 
         if (state.candleSeries) {
             state.candleSeries.setData(candleList);
-        }
-        if (state.volumeSeries) {
-            state.volumeSeries.setData(volumeList);
         }
 
         if (elements.chartEmpty) elements.chartEmpty.hidden = candleList.length > 0;
@@ -776,23 +736,32 @@ function handleTick(tick) {
     updateTickSnapshot(tick);
     renderTicks();
 
-    // LIVE MILLISECOND OPTION CHAIN UPDATES
+    // LIVE REAL-TIME WEBSOCKET UPDATES (OPTION CHAIN + 8 CANDIDATES TABLE)
     updateChainSpotFromTick(tick);
     updateChainRowFromTick(tick);
+    updateLockedCandidateRow(tick);
 
     if (instrumentKey === state.selectedInstrument) {
         renderLatestTick(tick);
 
         const ltp = toNumber(tick.ltp);
         if (ltp !== null && state.tvChart) {
-            if (state.timeframe === "tick" && state.areaSeries) {
+            if ((state.timeframe === "tick" || state.timeframe === "0") && state.areaSeries) {
                 const nowSec = Math.floor(Date.now() / 1000) + IST_OFFSET_SEC;
                 const tSec = Math.max(nowSec, (state.lastTickTimeSec || 0) + 1);
                 state.lastTickTimeSec = tSec;
                 state.areaSeries.update({ time: tSec, value: ltp });
                 if (elements.chartEmpty) elements.chartEmpty.hidden = true;
-            } else if (state.candleSeries && (state.timeframe === "1m" || state.timeframe === "5m")) {
-                const bucketDurationSec = state.timeframe === "5m" ? 300 : 60;
+            } else if (state.candleSeries && state.timeframe !== "tick" && state.timeframe !== "0") {
+                const tfDurations = {
+                    "1m": 60,
+                    "3m": 180,
+                    "5m": 300,
+                    "15m": 900,
+                    "1d": 86400,
+                    "d": 86400,
+                };
+                const bucketDurationSec = tfDurations[state.timeframe] || 60;
                 const tsMs = Number(tick.exchange_timestamp_ms || Date.now());
                 const rawBucketSec = Math.floor(tsMs / (bucketDurationSec * 1000)) * bucketDurationSec;
                 const chartBucketSec = rawBucketSec + IST_OFFSET_SEC;
@@ -833,6 +802,14 @@ function handleTick(tick) {
                     close: candle.close,
                 });
                 if (elements.chartEmpty) elements.chartEmpty.hidden = true;
+
+                // Live OHLC Bar text updates immediately on every tick
+                if (elements.closeValue) elements.closeValue.textContent = formatNumber(candle.close);
+                if (elements.highValue) elements.highValue.textContent = formatNumber(candle.high);
+                if (elements.lowValue) elements.lowValue.textContent = formatNumber(candle.low);
+                if (elements.openValue && (!elements.openValue.textContent || elements.openValue.textContent === "—")) {
+                    elements.openValue.textContent = formatNumber(candle.open);
+                }
             }
         }
     }
@@ -857,17 +834,9 @@ function handleCandle(candle) {
         const high = toNumber(candle.high);
         const low = toNumber(candle.low);
         const close = toNumber(candle.close);
-        const vol = toNumber(candle.volume) || 0;
 
         const cData = { time: timeSec, open, high, low, close };
         state.candleSeries.update(cData);
-        if (state.volumeSeries) {
-            state.volumeSeries.update({
-                time: timeSec,
-                value: vol,
-                color: close >= open ? "rgba(8, 153, 129, 0.4)" : "rgba(242, 54, 69, 0.4)",
-            });
-        }
         if (elements.chartEmpty) elements.chartEmpty.hidden = true;
     }
 
@@ -1553,6 +1522,45 @@ function updateSingleOptionCell(rowEl, tick, isCall) {
     }
 }
 
+function updateLockedCandidateRow(tick) {
+    if (!tick.instrument_key || !elements.stratLockedBody) return;
+    const row = elements.stratLockedBody.querySelector(`[data-key="${tick.instrument_key}"]`);
+    if (!row) return;
+
+    const ltp = toNumber(tick.ltp);
+    if (ltp === null) return;
+
+    const ref = toNumber(row.getAttribute("data-ref"));
+    const timeEl = row.querySelector(".tq-time");
+    const rateEl = row.querySelector(".tq-rate");
+    const diffEl = row.querySelector(".tq-diff");
+    const qtyEl = row.querySelector(".tq-qty");
+    const spreadEl = row.querySelector(".tq-spread");
+
+    if (timeEl) timeEl.textContent = formatTime(tick.exchange_timestamp_ms || Date.now());
+    if (rateEl) {
+        const oldLtp = parseFloat(rateEl.textContent.replace(/,/g, ""));
+        rateEl.textContent = formatNumber(ltp, 2);
+        if (!isNaN(oldLtp) && oldLtp !== ltp) {
+            flashElement(rateEl, ltp > oldLtp ? "flash-up" : "flash-down");
+        }
+    }
+    if (diffEl && ref !== null) {
+        const diff = ltp - ref;
+        diffEl.textContent = (diff > 0 ? "+" : "") + formatNumber(diff, 2);
+        diffEl.className = "tq-diff " + (diff > 0.001 ? "diff-positive" : (diff < -0.001 ? "diff-negative" : "diff-zero"));
+    }
+    if (qtyEl && (tick.bid_quantity || tick.ask_quantity)) {
+        qtyEl.textContent = tick.bid_quantity || tick.ask_quantity;
+    }
+    const bid = toNumber(tick.bid_price);
+    const ask = toNumber(tick.ask_price);
+    if (spreadEl && bid !== null && ask !== null && ltp > 0) {
+        const spreadPct = ((ask - bid) / ltp) * 100;
+        spreadEl.textContent = formatNumber(spreadPct, 2) + "%";
+    }
+}
+
 function flashElement(el, flashClass) {
     el.classList.remove("flash-up", "flash-down");
     void el.offsetWidth;
@@ -1680,16 +1688,16 @@ async function loadStrategyStatus() {
                     const timeStr = formatTime(c.last_trade_ms || Date.now());
 
                     return `
-                        <tr class="${isWinner ? 'winner-row' : ''}">
-                            <td style="color: #94a3b8; font-size: 0.8em;">${escapeHtml(timeStr)}</td>
+                        <tr data-key="${escapeHtml(c.instrument_key || '')}" data-ref="${ref !== null ? ref : ''}" class="${isWinner ? 'winner-row' : ''}">
+                            <td class="tq-time" style="color: #94a3b8; font-size: 0.8em;">${escapeHtml(timeStr)}</td>
                             <td>
                                 <span style="font-weight: 700; color: #fff;">${escapeHtml(c.symbol || '')}</span>
                                 <span style="color: #f59e0b; font-size: 0.8em; margin-left: 4px;">[${ref !== null ? formatNumber(ref, 1) : '—'}]</span>
                             </td>
-                            <td style="font-weight: 700; color: #fff;">${ltp !== null ? formatNumber(ltp, 2) : '—'}</td>
-                            <td class="${diffClass}">${diffText}</td>
-                            <td style="color: #94a3b8;">${c.bid_qty || c.ask_qty || 65}</td>
-                            <td style="color: #38bdf8; font-weight: 600;">${c.spread_pct != null ? formatNumber(c.spread_pct, 2) + '%' : '—'}</td>
+                            <td class="tq-rate" style="font-weight: 700; color: #fff;">${ltp !== null ? formatNumber(ltp, 2) : '—'}</td>
+                            <td class="tq-diff ${diffClass}">${diffText}</td>
+                            <td class="tq-qty" style="color: #94a3b8;">${c.bid_qty || c.ask_qty || 65}</td>
+                            <td class="tq-spread" style="color: #38bdf8; font-weight: 600;">${c.spread_pct != null ? formatNumber(c.spread_pct, 2) + '%' : '—'}</td>
                         </tr>
                     `;
                 }).join("");
@@ -1767,19 +1775,6 @@ async function saveStrategyConfig() {
             await loadStrategyStatus();
             setTimeout(() => {
                 if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Opening gap engine ready";
-            }, 2500);
-        }
-    } catch (err) {
-        if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Failed to save";
-    }
-}
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-        });
-        if (res.ok) {
-            if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Parameters saved!";
-            setTimeout(() => {
-                if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Paper engine running";
             }, 2500);
         }
     } catch (err) {

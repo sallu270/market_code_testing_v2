@@ -16,7 +16,7 @@
     >
     <link
         rel="stylesheet"
-        href="{{ url_for('static', filename='css/styles.css') }}"
+        href="{{ url_for('static', filename='css/styles.css') }}?v=2.0.2"
     >
     <script
         src="{{ url_for('static', filename='js/lightweight-charts.standalone.production.js') }}"
@@ -27,7 +27,7 @@
         defer
     ></script>
     <script
-        src="{{ url_for('static', filename='js/dashboard.js') }}"
+        src="{{ url_for('static', filename='js/dashboard.js') }}?v=2.0.2"
         defer
     ></script>
 </head>
@@ -124,7 +124,8 @@
                         <button type="button" class="gchart-key-btn tf-btn tf-btn--active active" data-timeframe="1m">1</button>
                         <button type="button" class="gchart-key-btn tf-btn" data-timeframe="3m">3</button>
                         <button type="button" class="gchart-key-btn tf-btn" data-timeframe="5m">5</button>
-                        <button type="button" class="gchart-key-btn tf-btn" data-timeframe="D">D</button>
+                        <button type="button" class="gchart-key-btn tf-btn" data-timeframe="15m">15</button>
+                        <button type="button" class="gchart-key-btn tf-btn" data-timeframe="1d">D</button>
                     </div>
 
                     <button id="btnRefreshChart" class="button button--secondary" type="button" title="Refresh Chart Scale" style="padding: 4px 10px; font-size: 0.75rem;">
@@ -414,7 +415,7 @@
         <span id="spread"></span>
         <span id="storedCandles"></span>
         <span id="tickCount"></span>
-        <tbody id="ticksBody"></tbody>
+        <table><tbody id="ticksBody"></tbody></table>
     </div>
 </main>
 

@@ -381,12 +381,8 @@ class MarketDatabase:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT instrument_key
-                FROM (
-                    SELECT DISTINCT instrument_key FROM ticks
-                    UNION
-                    SELECT DISTINCT instrument_key FROM candles_1m
-                )
+                SELECT DISTINCT instrument_key
+                FROM candles_1m
                 ORDER BY instrument_key
                 """
             ).fetchall()
