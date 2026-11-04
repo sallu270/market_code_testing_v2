@@ -28,6 +28,7 @@ class UpstoxFeed:
         self.on_tick = on_tick
         self.on_status = on_status
         self._stop_event = threading.Event()
+        self._subscribed_keys: set[str] = set(self.settings.instrument_keys)
         self._thread: threading.Thread | None = None
         self._streamer: Any = None
         self._connected = False
@@ -107,7 +108,7 @@ class UpstoxFeed:
 
         self._streamer = upstox_client.MarketDataStreamerV3(
             api_client,
-            list(self.settings.instrument_keys),
+            list(self._subscribed_keys),
             self.settings.feed_mode,
         )
 
@@ -119,11 +120,26 @@ class UpstoxFeed:
         self._emit_status("connecting", "Connecting to Upstox Market Data Feed V3.")
         self._streamer.connect()
 
+    def subscribe(self, instrument_keys: list[str], mode: str | None = None) -> None:
+        """Dynamically subscribe additional instrument keys to the live feed."""
+        if not instrument_keys:
+            return
+        to_add = [k for k in instrument_keys if k not in self._subscribed_keys]
+        if not to_add:
+            return
+        self._subscribed_keys.update(to_add)
+        if self._streamer and self._connected:
+            try:
+                self._streamer.subscribe(to_add, mode or self.settings.feed_mode)
+                LOGGER.info("Dynamically subscribed to %s instruments: %s", len(to_add), to_add)
+            except Exception as exc:
+                LOGGER.error("Failed to dynamically subscribe: %s", exc)
+
     def _on_open(self, *args: Any) -> None:
         self._connected = True
         self._emit_status(
             "connected",
-            f"Subscribed to {len(self.settings.instrument_keys)} instrument(s).",
+            f"Subscribed to {len(self._subscribed_keys)} instrument(s).",
         )
 
     def _on_message(self, message: Any, *args: Any) -> None:

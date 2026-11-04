@@ -21,7 +21,7 @@ import urllib.request
 from candle_builder import OneMinuteCandleBuilder
 from config import IST, load_settings
 from database import MarketDatabase
-from strategy_engine import PressureStrategyEngine
+from strategy_engine import GapEntryStrategyEngine, PressureStrategyEngine
 from upstox_feed import UpstoxFeed
 
 logging.basicConfig(
@@ -32,7 +32,11 @@ LOGGER = logging.getLogger("phase1")
 
 settings = load_settings()
 database = MarketDatabase(settings.db_path)
-strategy_engine = PressureStrategyEngine(database=database, base_dir=settings.db_path.parent)
+strategy_engine = GapEntryStrategyEngine(
+    database=database,
+    base_dir=settings.db_path.parent,
+    access_token=settings.access_token,
+)
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -86,6 +90,10 @@ def handle_tick(tick: dict[str, Any]) -> None:
         recent_ticks.appendleft(tick)
         publish("tick", tick)
         candle_builder.process_tick(tick)
+
+        trade = strategy_engine.on_tick(tick)
+        if trade:
+            publish("strategy_trade", trade)
     except Exception:
         LOGGER.exception("Failed to store or aggregate a market tick.")
 
@@ -94,6 +102,7 @@ feed = UpstoxFeed(
     on_tick=handle_tick,
     on_status=handle_status,
 )
+strategy_engine.set_feed(feed)
 
 def candle_housekeeping() -> None:
     while True:
@@ -149,40 +158,61 @@ def fetch_option_chain_data(
     except Exception as exc:
         return 500, str(exc), None, [], expiry_date
 
-def strategy_background_worker() -> None:
-    """Automated background worker that evaluates option chain and pre-warms history without UI dependency."""
-    LOGGER.info("Strategy automated background worker started.")
+def strategy_schedule_worker() -> None:
+    """
+    Clock driver and coordinator for Opening Gap Entry Strategy (NIFTY 50).
+    Drives schedule checkpoints (09:14:55 lock, 09:15:00 arm, 15:15:00 square-off).
+    Preloads option chain once on startup.
+    Broadcasts live strategy status to SSE clients.
+    """
+    LOGGER.info("Opening Gap Entry Strategy schedule worker started.")
     time.sleep(2)
-    # Pre-warm all subscribed indices at startup
+    # Preload contracts once at startup
     if settings.configured and settings.access_token:
-        for inst_key in settings.instrument_keys:
-            try:
-                status, _, spot, strikes, _ = fetch_option_chain_data(inst_key)
-                if status == 200 and strikes:
-                    strategy_engine._warmup_strikes(strikes)
-                    LOGGER.info("Pre-warmed %s strikes for %s", len(strikes), inst_key)
-            except Exception as exc:
-                LOGGER.debug("Pre-warm failed for %s: %s", inst_key, exc)
+        try:
+            strategy_engine.load_contracts_if_needed()
+            LOGGER.info("Gap Entry Strategy contracts preloaded: %s", len(strategy_engine.all_contracts))
+        except Exception as exc:
+            LOGGER.warning("Startup contract load failed: %s", exc)
 
+    last_broadcast_ms = 0
     while True:
         try:
             now_dt = datetime.now(IST)
             now_time = now_dt.strftime("%H:%M:%S")
-            # Run between 09:14:00 (pre-warm) and 15:15:05 IST
-            if "09:14:00" <= now_time <= "15:15:05" and strategy_engine.enabled and settings.access_token:
-                for inst_key in settings.instrument_keys:
-                    status, _, spot_price, data, _ = fetch_option_chain_data(inst_key)
-                    if status == 200 and spot_price and data:
-                        sig = strategy_engine.process_option_chain_snapshot(spot_price, data, inst_key)
-                        if sig:
-                            publish("strategy_signal", sig)
+
+            if strategy_engine.enabled:
+                # Rule R5: Plan contracts if spot known and still in planning
+                if strategy_engine.state in ("SETUP", "PLANNING") and strategy_engine.spot_price:
+                    strategy_engine.plan_8_itm_contracts(strategy_engine.spot_price)
+
+                # Rule R6: Lock at 09:14:55
+                if "09:14:55" <= now_time < "09:15:00":
+                    if strategy_engine.state in ("SETUP", "PLANNING"):
+                        strategy_engine.lock_contracts()
+
+                # Rule R8: Arm at 09:15:00
+                elif now_time >= "09:15:00":
+                    if strategy_engine.state == "LOCKED":
+                        strategy_engine.arm_bot()
+
+                # Rule R22: EOD square-off at 15:15:00
+                if now_time >= "15:15:00" and strategy_engine.state == "HOLDING":
+                    strategy_engine.manual_exit(reason="SQUAREOFF_1515")
+
+            # Periodic SSE status broadcast (every 1.5 seconds)
+            cur_ms = int(time.time() * 1000)
+            if cur_ms - last_broadcast_ms >= 1500:
+                publish("strategy_update", strategy_engine.get_status())
+                last_broadcast_ms = cur_ms
+
         except Exception:
-            LOGGER.exception("Error in strategy background worker loop")
-        time.sleep(1.0)
+            LOGGER.exception("Error in strategy schedule worker loop")
+        time.sleep(0.5)
 
 strategy_worker_thread = threading.Thread(
-    target=strategy_background_worker,
-    name="strategy-background-worker",
+    target=strategy_schedule_worker,
+    name="strategy-schedule-worker",
     daemon=True,
 )
 strategy_worker_thread.start()
@@ -378,6 +408,27 @@ def api_strategy_config() -> Response:
     body = request.get_json(silent=True) or {}
     new_cfg = strategy_engine.update_config(body)
     return jsonify(new_cfg)
+
+@app.post("/api/strategy/exit")
+def api_strategy_exit() -> Response:
+    """Manual exit trigger for open position (Rule R21)."""
+    pos = strategy_engine.manual_exit(reason="MANUAL")
+    publish("strategy_update", strategy_engine.get_status())
+    return jsonify({"success": True, "position": pos})
+
+@app.post("/api/strategy/arm-now")
+def api_strategy_arm_now() -> Response:
+    """Test utility: forces immediate planning, locking, and arming."""
+    status = strategy_engine.force_arm_now()
+    publish("strategy_update", status)
+    return jsonify({"success": True, "status": status})
+
+@app.post("/api/strategy/reset")
+def api_strategy_reset() -> Response:
+    """Reset strategy state back to PLANNING for testing."""
+    status = strategy_engine.reset_state()
+    publish("strategy_update", status)
+    return jsonify({"success": True, "status": status})
 
 @app.get("/api/strategy/trades")
 def api_strategy_trades() -> Response:

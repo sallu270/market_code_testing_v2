@@ -466,6 +466,27 @@ class MarketDatabase:
             )
             self._connection.commit()
 
+    def update_strategy_trade_exit(
+        self,
+        trade_id: str,
+        exit_time_ist: str,
+        exit_price: float,
+        exit_timestamp_ms: int,
+        exit_reason: str,
+        pnl_points: float,
+        net_pnl: float,
+    ) -> None:
+        self.update_strategy_trade({
+            "trade_id": trade_id,
+            "exit_time_ist": exit_time_ist,
+            "exit_price": exit_price,
+            "exit_timestamp_ms": exit_timestamp_ms,
+            "exit_reason": exit_reason,
+            "pnl_points": pnl_points,
+            "net_pnl": net_pnl,
+            "status": "CLOSED",
+        })
+
     def get_strategy_trades(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(

@@ -3,7 +3,7 @@
 const IST_OFFSET_SEC = 19800; // 5 hours 30 minutes in seconds (IST = UTC + 5:30)
 
 const state = {
-    selectedInstrument: "",
+    selectedInstrument: "NSE_INDEX|Nifty 50",
     chart: null,
     tvChart: null,
     candleSeries: null,
@@ -21,7 +21,7 @@ const state = {
     },
     tickSnapshots: [],
     eventSource: null,
-    activeView: "optionChain",
+    activeView: "gchart",
     optionExpiries: [],
     selectedExpiry: "",
     selectedOptionIndex: "NSE_INDEX|Nifty 50",
@@ -49,15 +49,13 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
     }, 1000);
 
-    // Initialise Strategy tab polling
+    // Initialise GChart & Strategy live polling
     loadStrategyStatus();
     window.setInterval(() => {
-        if (!document.hidden && state.activeView === "strategy") {
+        if (!document.hidden) {
             loadStrategyStatus();
-            loadStrategyTrades();
-            loadStrategySignals();
         }
-    }, 2000);
+    }, 1500);
 });
 
 function mapElements() {
@@ -88,6 +86,18 @@ function mapElements() {
         "upstoxStatus",
         "ticksBody",
         "priceChart",
+        // GChart Header & Ticker elements
+        "gchartClock",
+        "gchartSpot",
+        "gchartExpiry",
+        "btnToggleOptionChain",
+        "btnTqResult",
+        "btnTqTrades",
+        "btnTqSettings",
+        "tqPaneResult",
+        "tqPaneTrades",
+        "tqPaneSettings",
+        "tqPosSummary",
         // Option chain elements
         "tabOptionChain",
         "tabStrategy",
@@ -119,13 +129,17 @@ function mapElements() {
         "stratNetPnl",
         "stratPnlPoints",
         "stratStatusBadge",
-        "stratQtyThreshold",
-        "stratValThreshold",
-        "stratCondDayHigh",
-        "stratCondPrevClose",
-        "stratCondUptick",
+        "stratModeText",
+        "stratLots",
+        "stratOrderBuffer",
+        "stratMaxSpread",
+        "stratMode",
         "btnSaveStratConfig",
+        "btnStratArmNow",
+        "btnStratReset",
+        "btnStratExit",
         "stratConfigStatus",
+        "stratLockedBody",
         "stratTradesBody",
         "stratSignalsBody",
     ];
@@ -136,20 +150,117 @@ function mapElements() {
 }
 
 function bindEvents() {
-    // Tab switching
-    if (elements.tabOptionChain) {
-        elements.tabOptionChain.addEventListener("click", () => switchView("optionChain"));
+    // Live GChart Clock
+    function updateClock() {
+        if (elements.gchartClock) {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour12: false });
+            elements.gchartClock.textContent = timeStr;
+        }
     }
-    if (elements.tabStrategy) {
-        elements.tabStrategy.addEventListener("click", () => switchView("strategy"));
+    updateClock();
+    window.setInterval(updateClock, 1000);
+
+    // Toggle Option Chain View
+    if (elements.btnToggleOptionChain) {
+        elements.btnToggleOptionChain.addEventListener("click", () => {
+            if (elements.viewOptionChain) {
+                elements.viewOptionChain.hidden = !elements.viewOptionChain.hidden;
+                if (!elements.viewOptionChain.hidden && !state.chainData) {
+                    loadOptionChain(true);
+                }
+            }
+        });
     }
-    if (elements.tabLiveFeed) {
-        elements.tabLiveFeed.addEventListener("click", () => switchView("liveFeed"));
+
+    // Tick Query Subtabs
+    const tqTabs = [
+        { btn: elements.btnTqResult, pane: elements.tqPaneResult },
+        { btn: elements.btnTqTrades, pane: elements.tqPaneTrades, onLoad: loadStrategyTrades },
+        { btn: elements.btnTqSettings, pane: elements.tqPaneSettings },
+    ];
+    tqTabs.forEach(t => {
+        if (t.btn && t.pane) {
+            t.btn.addEventListener("click", () => {
+                tqTabs.forEach(other => {
+                    if (other.btn) other.btn.classList.toggle("active", other === t);
+                    if (other.pane) other.pane.hidden = (other !== t);
+                });
+                if (t.onLoad) t.onLoad();
+            });
+        }
+    });
+
+    // Chart Timeframe Period Keypad
+    document.querySelectorAll(".gchart-key-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            document.querySelectorAll(".gchart-key-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            const tf = btn.getAttribute("data-timeframe");
+            if (tf) {
+                state.timeframe = tf;
+                loadCandles();
+            }
+        });
+    });
+
+    // Chart Scale Reset
+    if (elements.btnRefreshChart) {
+        elements.btnRefreshChart.addEventListener("click", () => {
+            if (state.tvChart) {
+                state.tvChart.timeScale().resetTimeScale();
+                state.tvChart.timeScale().fitContent();
+            }
+        });
     }
 
     // Strategy configuration save button
     if (elements.btnSaveStratConfig) {
         elements.btnSaveStratConfig.addEventListener("click", saveStrategyConfig);
+    }
+    if (elements.btnStratArmNow) {
+        elements.btnStratArmNow.addEventListener("click", async () => {
+            if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Arming bot now...";
+            try {
+                const res = await fetch("/api/strategy/arm-now", { method: "POST" });
+                if (res.ok) {
+                    await loadStrategyStatus();
+                    if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "⚡ Bot ARMED!";
+                }
+            } catch (err) {
+                console.error("Arm bot error", err);
+            }
+        });
+    }
+    if (elements.btnStratReset) {
+        elements.btnStratReset.addEventListener("click", async () => {
+            if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Resetting bot...";
+            try {
+                const res = await fetch("/api/strategy/reset", { method: "POST" });
+                if (res.ok) {
+                    await loadStrategyStatus();
+                    if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Bot reset to PLANNING";
+                }
+            } catch (err) {
+                console.error("Reset bot error", err);
+            }
+        });
+    }
+    if (elements.btnStratExit) {
+        elements.btnStratExit.addEventListener("click", async () => {
+            if (!confirm("Are you sure you want to manually exit any open position now?")) return;
+            if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Exiting position...";
+            try {
+                const res = await fetch("/api/strategy/exit", { method: "POST" });
+                if (res.ok) {
+                    await loadStrategyStatus();
+                    await loadStrategyTrades();
+                    if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Position exited!";
+                }
+            } catch (err) {
+                console.error("Manual exit error", err);
+            }
+        });
     }
 
     // Option chain controls
@@ -304,36 +415,36 @@ function initialiseChart() {
 
     state.tvChart = LightweightCharts.createChart(container, {
         width: container.clientWidth || 800,
-        height: container.clientHeight || 440,
+        height: container.clientHeight || 520,
         layout: {
-            background: { type: "solid", color: "#081321" },
-            textColor: "#8fa3ba",
+            background: { type: "solid", color: "#000000" },
+            textColor: "#cbd5e1",
             fontSize: 12,
-            fontFamily: "'Inter', system-ui, sans-serif",
+            fontFamily: "'Consolas', monospace",
         },
         localization: {
             locale: "en-IN",
             dateFormat: "dd MMM yyyy",
         },
         grid: {
-            vertLines: { color: "rgba(148, 163, 184, 0.06)" },
-            horzLines: { color: "rgba(148, 163, 184, 0.06)" },
+            vertLines: { color: "#0d1522" },
+            horzLines: { color: "#0d1522" },
         },
         crosshair: {
             mode: LightweightCharts.CrosshairMode.Normal,
             vertLine: {
-                color: "rgba(83, 224, 193, 0.35)",
+                color: "rgba(0, 255, 102, 0.4)",
                 width: 1,
                 style: LightweightCharts.LineStyle.Dashed,
             },
             horzLine: {
-                color: "rgba(83, 224, 193, 0.35)",
+                color: "rgba(0, 255, 102, 0.4)",
                 width: 1,
                 style: LightweightCharts.LineStyle.Dashed,
             },
         },
         rightPriceScale: {
-            borderColor: "rgba(148, 163, 184, 0.15)",
+            borderColor: "#1e293b",
             autoScale: true,
             scaleMargins: {
                 top: 0.08,
@@ -341,14 +452,14 @@ function initialiseChart() {
             },
         },
         timeScale: {
-            borderColor: "rgba(148, 163, 184, 0.15)",
+            borderColor: "#1e293b",
             timeVisible: true,
-            secondsVisible: state.timeframe === "tick",
+            secondsVisible: true,
         },
     });
 
     state.volumeSeries = state.tvChart.addHistogramSeries({
-        color: "rgba(83, 224, 193, 0.25)",
+        color: "rgba(0, 255, 102, 0.25)",
         priceFormat: {
             type: "volume",
         },
@@ -362,13 +473,26 @@ function initialiseChart() {
     });
 
     state.candleSeries = state.tvChart.addCandlestickSeries({
-        upColor: "#089981",
-        downColor: "#f23645",
-        borderUpColor: "#089981",
-        borderDownColor: "#f23645",
-        wickUpColor: "#089981",
-        wickDownColor: "#f23645",
+        upColor: "#00ff66",
+        downColor: "#ff2a4b",
+        borderUpColor: "#00ff66",
+        borderDownColor: "#ff2a4b",
+        wickUpColor: "#00ff66",
+        wickDownColor: "#ff2a4b",
     });
+
+    // Auto-fit on resize
+    if (window.ResizeObserver) {
+        const ro = new ResizeObserver(() => {
+            if (state.tvChart && container.clientWidth > 0) {
+                state.tvChart.applyOptions({
+                    width: container.clientWidth,
+                    height: container.clientHeight || 520,
+                });
+            }
+        });
+        ro.observe(container);
+    }
 
     state.areaSeries = state.tvChart.addAreaSeries({
         topColor: "rgba(8, 153, 129, 0.4)",
@@ -607,6 +731,21 @@ function handleEvent(event) {
 
     if (event.type === "status") {
         setStatus(payload.state || "waiting", payload.message || "");
+        return;
+    }
+
+    if (event.type === "strategy_update") {
+        if (state.activeView === "strategy") {
+            loadStrategyStatus();
+        }
+        return;
+    }
+
+    if (event.type === "strategy_trade") {
+        if (state.activeView === "strategy") {
+            loadStrategyStatus();
+            loadStrategyTrades();
+        }
         return;
     }
 
@@ -1424,7 +1563,7 @@ function flashElement(el, flashClass) {
 }
 
 /* ==========================================================================
-   STRATEGY PAPER TRADES DATA FETCHER & RENDERER
+   OPENING GAP ENTRY BOT DATA FETCHER & RENDERER (NIFTY 50)
    ========================================================================== */
 
 async function loadStrategyStatus() {
@@ -1432,86 +1571,147 @@ async function loadStrategyStatus() {
         const res = await fetchJson("/api/strategy/status");
         if (!res) return;
 
-        // Positions (Per Instrument: NIFTY, BANKNIFTY, SENSEX)
-        const openPositions = Object.values(res.current_positions || {}).filter(p => p && p.status === "OPEN");
-        if (openPositions.length === 0 && res.current_position && res.current_position.status === "OPEN") {
-            openPositions.push(res.current_position);
+        // 1. Bot State Badge & Mode
+        const stateStr = res.state || "SETUP";
+        if (elements.stratStatusBadge) {
+            elements.stratStatusBadge.textContent = stateStr;
+            elements.stratStatusBadge.className = 'gchart-state-badge state-' + stateStr.toLowerCase();
+        }
+        if (elements.gchartSpot && res.spot_price) {
+            elements.gchartSpot.textContent = `NC=${formatNumber(res.spot_price, 2)}`;
+        }
+        if (elements.gchartExpiry && res.active_expiry) {
+            elements.gchartExpiry.textContent = `EXP: ${res.active_expiry}`;
         }
 
+        // 2. Active Position (Only 1 active position for NIFTY 50)
+        const pos = res.current_position;
         if (elements.stratCurrentPosition) {
-            if (openPositions.length > 0) {
-                elements.stratCurrentPosition.innerHTML = openPositions.map(p => {
-                    const isCe = p.side === "BUY_CE";
-                    return `
-                        <div style="font-size: 0.95em; margin-bottom: 2px;">
-                            <span class="${isCe ? 'text--up' : 'text--down'}">
-                                ${escapeHtml(p.side)}: ${escapeHtml(p.symbol)}
-                            </span>
-                        </div>
-                    `;
-                }).join("");
-
-                elements.stratPositionDetail.textContent = openPositions.map(p => 
-                    `${p.symbol.split(' ')[0]}: @ ${formatNumber(p.entry_price, 2)} (${p.entry_time_ist})`
-                ).join(" | ");
+            if (pos && pos.status === "OPEN") {
+                const isCe = (pos.side || "").includes("CE");
+                const pts = toNumber(pos.pnl_points) || 0;
+                const net = toNumber(pos.net_pnl) || 0;
+                elements.stratCurrentPosition.innerHTML = `
+                    <span style="color: ${isCe ? '#00ff66' : '#ff3344'}; font-weight: 700;">
+                        ${escapeHtml(pos.side)}: ${escapeHtml(pos.symbol)}
+                    </span>
+                `;
+                if (elements.stratPositionDetail) {
+                    elements.stratPositionDetail.textContent = `@ ${formatNumber(pos.entry_price, 2)} (${pos.entry_time_ist}) | Cur: @ ${formatNumber(pos.current_price || pos.entry_price, 2)}`;
+                }
+                if (elements.stratNetPnl) {
+                    elements.stratNetPnl.textContent = `${net >= 0 ? '+' : ''}₹${formatNumber(net, 2)}`;
+                    elements.stratNetPnl.className = net >= 0 ? "diff-positive" : "diff-negative";
+                }
+                if (elements.stratPnlPoints) {
+                    elements.stratPnlPoints.textContent = `(${pts >= 0 ? '+' : ''}${formatNumber(pts, 2)} pts)`;
+                }
+                if (elements.tqPosSummary) {
+                    elements.tqPosSummary.innerHTML = `<strong style="color: #53e0c1;">ACTIVE:</strong> ${escapeHtml(pos.symbol)} @ ${formatNumber(pos.entry_price, 2)} | P&L: ₹${formatNumber(net, 2)}`;
+                }
             } else {
-                elements.stratCurrentPosition.textContent = "FLAT (NO POSITIONS)";
-                elements.stratPositionDetail.textContent = "Scanning NIFTY, BANKNIFTY & SENSEX (1 trade each)";
+                elements.stratCurrentPosition.textContent = "FLAT (NO POSITION)";
+                elements.stratCurrentPosition.style.color = "#94a3b8";
+                if (elements.stratPositionDetail) {
+                    elements.stratPositionDetail.textContent = 
+                        stateStr === "HOLDING" ? "Managing position" :
+                        stateStr === "ARMED" ? "Armed! Watching 1st positive tick at 09:15" :
+                        stateStr === "LOCKED" ? "8 ITM candidates locked with Ref LTP at 09:14:55" :
+                        stateStr === "CLOSED" ? "Daily trade completed for today" :
+                        stateStr === "NO_TRADE" ? "Entry window expired. No trade today." :
+                        "Watching 8 ITM candidates at 09:15:00";
+                }
+                if (elements.stratNetPnl) {
+                    const todayPnl = Number(res.today_net_pnl_inr || 0);
+                    elements.stratNetPnl.textContent = `${todayPnl >= 0 ? '+' : ''}₹${formatNumber(todayPnl, 2)}`;
+                    elements.stratNetPnl.className = todayPnl >= 0 ? "diff-positive" : "diff-negative";
+                }
+                if (elements.stratPnlPoints) {
+                    const todayPts = Number(res.today_pnl_points || 0);
+                    elements.stratPnlPoints.textContent = `(${todayPts >= 0 ? '+' : ''}${formatNumber(todayPts, 2)} pts)`;
+                }
+                if (elements.tqPosSummary) {
+                    elements.tqPosSummary.textContent = "Watching 8 ITM Candidates at 09:15:00";
+                }
             }
         }
 
-        // Summary (Distinguish Today vs Lifetime)
-        const todayTrades = res.today_trades !== undefined ? res.today_trades : (res.total_trades || 0);
-        const lifetimeTrades = res.lifetime_trades !== undefined ? res.lifetime_trades : todayTrades;
-        const todayWins = res.today_win_trades || 0;
-        const todayLosses = res.today_loss_trades || 0;
-        const todayPnl = Number(res.today_net_pnl_inr !== undefined ? res.today_net_pnl_inr : (res.net_pnl_inr || 0));
-        const todayPts = Number(res.today_pnl_points !== undefined ? res.today_pnl_points : (res.pnl_points_total || 0));
-        const lifetimePnl = Number(res.lifetime_net_pnl_inr !== undefined ? res.lifetime_net_pnl_inr : todayPnl);
-        const lot = res.config?.lot_size || 65;
-
+        // 3. Today & Lifetime Performance
+        const todayTrades = res.today_trades || 0;
         if (elements.stratTotalTrades) {
-            elements.stratTotalTrades.textContent = `${todayTrades} Trade${todayTrades === 1 ? '' : 's'} Today`;
-        }
-        if (elements.stratWinLossRatio) {
-            elements.stratWinLossRatio.textContent = `${todayWins} Wins / ${todayLosses} Losses (Overall: ${lifetimeTrades} trades)`;
-        }
-        if (elements.stratNetPnl) {
-            elements.stratNetPnl.textContent = `${todayPnl >= 0 ? '+' : ''}₹${formatNumber(todayPnl, 2)}`;
-            elements.stratNetPnl.className = todayPnl >= 0 ? "text--up" : "text--down";
-        }
-        if (elements.stratPnlPoints) {
-            elements.stratPnlPoints.textContent = `${todayPts >= 0 ? '+' : ''}${formatNumber(todayPts, 2)} Pts Today (Overall: ${lifetimePnl >= 0 ? '+' : ''}₹${formatNumber(lifetimePnl, 2)})`;
-            elements.stratPnlPoints.className = todayPts >= 0 ? "text--up" : "text--down";
+            elements.stratTotalTrades.textContent = `${todayTrades} / 1 Traded`;
         }
 
-        // Config inputs
+        // 4. Config Inputs
         const cfg = res.config || {};
-        if (elements.stratQtyThreshold && document.activeElement !== elements.stratQtyThreshold) {
-            elements.stratQtyThreshold.value = cfg.qty_threshold || 50;
+        if (elements.stratLots && document.activeElement !== elements.stratLots) {
+            elements.stratLots.value = cfg.lots || 1;
         }
-        if (elements.stratValThreshold && document.activeElement !== elements.stratValThreshold) {
-            elements.stratValThreshold.value = cfg.value_threshold_lakhs || 5;
+        if (elements.stratOrderBuffer && document.activeElement !== elements.stratOrderBuffer) {
+            elements.stratOrderBuffer.value = cfg.order_buffer || 0.50;
         }
-        if (elements.stratCondDayHigh) elements.stratCondDayHigh.checked = !!cfg.use_day_high_condition;
-        if (elements.stratCondPrevClose) elements.stratCondPrevClose.checked = !!cfg.use_prev_close_condition;
-        if (elements.stratCondUptick) elements.stratCondUptick.checked = !!cfg.use_uptick_condition;
+        if (elements.stratMaxSpread && document.activeElement !== elements.stratMaxSpread) {
+            elements.stratMaxSpread.value = cfg.max_spread_pct || 3.0;
+        }
+        if (elements.stratMode && document.activeElement !== elements.stratMode) {
+            elements.stratMode.value = cfg.mode || "paper";
+        }
+
+        // 5. 8 Locked ITM Candidates Table (GChart Table format matching user screenshot)
+        const lockedList = res.locked_contracts || [];
+        if (elements.stratLockedBody) {
+            if (!lockedList.length) {
+                elements.stratLockedBody.innerHTML = `
+                    <tr>
+                        <td colspan="6" style="text-align: center; color: var(--muted); padding: 30px;">
+                            Awaiting spot tick to plan 8 ITM candidates (4 CE below spot, 4 PE above spot)...
+                        </td>
+                    </tr>
+                `;
+            } else {
+                elements.stratLockedBody.innerHTML = lockedList.map(c => {
+                    const ltp = toNumber(c.ltp);
+                    const ref = toNumber(c.ref_ltp);
+                    const diff = (ltp !== null && ref !== null) ? (ltp - ref) : null;
+                    const diffClass = (diff !== null && diff > 0.001) ? "diff-positive" :
+                                      (diff !== null && diff < -0.001) ? "diff-negative" : "diff-zero";
+                    const diffText = (diff !== null) ? ((diff > 0 ? "+" : "") + formatNumber(diff, 2)) : "—";
+                    const isWinner = res.last_decision && res.last_decision.chosen_strike === c.strike && res.last_decision.side === c.side;
+                    const timeStr = formatTime(c.last_trade_ms || Date.now());
+
+                    return `
+                        <tr class="${isWinner ? 'winner-row' : ''}">
+                            <td style="color: #94a3b8; font-size: 0.8em;">${escapeHtml(timeStr)}</td>
+                            <td>
+                                <span style="font-weight: 700; color: #fff;">${escapeHtml(c.symbol || '')}</span>
+                                <span style="color: #f59e0b; font-size: 0.8em; margin-left: 4px;">[${ref !== null ? formatNumber(ref, 1) : '—'}]</span>
+                            </td>
+                            <td style="font-weight: 700; color: #fff;">${ltp !== null ? formatNumber(ltp, 2) : '—'}</td>
+                            <td class="${diffClass}">${diffText}</td>
+                            <td style="color: #94a3b8;">${c.bid_qty || c.ask_qty || 65}</td>
+                            <td style="color: #38bdf8; font-weight: 600;">${c.spread_pct != null ? formatNumber(c.spread_pct, 2) + '%' : '—'}</td>
+                        </tr>
+                    `;
+                }).join("");
+            }
+        }
+
     } catch (err) {
-        console.error("Strategy status failed", err);
+        console.error("Opening Gap Strategy status failed", err);
     }
 }
 
 async function loadStrategyTrades() {
     try {
-        const res = await fetchJson("/api/strategy/trades?limit=100");
+        const res = await fetchJson("/api/strategy/trades?limit=50");
         const trades = res.trades || [];
         if (!elements.stratTradesBody) return;
 
         if (!trades.length) {
             elements.stratTradesBody.innerHTML = `
                 <tr>
-                    <td colspan="16" class="table-empty">
-                        No paper trades recorded yet. Scanning 1% ITM contracts between 09:15 and 15:15...
+                    <td colspan="7" style="text-align: center; color: var(--muted); padding: 25px;">
+                        No trades executed today. Opening gap entry triggers on first positive tick at 09:15.
                     </td>
                 </tr>
             `;
@@ -1519,36 +1719,25 @@ async function loadStrategyTrades() {
         }
 
         elements.stratTradesBody.innerHTML = trades.map(t => {
-            const isCe = t.side === "BUY_CE";
+            const isCe = (t.side || "").includes("CE");
             const pnl = toNumber(t.net_pnl);
-            const pnlPts = toNumber(t.pnl_points);
             const isOpen = t.status === "OPEN";
-            const tradeDate = t.trade_date || (t.entry_timestamp_ms ? new Date(t.entry_timestamp_ms).toISOString().slice(0, 10) : '—');
 
             return `
                 <tr>
-                    <td style="text-align: left; font-weight: 600;">${escapeHtml(t.trade_id)}</td>
-                    <td style="text-align: center; color: var(--muted); font-size: 0.85em;">${escapeHtml(tradeDate)}</td>
+                    <td style="font-weight: 600; color: #cbd5e1;">${escapeHtml(t.trade_id)}</td>
                     <td style="text-align: center;">
                         <span class="badge ${isCe ? 'badge--atm' : 'badge--closed'}">${escapeHtml(t.side)}</span>
                     </td>
-                    <td style="text-align: left; font-weight: 700; color: #fff;">${escapeHtml(t.symbol)}</td>
-                    <td style="text-align: right;">${formatNumber(t.strike, 0)}</td>
-                    <td style="text-align: right;">${t.lot_size}</td>
-                    <td style="text-align: center;">${escapeHtml(t.entry_time_ist || '—')}</td>
-                    <td style="text-align: right;"><strong>${formatNumber(t.entry_price, 2)}</strong></td>
-                    <td style="text-align: center;">${escapeHtml(t.exit_time_ist || '—')}</td>
-                    <td style="text-align: right;"><strong>${t.exit_price ? formatNumber(t.exit_price, 2) : '—'}</strong></td>
-                    <td style="text-align: left; color: var(--muted);">${escapeHtml(t.exit_reason || '—')}</td>
-                    <td style="text-align: right;" class="${renderChgClass(pnlPts)}">${pnlPts !== null ? renderChgVal(pnlPts) : '—'}</td>
-                    <td style="text-align: right;" class="${renderChgClass(pnl)}">
+                    <td style="font-weight: 700; color: #fff;">${escapeHtml(t.symbol)}</td>
+                    <td style="font-weight: 700;">${formatNumber(t.entry_price, 2)}</td>
+                    <td style="font-weight: 700;">${t.exit_price ? formatNumber(t.exit_price, 2) : '—'}</td>
+                    <td class="${pnl !== null && pnl >= 0 ? 'diff-positive' : 'diff-negative'}">
                         <strong>${pnl !== null ? `${pnl >= 0 ? '+' : ''}₹${formatNumber(pnl, 2)}` : '—'}</strong>
                     </td>
                     <td style="text-align: center;">
                         <span class="badge ${isOpen ? 'badge--atm' : 'badge--closed'}">${isOpen ? 'OPEN' : 'CLOSED'}</span>
                     </td>
-                    <td style="text-align: right; color: var(--muted);">${t.spot_price ? formatNumber(t.spot_price, 2) : '—'}</td>
-                    <td style="text-align: right; color: var(--muted);">${t.atm_strike ? formatNumber(t.atm_strike, 0) : '—'}</td>
                 </tr>
             `;
         }).join("");
@@ -1557,79 +1746,33 @@ async function loadStrategyTrades() {
     }
 }
 
-async function loadStrategySignals() {
-    try {
-        const res = await fetchJson("/api/strategy/signals?limit=50");
-        const signals = res.signals || [];
-        if (!elements.stratSignalsBody) return;
-
-        if (!signals.length) {
-            elements.stratSignalsBody.innerHTML = `
-                <tr>
-                    <td colspan="14" class="table-empty">
-                        No buy pressure signals triggered yet.
-                    </td>
-                </tr>
-            `;
-            return;
-        }
-
-        elements.stratSignalsBody.innerHTML = signals.map(s => {
-            const isCe = s.side === "CE";
-            const instName = s.instrument_name || (s.strike >= 70000 ? "SENSEX" : s.strike >= 45000 ? "BANKNIFTY" : "NIFTY");
-            const instColor = instName === "BANKNIFTY" ? "#c084fc" : instName === "SENSEX" ? "#60a5fa" : "#34d399";
-            const bidAsk = (s.bid_price || s.ask_price)
-                ? `${formatNumber(s.bid_price, 2)} / ${formatNumber(s.ask_price, 2)}`
-                : "— / —";
-            const spreadPct = s.spread_pct != null ? `${formatNumber(s.spread_pct, 2)}%` : "—";
-            const oiChg = s.oi_change != null ? (s.oi_change >= 0 ? "+" : "") + formatInteger(s.oi_change) : "—";
-            const confColor = s.confidence === "HIGH" ? "var(--primary)" : s.confidence === "MEDIUM" ? "#f59e0b" : "var(--muted)";
-            return `
-                <tr>
-                    <td style="text-align: left;">${escapeHtml(s.timestamp_ist)}</td>
-                    <td style="text-align: center;">
-                        <span style="display: inline-block; padding: 2px 7px; border-radius: 6px; font-weight: 750; font-size: 0.72rem; letter-spacing: 0.04em; background: rgba(255,255,255,0.06); color: ${instColor}; border: 1px solid ${instColor}40;">
-                            ${escapeHtml(instName)}
-                        </span>
-                    </td>
-                    <td style="text-align: center;">
-                        <span class="badge ${isCe ? 'badge--atm' : 'badge--closed'}">${escapeHtml(s.side)}</span>
-                    </td>
-                    <td style="text-align: right;">${formatNumber(s.strike, 0)}</td>
-                    <td style="text-align: right;"><strong>${formatNumber(s.ltp, 2)}</strong></td>
-                    <td style="text-align: right;">+${formatInteger(s.qty_delta)}</td>
-                    <td style="text-align: right;">₹${formatNumber(s.val_lakhs, 2)}L</td>
-                    <td style="text-align: right;">${formatNumber(s.day_high, 2)}</td>
-                    <td style="text-align: right;">${formatNumber(s.prev_close, 2)}</td>
-                    <td style="text-align: right; font-size: 0.8em;">${bidAsk}</td>
-                    <td style="text-align: right;">${spreadPct}</td>
-                    <td style="text-align: right;">${oiChg}</td>
-                    <td style="text-align: center; font-weight: 700; color: ${confColor};">${escapeHtml(s.confidence || '—')}</td>
-                    <td style="text-align: center; font-weight: 700; color: ${s.action_taken && (s.action_taken.includes('ENTER') || s.action_taken.includes('REVERS')) ? 'var(--primary)' : 'var(--muted)'};">
-                        ${escapeHtml(s.action_taken)}
-                    </td>
-                </tr>
-            `;
-        }).join("");
-    } catch (err) {
-        console.error("Failed to load strategy signals", err);
-    }
-}
-
 async function saveStrategyConfig() {
     const body = {
-        qty_threshold: parseFloat(elements.stratQtyThreshold?.value || 50),
-        value_threshold_lakhs: parseFloat(elements.stratValThreshold?.value || 5),
-        use_day_high_condition: elements.stratCondDayHigh?.checked,
-        use_prev_close_condition: elements.stratCondPrevClose?.checked,
-        use_uptick_condition: elements.stratCondUptick?.checked,
+        lots: parseInt(elements.stratLots?.value || 1, 10),
+        order_buffer: parseFloat(elements.stratOrderBuffer?.value || 0.50),
+        max_spread_pct: parseFloat(elements.stratMaxSpread?.value || 3.0),
+        mode: elements.stratMode?.value || "paper",
     };
 
-    if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Saving...";
+    if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Saving rules...";
 
     try {
         const res = await fetch("/api/strategy/config", {
             method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        if (res.ok) {
+            if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Parameters saved!";
+            await loadStrategyStatus();
+            setTimeout(() => {
+                if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Opening gap engine ready";
+            }, 2500);
+        }
+    } catch (err) {
+        if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Failed to save";
+    }
+}
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
         });
