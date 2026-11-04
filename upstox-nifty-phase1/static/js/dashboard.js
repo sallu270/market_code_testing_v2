@@ -401,71 +401,85 @@ function initialiseChart() {
         width: container.clientWidth || 800,
         height: container.clientHeight || 520,
         layout: {
-            background: { type: "solid", color: "#000000" },
-            textColor: "#cbd5e1",
+            background: { type: "solid", color: "#131722" },
+            textColor: "#787b86",
             fontSize: 12,
-            fontFamily: "'Consolas', monospace",
+            fontFamily: "-apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif",
         },
         localization: {
             locale: "en-IN",
             dateFormat: "dd MMM yyyy",
         },
         grid: {
-            vertLines: { color: "#0d1522" },
-            horzLines: { color: "#0d1522" },
+            vertLines: { color: "#1e222d", style: LightweightCharts.LineStyle.Solid },
+            horzLines: { color: "#1e222d", style: LightweightCharts.LineStyle.Solid },
         },
         crosshair: {
             mode: LightweightCharts.CrosshairMode.Normal,
             vertLine: {
-                color: "rgba(0, 255, 102, 0.4)",
+                color: "#758696",
                 width: 1,
                 style: LightweightCharts.LineStyle.Dashed,
+                labelBackgroundColor: "#2a2e39",
             },
             horzLine: {
-                color: "rgba(0, 255, 102, 0.4)",
+                color: "#758696",
                 width: 1,
                 style: LightweightCharts.LineStyle.Dashed,
+                labelBackgroundColor: "#2a2e39",
             },
         },
         rightPriceScale: {
-            borderColor: "#1e293b",
+            borderColor: "#2a2e39",
             autoScale: true,
             scaleMargins: {
-                top: 0.08,
-                bottom: 0.08,
+                top: 0.1,
+                bottom: 0.1,
             },
         },
         timeScale: {
-            borderColor: "#1e293b",
+            borderColor: "#2a2e39",
             timeVisible: true,
             secondsVisible: false,
-            barSpacing: 14,
-            minBarSpacing: 4,
+            barSpacing: 12,
+            minBarSpacing: 3,
             rightOffset: 8,
         },
     });
 
     state.candleSeries = state.tvChart.addCandlestickSeries({
-        upColor: "#00ff66",
-        downColor: "#ff2a4b",
-        borderUpColor: "#00ff66",
-        borderDownColor: "#ff2a4b",
-        wickUpColor: "#00ff66",
-        wickDownColor: "#ff2a4b",
-        priceLineColor: "#00ff66",
+        upColor: "#089981",
+        downColor: "#f23645",
+        borderUpColor: "#089981",
+        borderDownColor: "#f23645",
+        wickUpColor: "#089981",
+        wickDownColor: "#f23645",
+        priceLineColor: "#089981",
         priceLineWidth: 1,
         priceLineStyle: LightweightCharts.LineStyle.Dashed,
     });
 
     state.areaSeries = state.tvChart.addAreaSeries({
-        topColor: "rgba(0, 255, 102, 0.35)",
-        bottomColor: "rgba(0, 255, 102, 0.02)",
-        lineColor: "#00ff66",
+        topColor: "rgba(41, 98, 255, 0.28)",
+        bottomColor: "rgba(41, 98, 255, 0.0)",
+        lineColor: "#2962ff",
         lineWidth: 2,
         priceLineVisible: true,
         lastValueVisible: true,
     });
     state.areaSeries.applyOptions({ visible: false });
+
+    // TradingView Style Crosshair Legend Update
+    state.tvChart.subscribeCrosshairMove((param) => {
+        if (!param || !param.time || !param.seriesPrices) {
+            renderCurrentCandle();
+            return;
+        }
+        const data = param.seriesPrices.get(state.candleSeries);
+        if (data) {
+            updateOHLCLegend(data);
+        }
+    });
 
     // Handle container resize
     if (window.ResizeObserver) {
@@ -924,13 +938,39 @@ function refreshVisibleTick() {
     }
 }
 
+function updateOHLCLegend(candle) {
+    if (!candle) return;
+    const o = toNumber(candle.open);
+    const h = toNumber(candle.high);
+    const l = toNumber(candle.low);
+    const c = toNumber(candle.close);
+    const v = candle.volume !== undefined ? toNumber(candle.volume) : null;
+
+    if (elements.openValue) elements.openValue.textContent = formatNumber(o);
+    if (elements.highValue) elements.highValue.textContent = formatNumber(h);
+    if (elements.lowValue) elements.lowValue.textContent = formatNumber(l);
+    if (elements.closeValue) elements.closeValue.textContent = formatNumber(c);
+    if (elements.volumeValue && v !== null) elements.volumeValue.textContent = formatNumber(v, 0);
+
+    const changeEl = document.getElementById("ohlcChange");
+    if (changeEl && o !== null && c !== null) {
+        const diff = c - o;
+        const pct = o > 0 ? (diff / o) * 100 : 0;
+        const sign = diff >= 0 ? "+" : "";
+        changeEl.textContent = `${sign}${formatNumber(diff)} (${sign}${pct.toFixed(2)}%)`;
+        changeEl.style.color = diff >= 0 ? "#089981" : "#f23645";
+    }
+}
+
 function renderCurrentCandle() {
     const candles = orderedCandles();
-    const candle = candles[candles.length - 1];
+    const candle = state.activeCandle || candles[candles.length - 1];
 
     if (!candle) {
-        elements.candleState.textContent = "Waiting";
-        elements.candleState.classList.remove("badge--closed");
+        if (elements.candleState) {
+            elements.candleState.textContent = "Waiting";
+            elements.candleState.classList.remove("badge--closed");
+        }
 
         for (const id of [
             "openValue",
@@ -940,27 +980,27 @@ function renderCurrentCandle() {
             "volumeValue",
             "tickCount",
         ]) {
-            elements[id].textContent = "—";
+            if (elements[id]) elements[id].textContent = "—";
         }
         return;
     }
 
-    elements.candleState.textContent =
-        Number(candle.is_closed) === 1 || candle.is_closed === true
-            ? "Closed"
-            : "Building";
+    if (elements.candleState) {
+        elements.candleState.textContent =
+            Number(candle.is_closed) === 1 || candle.is_closed === true
+                ? "Closed"
+                : "Building";
 
-    elements.candleState.classList.toggle(
-        "badge--closed",
-        Number(candle.is_closed) === 1 || candle.is_closed === true
-    );
+        elements.candleState.classList.toggle(
+            "badge--closed",
+            Number(candle.is_closed) === 1 || candle.is_closed === true
+        );
+    }
 
-    elements.openValue.textContent = formatNumber(candle.open);
-    elements.highValue.textContent = formatNumber(candle.high);
-    elements.lowValue.textContent = formatNumber(candle.low);
-    elements.closeValue.textContent = formatNumber(candle.close);
-    elements.volumeValue.textContent = formatNumber(candle.volume, 0);
-    elements.tickCount.textContent = String(candle.tick_count ?? "—");
+    updateOHLCLegend(candle);
+    if (elements.tickCount) {
+        elements.tickCount.textContent = String(candle.tick_count ?? "—");
+    }
 }
 
 function renderChart() {

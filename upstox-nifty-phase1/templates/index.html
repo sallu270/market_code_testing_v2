@@ -16,7 +16,7 @@
     >
     <link
         rel="stylesheet"
-        href="{{ url_for('static', filename='css/styles.css') }}?v=2.0.2"
+        href="{{ url_for('static', filename='css/styles.css') }}?v=2.1.0"
     >
     <script
         src="{{ url_for('static', filename='js/lightweight-charts.standalone.production.js') }}"
@@ -27,7 +27,7 @@
         defer
     ></script>
     <script
-        src="{{ url_for('static', filename='js/dashboard.js') }}?v=2.0.2"
+        src="{{ url_for('static', filename='js/dashboard.js') }}?v=2.1.0"
         defer
     ></script>
 </head>
@@ -148,15 +148,16 @@
                 </div>
             </div>
 
-            <!-- Compact Live OHLC bar -->
-            <div style="display: flex; gap: 16px; padding: 6px 12px; background: #060b13; border-top: 1px solid #162030; font-size: 0.78rem; font-family: monospace; color: #94a3b8; flex-wrap: wrap;">
-                <span>O: <strong id="openValue" style="color: #fff;">—</strong></span>
-                <span>H: <strong id="highValue" style="color: #53e0c1;">—</strong></span>
-                <span>L: <strong id="lowValue" style="color: #ff3344;">—</strong></span>
-                <span>C: <strong id="closeValue" style="color: #fff;">—</strong></span>
-                <span>Vol: <strong id="volumeValue" style="color: #fff;">—</strong></span>
-                <span>Candle: <span id="candleState" class="badge" style="font-size: 0.7rem; padding: 1px 6px;">Building</span></span>
-                <span style="margin-left: auto;">Ticks: <strong id="storedCounts" style="color: #53e0c1;">0</strong></span>
+            <!-- TradingView Style Live OHLC bar -->
+            <div id="chartOhlcLegend" style="display: flex; gap: 14px; padding: 6px 14px; background: #131722; border-top: 1px solid #2a2e39; font-size: 0.8rem; font-family: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, monospace; color: #787b86; flex-wrap: wrap; align-items: center;">
+                <span style="font-weight: 700; color: #d1d4dc;">NIFTY 50</span>
+                <span>O <strong id="openValue" style="color: #d1d4dc;">—</strong></span>
+                <span>H <strong id="highValue" style="color: #089981;">—</strong></span>
+                <span>L <strong id="lowValue" style="color: #f23645;">—</strong></span>
+                <span>C <strong id="closeValue" style="color: #d1d4dc;">—</strong></span>
+                <span id="ohlcChangeWrapper" style="display: inline-flex; gap: 4px;">Chg <strong id="ohlcChange" style="color: #089981;">0.00 (0.00%)</strong></span>
+                <span>Vol <strong id="volumeValue" style="color: #d1d4dc;">—</strong></span>
+                <span style="margin-left: auto;">Ticks: <strong id="storedCounts" style="color: #2962ff;">0</strong></span>
             </div>
         </section>
 

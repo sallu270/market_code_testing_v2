@@ -1234,8 +1234,8 @@ tbody tr:hover {
 
 /* Left: Chart Window */
 .gchart-window {
-    background: #000000;
-    border: 1px solid #1a2230;
+    background: #131722;
+    border: 1px solid #2a2e39;
     border-radius: 8px;
     overflow: hidden;
     display: flex;
@@ -1246,10 +1246,10 @@ tbody tr:hover {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    background: #060b13;
+    background: #1e222d;
     padding: 6px 12px;
-    border-bottom: 1px solid #162030;
-    color: #94a3b8;
+    border-bottom: 1px solid #2a2e39;
+    color: #9db2c6;
     font-size: 0.82rem;
     font-weight: 700;
 }
@@ -1264,8 +1264,8 @@ tbody tr:hover {
 .gchart-period-keypad {
     display: inline-flex;
     align-items: center;
-    background: #0c1524;
-    border: 1px solid #23354d;
+    background: #131722;
+    border: 1px solid #2a2e39;
     border-radius: 6px;
     padding: 2px;
     gap: 2px;
@@ -1275,30 +1275,31 @@ tbody tr:hover {
     padding: 3px 9px;
     border: none;
     background: transparent;
-    color: #94a3b8;
+    color: #787b86;
     font-weight: 700;
     font-size: 0.75rem;
     border-radius: 4px;
     cursor: pointer;
-    font-family: monospace;
+    font-family: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, monospace;
     transition: all 0.15s ease;
 }
 
 .gchart-key-btn:hover {
     color: #ffffff;
-    background: #1e293b;
+    background: #2a2e39;
 }
 
 .gchart-key-btn.active {
-    background: #53e0c1 !important;
-    color: #000000 !important;
+    background: #2962ff !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 8px rgba(41, 98, 255, 0.4);
 }
 
 .gchart-canvas-wrap {
     position: relative;
     width: 100%;
     height: 520px;
-    background: #000000;
+    background: #131722;
 }
 
 /* Right: Tick Query Window */

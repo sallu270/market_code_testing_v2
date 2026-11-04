@@ -248,14 +248,20 @@ class MarketDatabase:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(instrument_key, candle_start_ms)
                 DO UPDATE SET
-                    open = excluded.open,
-                    high = excluded.high,
-                    low = excluded.low,
+                    open = CASE 
+                        WHEN candles_1m.tick_count > 1 AND excluded.tick_count <= 2 THEN candles_1m.open 
+                        ELSE excluded.open 
+                    END,
+                    high = MAX(candles_1m.high, excluded.high),
+                    low = MIN(candles_1m.low, excluded.low),
                     close = excluded.close,
-                    volume = excluded.volume,
-                    open_interest = excluded.open_interest,
-                    tick_count = excluded.tick_count,
-                    is_closed = excluded.is_closed,
+                    volume = MAX(candles_1m.volume, excluded.volume),
+                    open_interest = COALESCE(excluded.open_interest, candles_1m.open_interest),
+                    tick_count = CASE 
+                        WHEN excluded.tick_count > candles_1m.tick_count THEN excluded.tick_count 
+                        ELSE candles_1m.tick_count + excluded.tick_count 
+                    END,
+                    is_closed = MAX(candles_1m.is_closed, excluded.is_closed),
                     updated_at_ms = excluded.updated_at_ms
                 """,
                 (

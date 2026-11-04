@@ -88,6 +88,15 @@ class OneMinuteCandleBuilder:
                 self._active[instrument_key] = current
 
             elif minute_start < current["candle_start_ms"]:
+                late_candle = self._new_candle(
+                    instrument_key,
+                    minute_start,
+                    price,
+                    volume_increment,
+                    open_interest,
+                    now_ms,
+                )
+                self.database.upsert_candle(late_candle)
                 return dict(current)
 
             else:
@@ -105,11 +114,12 @@ class OneMinuteCandleBuilder:
 
     def close_stale_candles(self, now_ms: int | None = None) -> None:
         current_time_ms = now_ms or int(time.time() * 1000)
-        current_minute = self._minute_start(current_time_ms)
+        # 5-second grace window to absorb network jitter before clearing from active memory
+        stale_threshold = self._minute_start(current_time_ms - 5000)
 
         with self._lock:
             for instrument_key, candle in list(self._active.items()):
-                if candle["candle_start_ms"] < current_minute:
+                if candle["candle_start_ms"] < stale_threshold:
                     candle["is_closed"] = True
                     candle["updated_at_ms"] = current_time_ms
                     self.database.upsert_candle(candle)
