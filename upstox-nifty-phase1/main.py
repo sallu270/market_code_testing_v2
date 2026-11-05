@@ -13,7 +13,7 @@ from collections import deque
 from datetime import datetime
 from typing import Any
 
-from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
+from flask import Flask, Response, jsonify, request, send_file, stream_with_context
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -247,14 +247,16 @@ else:
     )
 
 @app.get("/")
-def index() -> str:
-    return render_template(
-        "index.html",
-        configured=settings.configured,
-        instrument_keys=list(settings.instrument_keys),
-        feed_mode=settings.feed_mode,
-        now_ts=int(time.time()),
-    )
+def index() -> Response:
+    return jsonify({
+        "status": "online",
+        "service": "GChart Trading Backend Engine",
+        "version": "2.0.0",
+        "client": "GChartWpf (.NET 8 WPF Desktop Terminal)",
+        "configured": settings.configured,
+        "feed_running": feed.running,
+        "timestamp_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+    })
 
 @app.get("/api/health")
 def api_health() -> Response:

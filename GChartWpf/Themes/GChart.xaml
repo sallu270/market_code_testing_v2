@@ -1,0 +1,192 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:conv="clr-namespace:GChartWpf.Services">
+
+    <!-- ===== Palette (GChart look: black canvas, teal headers, neon candles) ===== -->
+    <SolidColorBrush x:Key="Bg" Color="#000000"/>
+    <SolidColorBrush x:Key="Panel" Color="#0A0A0A"/>
+    <SolidColorBrush x:Key="Bar" Color="#121212"/>
+    <SolidColorBrush x:Key="Line" Color="#2A2A2A"/>
+    <SolidColorBrush x:Key="Teal" Color="#009999"/>
+    <SolidColorBrush x:Key="TealDark" Color="#0F3D3D"/>
+    <SolidColorBrush x:Key="Text" Color="#E6E6E6"/>
+    <SolidColorBrush x:Key="Muted" Color="#8A8A8A"/>
+    <SolidColorBrush x:Key="Up" Color="#00E600"/>
+    <SolidColorBrush x:Key="Down" Color="#FF2A2A"/>
+    <SolidColorBrush x:Key="Amber" Color="#FFB300"/>
+    <SolidColorBrush x:Key="AtmRow" Color="#17332F"/>
+
+    <conv:BuildUpBrushConverter x:Key="BuildUpBrush"/>
+    <conv:SignBrushConverter x:Key="SignBrush"/>
+    <conv:SideBrushConverter x:Key="SideBrush"/>
+    <BooleanToVisibilityConverter x:Key="BoolVis"/>
+
+    <Style TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI"/>
+        <Setter Property="FontSize" Value="12"/>
+    </Style>
+
+    <Style TargetType="TextBox">
+        <Setter Property="Background" Value="#050505"/>
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="CaretBrush" Value="White"/>
+        <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+        <Setter Property="Padding" Value="6,3"/>
+        <Setter Property="FontFamily" Value="Consolas"/>
+    </Style>
+
+    <Style TargetType="Button">
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="Background" Value="#1C1C1C"/>
+        <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+        <Setter Property="Padding" Value="12,4"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="1" CornerRadius="2" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.85"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.4"/></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="ExitButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="#B00020"/>
+        <Setter Property="BorderBrush" Value="#FF4D4D"/>
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+    </Style>
+
+    <Style x:Key="NavTab" TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FontSize" Value="12.5"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="b" Padding="14,0" Background="Transparent" BorderBrush="Transparent" BorderThickness="0,0,0,2">
+                        <ContentPresenter VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#1E1E1E"/></Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Teal}"/>
+                            <Setter TargetName="b" Property="Background" Value="{StaticResource TealDark}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="SegButton" TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Margin" Value="0,0,-1,0"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="b" MinWidth="30" Padding="9,3" Background="#161616" BorderBrush="#444" BorderThickness="1">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.FontWeight="SemiBold"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#262626"/></Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="b" Property="Background" Value="{StaticResource Teal}"/>
+                            <Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Teal}"/>
+                            <Setter Property="Foreground" Value="Black"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="DataGridColumnHeader">
+        <Setter Property="Background" Value="{StaticResource Teal}"/>
+        <Setter Property="Foreground" Value="Black"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="FontSize" Value="11.5"/>
+        <Setter Property="Padding" Value="4,4"/>
+        <Setter Property="HorizontalContentAlignment" Value="Center"/>
+        <Setter Property="BorderBrush" Value="Black"/>
+        <Setter Property="BorderThickness" Value="0,0,1,0"/>
+    </Style>
+
+    <Style TargetType="DataGridCell">
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="DataGridCell">
+                    <Border Background="{TemplateBinding Background}" Padding="2,0">
+                        <ContentPresenter VerticalAlignment="Center"/>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="DataGridRow">
+        <Setter Property="Background" Value="Black"/>
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#151515"/></Trigger>
+            <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#10302F"/></Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style TargetType="DataGrid">
+        <Setter Property="Background" Value="Black"/>
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+        <Setter Property="HorizontalGridLinesBrush" Value="#1A1A1A"/>
+        <Setter Property="HeadersVisibility" Value="Column"/>
+        <Setter Property="AutoGenerateColumns" Value="False"/>
+        <Setter Property="CanUserAddRows" Value="False"/>
+        <Setter Property="CanUserDeleteRows" Value="False"/>
+        <Setter Property="CanUserResizeRows" Value="False"/>
+        <Setter Property="RowHeight" Value="24"/>
+        <Setter Property="FontFamily" Value="Consolas"/>
+        <Setter Property="FontSize" Value="12.5"/>
+        <Setter Property="SelectionMode" Value="Single"/>
+    </Style>
+
+    <Style x:Key="CellText" TargetType="TextBlock">
+        <Setter Property="VerticalAlignment" Value="Center"/>
+        <Setter Property="Padding" Value="6,0"/>
+        <Setter Property="FontFamily" Value="Consolas"/>
+        <Setter Property="FontSize" Value="12.5"/>
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+    </Style>
+    <Style x:Key="NumCell" TargetType="TextBlock" BasedOn="{StaticResource CellText}">
+        <Setter Property="TextAlignment" Value="Right"/>
+    </Style>
+    <Style x:Key="CenterCell" TargetType="TextBlock" BasedOn="{StaticResource CellText}">
+        <Setter Property="TextAlignment" Value="Center"/>
+    </Style>
+    <Style x:Key="StrikeCell" TargetType="TextBlock" BasedOn="{StaticResource CellText}">
+        <Setter Property="TextAlignment" Value="Center"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style x:Key="BuildUpCell" TargetType="TextBlock" BasedOn="{StaticResource CellText}">
+        <Setter Property="TextAlignment" Value="Center"/>
+        <Setter Property="FontSize" Value="11"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Foreground"
+                Value="{Binding Text, RelativeSource={RelativeSource Self}, Converter={StaticResource BuildUpBrush}}"/>
+    </Style>
+    <Style x:Key="SideCell" TargetType="TextBlock" BasedOn="{StaticResource CenterCell}">
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Foreground"
+                Value="{Binding Text, RelativeSource={RelativeSource Self}, Converter={StaticResource SideBrush}}"/>
+    </Style>
+</ResourceDictionary>
