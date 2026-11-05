@@ -82,9 +82,9 @@ public class DemoSource : IDataSource
 
     public Task<List<TradeRow>> GetTradesAsync() => Task.FromResult(new List<TradeRow>
     {
-        new() { TradeId = "T-0001", Side = "CE", Symbol = "NIFTY 23400 CE", Entry = 135.0, Exit = 161.5, NetPnl = 1722, Status = "CLOSED", BotMs = 41 },
-        new() { TradeId = "T-0002", Side = "PE", Symbol = "NIFTY 23600 PE", Entry = 88.2, Exit = 74.0, NetPnl = -923, Status = "CLOSED", BotMs = 38 },
-        new() { TradeId = "T-0003", Side = "CE", Symbol = "NIFTY 23500 CE", Entry = 99.4, Exit = 0, NetPnl = 0, Status = "OPEN", BotMs = 44 },
+        new() { TradeId = "T-0001", Side = "CE", Symbol = "NIFTY 23400 CE", EntryTime = "09:15:00.829", Entry = 135.0, ExitTime = "15:15:00.029", Exit = 161.5, NetPnl = 1722, Status = "CLOSED", BotMs = 0.38 },
+        new() { TradeId = "T-0002", Side = "PE", Symbol = "NIFTY 23600 PE", EntryTime = "09:15:00.120", Entry = 88.2, ExitTime = "15:15:00.029", Exit = 74.0, NetPnl = -923, Status = "CLOSED", BotMs = 0.25 },
+        new() { TradeId = "T-0003", Side = "CE", Symbol = "NIFTY 23500 CE", EntryTime = "09:15:01.050", Entry = 99.4, ExitTime = "—", Exit = 0, NetPnl = 0, Status = "OPEN", BotMs = 0.42 },
     });
 
     public Task<List<StockRow>> GetStocksAsync()

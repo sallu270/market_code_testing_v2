@@ -139,13 +139,13 @@
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding CeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
                                     <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding CeVolume, StringFormat='{}{0:N0;-N0;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding CeBid, StringFormat='{}{0:N2;-N2;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding CeAsk, StringFormat='{}{0:N2;-N2;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding CeLtp, StringFormat='{}{0:N2;-N2;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                    <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding CeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                    <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding CeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                    <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding CeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                     <DataGridTextColumn Header="STRIKE"   Width="1.3*" Binding="{Binding Strike, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource StrikeCell}"/>
-                                    <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding PeLtp, StringFormat='{}{0:N2;-N2;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding PeBid, StringFormat='{}{0:N2;-N2;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding PeAsk, StringFormat='{}{0:N2;-N2;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                    <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding PeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                    <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding PeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                    <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding PeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                     <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding PeVolume, StringFormat='{}{0:N0;-N0;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                     <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding PeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
                                 </DataGrid.Columns>
@@ -228,11 +228,13 @@
                 <TextBlock Text="EXECUTED TRADES JOURNAL" FontWeight="Bold" Foreground="{StaticResource Teal}" Margin="12,10"/>
                 <DataGrid Grid.Row="1" ItemsSource="{Binding Trades}" IsReadOnly="True">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="ID" Width="1.2*" Binding="{Binding TradeId}" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="ID" Width="1.1*" Binding="{Binding TradeId}" ElementStyle="{StaticResource CellText}"/>
                         <DataGridTextColumn Header="Side" Width="0.7*" Binding="{Binding Side}" ElementStyle="{StaticResource CenterCell}"/>
-                        <DataGridTextColumn Header="Symbol" Width="2*" Binding="{Binding Symbol}" ElementStyle="{StaticResource CellText}"/>
-                        <DataGridTextColumn Header="Entry" Width="1*" Binding="{Binding Entry, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumCell}"/>
-                        <DataGridTextColumn Header="Exit" Width="1*" Binding="{Binding Exit, StringFormat='{}{0:N2;-N2;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                        <DataGridTextColumn Header="Symbol" Width="1.8*" Binding="{Binding Symbol}" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Entry Time" Width="1*" Binding="{Binding EntryTime}" ElementStyle="{StaticResource CenterCell}"/>
+                        <DataGridTextColumn Header="Entry" Width="0.9*" Binding="{Binding Entry, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumCell}"/>
+                        <DataGridTextColumn Header="Exit Time" Width="1*" Binding="{Binding ExitTime}" ElementStyle="{StaticResource CenterCell}"/>
+                        <DataGridTextColumn Header="Exit" Width="0.9*" Binding="{Binding Exit, StringFormat='{}{0:0.00;—;—}'}" ElementStyle="{StaticResource NumCell}"/>
                         <DataGridTextColumn Header="P&amp;L (₹)" Width="1.1*" Binding="{Binding NetPnl, StringFormat='{}{0:N2}'}">
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock" BasedOn="{StaticResource NumCell}">
@@ -241,8 +243,8 @@
                                 </Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Header="Bot ms" Width="0.8*" Binding="{Binding BotMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumCell}"/>
-                        <DataGridTextColumn Header="Status" Width="0.9*" Binding="{Binding Status}" ElementStyle="{StaticResource CenterCell}"/>
+                        <DataGridTextColumn Header="Bot Speed" Width="0.9*" Binding="{Binding BotMsText}" ElementStyle="{StaticResource CenterCell}"/>
+                        <DataGridTextColumn Header="Status" Width="0.8*" Binding="{Binding Status}" ElementStyle="{StaticResource CenterCell}"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>

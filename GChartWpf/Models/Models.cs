@@ -62,11 +62,14 @@ public class TradeRow
     public string TradeId { get; set; } = "";
     public string Side { get; set; } = "";
     public string Symbol { get; set; } = "";
+    public string EntryTime { get; set; } = "—";
     public double Entry { get; set; }
+    public string ExitTime { get; set; } = "—";
     public double Exit { get; set; }
     public double NetPnl { get; set; }
     public string Status { get; set; } = "";
     public double BotMs { get; set; }
+    public string BotMsText => BotMs > 0 ? $"{BotMs:0.00} ms" : "—";
 }
 
 public class StockRow : ObservableObject

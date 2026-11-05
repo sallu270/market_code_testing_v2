@@ -106,9 +106,16 @@ public class ApiClient : IDataSource
         using var doc = await GetJson("/api/strategy/trades?limit=100");
         return Arr(doc.RootElement, "trades").Select(t => new TradeRow
         {
-            TradeId = S(t, "trade_id"), Side = S(t, "side"), Symbol = S(t, "symbol"),
-            Entry = D(t, "entry_price"), Exit = D(t, "exit_price"), NetPnl = D(t, "net_pnl"),
-            Status = S(t, "status"), BotMs = D(t, "bot_latency_ms")
+            TradeId = S(t, "trade_id"),
+            Side = S(t, "side"),
+            Symbol = S(t, "symbol"),
+            EntryTime = S(t, "entry_time_ist") is { Length: > 0 } et ? et : "—",
+            Entry = D(t, "entry_price"),
+            ExitTime = S(t, "exit_time_ist") is { Length: > 0 } xt ? xt : "—",
+            Exit = D(t, "exit_price"),
+            NetPnl = D(t, "net_pnl"),
+            Status = S(t, "status"),
+            BotMs = D(t, "bot_latency_ms")
         }).ToList();
     }
 
