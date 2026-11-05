@@ -21,6 +21,7 @@ import urllib.request
 from candle_builder import OneMinuteCandleBuilder
 from config import IST, load_settings
 from database import MarketDatabase
+from stock_screener import StockScreener
 from strategy_engine import GapEntryStrategyEngine, PressureStrategyEngine
 from upstox_feed import UpstoxFeed
 
@@ -34,6 +35,10 @@ settings = load_settings()
 database = MarketDatabase(settings.db_path)
 strategy_engine = GapEntryStrategyEngine(
     database=database,
+    base_dir=settings.db_path.parent,
+    access_token=settings.access_token,
+)
+stock_screener = StockScreener(
     base_dir=settings.db_path.parent,
     access_token=settings.access_token,
 )
@@ -495,6 +500,37 @@ def api_strategy_signals() -> Response:
     signals = database.get_strategy_signals(limit=limit)
     return jsonify({"signals": signals})
 
+# -------------------------------------------------------------------------
+# Release 2: NIFTY 50 Stock Screener & Selection Endpoints
+# -------------------------------------------------------------------------
+
+@app.get("/api/stocks/screener")
+def api_stocks_screener() -> Response:
+    """Fetch live screener data for all 50 NIFTY stocks with Volume and Build-up."""
+    stocks = stock_screener.fetch_quotes()
+    return jsonify({"stocks": stocks, "count": len(stocks)})
+
+@app.post("/api/stocks/select")
+def api_stocks_select() -> Response:
+    """Save selected stocks and lot quantities."""
+    body = request.get_json(silent=True) or {}
+    selections = body.get("selections") or {}
+    stock_screener.save_selected_stocks(selections)
+    return jsonify({"success": True, "selections": selections})
+
+@app.get("/api/stocks/plan/<symbol>")
+def api_stocks_plan(symbol: str) -> Response:
+    """Fetch and plan 8 ITM Option contracts for a constituent NIFTY stock."""
+    spot = request.args.get("spot", default=0.0, type=float)
+    plan = stock_screener.plan_stock_itm_contracts(symbol=symbol, spot=spot)
+    return jsonify(plan)
+
+@app.post("/api/strategy/rehearsal")
+def api_strategy_rehearsal() -> Response:
+    """Run morning rehearsal mode to audit trigger & strike selector latency."""
+    res = strategy_engine.rehearse_entry()
+    return jsonify(res)
+
 @app.get("/api/strategy/export")
 def api_strategy_export() -> Response:
     trades = database.get_strategy_trades(limit=1000)
@@ -505,6 +541,7 @@ def api_strategy_export() -> Response:
         "Entry Time (IST)", "Entry Price", "Exit Time (IST)", "Exit Price",
         "Exit Reason", "P&L Points", "Net P&L (INR)", "Status",
         "Spot at Entry", "ATM at Entry",
+        "Build-up", "Bot Latency (ms)", "Network Latency (ms)",
     ])
     for t in trades:
         writer.writerow([
@@ -524,6 +561,9 @@ def api_strategy_export() -> Response:
             t.get("status", ""),
             t.get("spot_price", ""),
             t.get("atm_strike", ""),
+            t.get("build_up", "Neutral"),
+            t.get("bot_latency_ms", ""),
+            t.get("network_latency_ms", ""),
         ])
     output.seek(0)
     return Response(

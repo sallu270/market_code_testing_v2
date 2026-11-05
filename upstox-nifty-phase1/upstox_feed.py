@@ -198,6 +198,8 @@ class UpstoxFeed:
         if not isinstance(feeds, dict):
             return []
 
+        server_timestamp_ms = self._first_integer(payload, "currentTs", "timestamp")
+
         output: list[dict[str, Any]] = []
 
         for instrument_key, feed_wrapper in feeds.items():
@@ -239,6 +241,7 @@ class UpstoxFeed:
                 "instrument_key": str(instrument_key),
                 "exchange_timestamp_ms": timestamp_ms,
                 "received_timestamp_ms": received_timestamp_ms,
+                "server_timestamp_ms": server_timestamp_ms,
                 "exchange_time_ist": datetime.fromtimestamp(
                     timestamp_ms / 1000,
                     tz=IST,
@@ -255,14 +258,28 @@ class UpstoxFeed:
                     "averageTradedPrice",
                 ),
                 "volume": self._first_number(
+                    market_ff,
+                    "vtt",
+                    "volumeTradedToday",
+                ) or self._first_number(
                     extended,
                     "vtt",
                     "volumeTradedToday",
                 ),
                 "open_interest": self._first_number(
+                    market_ff,
+                    "oi",
+                    "openInterest",
+                ) or self._first_number(
                     extended,
                     "oi",
                     "openInterest",
+                ),
+                "prev_close": self._first_number(
+                    ltpc,
+                    "cp",
+                    "closePrice",
+                    "prevClose",
                 ),
                 "bid_price": bid_price,
                 "bid_quantity": bid_quantity,

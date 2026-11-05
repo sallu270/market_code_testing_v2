@@ -96,7 +96,10 @@ class MarketDatabase:
                     net_pnl REAL,
                     status TEXT NOT NULL,
                     spot_price REAL,
-                    atm_strike REAL
+                    atm_strike REAL,
+                    bot_latency_ms REAL,
+                    network_latency_ms REAL,
+                    build_up TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS strategy_signals (
@@ -407,14 +410,26 @@ class MarketDatabase:
 
     def insert_strategy_trade(self, trade: dict[str, Any]) -> None:
         with self._lock:
+            # Ensure migration columns exist
+            for col_name, col_type in [
+                ("bot_latency_ms", "REAL"),
+                ("network_latency_ms", "REAL"),
+                ("build_up", "TEXT"),
+            ]:
+                try:
+                    self._connection.execute(f"ALTER TABLE strategy_trades ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
+
             self._connection.execute(
                 """
                 INSERT OR REPLACE INTO strategy_trades (
                     trade_id, trade_date, side, symbol, instrument_key, underlying_key,
                     strike, lot_size, entry_time_ist, entry_price, entry_timestamp_ms,
                     exit_time_ist, exit_price, exit_timestamp_ms, exit_reason,
-                    pnl_points, net_pnl, status, spot_price, atm_strike
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    pnl_points, net_pnl, status, spot_price, atm_strike,
+                    bot_latency_ms, network_latency_ms, build_up
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade["trade_id"],
@@ -437,6 +452,9 @@ class MarketDatabase:
                     trade["status"],
                     trade.get("spot_price"),
                     trade.get("atm_strike"),
+                    trade.get("bot_latency_ms"),
+                    trade.get("network_latency_ms"),
+                    trade.get("build_up"),
                 ),
             )
             self._connection.commit()
