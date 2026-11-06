@@ -8,14 +8,15 @@ namespace GChartWpf.Controls;
 
 /// <summary>
 /// Full TradingView-grade interactive Candlestick Chart:
-/// - Mouse wheel: Horizontal Zoom (adjusts visible candle count: 15 to 300)
-/// - Left-click & drag on chart: 2D Pan (time left/right + price up/down)
-/// - Live Candle Centered: Default auto-fit centers live price at 50% screen height
-/// - Left-click & drag on right price axis: Vertical stretch / compress (candle height)
-/// - Price axis nice steps: Clean rounded levels (e.g. 24,600, 24,650, 24,700)
-/// - TradingView High-Contrast Pill: Crisp white text on green/red badges with dotted price line
-/// - Crosshair: Dynamic price & time badges following cursor
-/// - Double-click: Resets pan (horizontal & vertical) and scale back to centered live price
+/// - Live Candle Centered Horizontally: Defaults to ~50% screen width with empty future margin on the right
+/// - Live Candle Centered Vertically: Defaults to 50% screen height with equal space top and bottom
+/// - Free 2D Chart Dragging: Drag left/right past the live edge (no hard wall at 0), drag up/down across prices
+/// - Mouse wheel: Zoom in/out horizontally, or over price scale for vertical stretch
+/// - Right price scale: Click & drag vertically to stretch/compress candle height (TradingView direction)
+/// - Clean "Nice Steps" Round Levels on Price Axis (e.g. 24,600, 24,650, 24,700)
+/// - High-contrast live price pill with dashed horizontal price line
+/// - Crosshair tracking on both axes (including projected future time in blank right margin)
+/// - Double-click: Instantly resets horizontal and vertical position back to centered live candle
 /// </summary>
 public class CandleChart : FrameworkElement
 {
@@ -32,9 +33,11 @@ public class CandleChart : FrameworkElement
 
     // Interactive Zoom, Pan & Scaling State
     int _visibleCount = 60;
-    int _panOffset = 0; // 0 = at live edge
+    // Negative pan offset = Right Margin / Future space (e.g. -25 places live candle in the center)
+    // Positive pan offset = Scrolled back into historical candles
+    int _panOffset = -25;
     double _verticalPriceOffset = 0; // vertical price pan offset (0 = live candle centered)
-    double _priceScaleFactor = 1.0; // 1.0 = auto-fit, >1.0 = stretched taller, <1.0 = compressed
+    double _priceScaleFactor = 1.0;  // 1.0 = auto-fit, >1.0 = stretched taller, <1.0 = compressed
     bool _isChartDragging = false;
     bool _isPriceDragging = false;
     Point _dragStartPoint;
@@ -92,8 +95,6 @@ public class CandleChart : FrameworkElement
         if (pt.X >= _lastPlotWidth && pt.Y <= _lastPriceHeight)
         {
             // Scrolling wheel over right price scale -> Vertical stretch/compress
-            // Scroll Up -> stretch taller
-            // Scroll Down -> compress shorter
             double factor = e.Delta > 0 ? 1.12 : 0.89;
             _priceScaleFactor = Math.Max(0.15, Math.Min(8.0, _priceScaleFactor * factor));
             InvalidateVisual();
@@ -101,10 +102,18 @@ public class CandleChart : FrameworkElement
         }
 
         int step = Math.Max(3, _visibleCount / 10);
+        int oldVisible = _visibleCount;
         if (e.Delta > 0)
             _visibleCount = Math.Max(15, _visibleCount - step);
         else if (e.Delta < 0)
             _visibleCount = Math.Min(300, _visibleCount + step);
+
+        // Keep horizontal centering proportional while zooming
+        if (oldVisible != _visibleCount)
+        {
+            _panOffset = (int)Math.Round((double)_panOffset * _visibleCount / oldVisible);
+        }
+
         InvalidateVisual();
     }
 
@@ -115,18 +124,18 @@ public class CandleChart : FrameworkElement
 
         if (e.ClickCount == 2)
         {
-            // Double-click -> Reset all zoom, pan, vertical offset back to centered live candle
+            // Double-click -> Snap live candle back to DEAD CENTER (both horizontally and vertically)
             _visibleCount = 60;
-            _panOffset = 0;
-            _verticalPriceOffset = 0;
-            _priceScaleFactor = 1.0;
+            _panOffset = -(_visibleCount / 2); // Center horizontally (~30 bars right margin)
+            _verticalPriceOffset = 0;          // Center vertically (50% screen height)
+            _priceScaleFactor = 1.0;          // Reset vertical scale to auto-fit
             InvalidateVisual();
             return;
         }
 
         if (pt.X >= _lastPlotWidth && pt.Y <= _lastPriceHeight)
         {
-            // Clicked on right price scale -> Start vertical scale dragging
+            // Clicked on right price scale -> Start vertical stretch dragging
             _isPriceDragging = true;
             _isChartDragging = false;
             _dragStartPoint = pt;
@@ -136,7 +145,7 @@ public class CandleChart : FrameworkElement
         }
         else
         {
-            // Clicked on chart area -> 2D Pan (time left/right + price up/down)
+            // Clicked on chart area -> Free 2D Pan (time left/right + price up/down)
             _isChartDragging = true;
             _isPriceDragging = false;
             _dragStartPoint = pt;
@@ -168,22 +177,24 @@ public class CandleChart : FrameworkElement
         if (_isPriceDragging)
         {
             // Dragging on price scale vertically stretches / compresses the candles (TradingView direction)
-            // Drag Up (-dy > 0) -> expand/stretch taller
-            // Drag Down (-dy < 0) -> compress shorter
             double dy = pt.Y - _dragStartPoint.Y;
             _priceScaleFactor = Math.Max(0.15, Math.Min(8.0, _dragStartScaleFactor * Math.Pow(1.006, -dy)));
         }
         else if (_isChartDragging)
         {
-            // 1. Horizontal pan (time/candles)
+            // 1. Horizontal free pan (allows pulling live candle into center or left, no hard wall at 0)
             double dx = pt.X - _dragStartPoint.X;
             double slot = Math.Max(2, _lastSlotWidth);
             int candleShift = (int)Math.Round(dx / slot);
             int total = Candles?.Count ?? 0;
-            int maxPan = Math.Max(0, total - _visibleCount);
-            _panOffset = Math.Max(0, Math.Min(maxPan, _dragStartPan + candleShift));
 
-            // 2. Vertical pan (price up/down)
+            // Allow right margin down to -80% of screen width (empty space on right)
+            int minPan = -(int)(_visibleCount * 0.85);
+            // Allow historical scrolling back to older candles
+            int maxPan = Math.Max(0, total - 5);
+            _panOffset = Math.Max(minPan, Math.Min(maxPan, _dragStartPan + candleShift));
+
+            // 2. Vertical free pan (price up/down)
             double dy = pt.Y - _dragStartPoint.Y;
             double priceSpan = Math.Max(1.0, _lastHi - _lastLo);
             double pricePerPixel = priceSpan / Math.Max(10, _lastPriceHeight);
@@ -231,15 +242,6 @@ public class CandleChart : FrameworkElement
 
         int total = all.Count;
         int count = Math.Min(total, _visibleCount);
-        int maxPan = Math.Max(0, total - count);
-        _panOffset = Math.Max(0, Math.Min(maxPan, _panOffset));
-
-        int endIdx = total - _panOffset;
-        endIdx = Math.Max(count, Math.Min(total, endIdx));
-        int startIdx = Math.Max(0, endIdx - count);
-
-        var vis = all.Skip(startIdx).Take(count).ToList();
-        if (vis.Count == 0) return;
 
         // Clean layout with generous price axis width
         const double axisW = 82, timeH = 22, gap = 6;
@@ -248,15 +250,36 @@ public class CandleChart : FrameworkElement
         _lastPlotWidth = plotW;
         _lastPriceHeight = priceH;
 
+        double slot = plotW / count;
+        _lastSlotWidth = slot;
+
+        // TradingView Horizontal Slot Placement:
+        // For candle index k (0 <= k < total):
+        // slotIndex = count - total + k + _panOffset
+        // When _panOffset < 0, empty future slots appear on the right side!
+        int startK = Math.Max(0, total - count - _panOffset);
+        int endK = Math.Min(total - 1, total - 1 - _panOffset);
+
+        var visCandles = new List<Candle>();
+        if (startK <= endK && startK < total && endK >= 0)
+        {
+            for (int k = Math.Max(0, startK); k <= Math.Min(total - 1, endK); k++)
+                visCandles.Add(all[k]);
+        }
+        if (visCandles.Count == 0 && total > 0)
+        {
+            visCandles.Add(all[^1]);
+        }
+
         // Filter valid candles for price bounds
-        var validCandles = vis.Where(c => c.Low > 0 && c.High > 0).ToList();
-        if (validCandles.Count == 0) return;
+        var validCandles = visCandles.Where(c => c.Low > 0 && c.High > 0).ToList();
+        if (validCandles.Count == 0) validCandles.Add(all[^1]);
 
         double baseHi = validCandles.Max(c => c.High);
         double baseLo = validCandles.Min(c => c.Low);
-        double livePrice = vis[^1].Close;
+        double livePrice = all[^1].Close;
 
-        // Centering the live candle at 50% height by default
+        // Live candle centered vertically at 50% screen height by default
         double maxDistFromLive = Math.Max(1.0, Math.Max(Math.Abs(baseHi - livePrice), Math.Abs(livePrice - baseLo)));
         double halfSpan = Math.Max(0.5, maxDistFromLive * 1.15) / _priceScaleFactor;
 
@@ -268,7 +291,7 @@ public class CandleChart : FrameworkElement
         _lastHi = hi;
         _lastLo = lo;
 
-        double maxVol = Math.Max(1, vis.Max(c => c.Volume));
+        double maxVol = Math.Max(1, validCandles.Max(c => c.Volume));
         double Y(double p) => priceH * (1.0 - (p - lo) / (hi - lo));
 
         // Draw clean axis separator borders
@@ -298,16 +321,20 @@ public class CandleChart : FrameworkElement
             }
         }
 
-        // Candlesticks & Volume Bars
-        double slot = plotW / vis.Count;
-        _lastSlotWidth = slot;
+        // Draw Visible Candlesticks & Volume Bars
         double body = Math.Max(1, slot * 0.70);
+        double latestCandleCx = plotW - slot / 2;
 
-        for (int i = 0; i < vis.Count; i++)
+        for (int k = Math.Max(0, startK); k <= Math.Min(total - 1, endK); k++)
         {
-            var c = vis[i];
+            var c = all[k];
+            int slotIdx = count - total + k + _panOffset;
+            if (slotIdx < 0 || slotIdx >= count) continue;
+
+            double cx = slotIdx * slot + slot / 2;
+            if (k == total - 1) latestCandleCx = cx;
+
             bool up = c.Close >= c.Open;
-            double cx = slot * i + slot / 2;
 
             // Wick
             dc.DrawLine(up ? TvUpPen : TvDownPen, new Point(cx, Y(c.High)), new Point(cx, Y(c.Low)));
@@ -322,7 +349,7 @@ public class CandleChart : FrameworkElement
             dc.DrawRectangle(up ? TvUp : TvDown, null, new Rect(cx - body / 2, priceH + gap + volH - vh, body, vh));
 
             // Time axis labels
-            if (i % Math.Max(1, vis.Count / 7) == 0)
+            if (slotIdx % Math.Max(1, count / 7) == 0)
             {
                 var ts = DateTimeOffset.FromUnixTimeMilliseconds(c.TimeMs).ToOffset(TimeSpan.FromHours(5.5));
                 dc.DrawText(Txt(ts.ToString(IsDaily ? "dd MMM" : "HH:mm", CultureInfo.InvariantCulture), Grey, 10),
@@ -331,32 +358,39 @@ public class CandleChart : FrameworkElement
         }
 
         // TradingView High-Contrast Real-Time Price Line & Pill Badge
-        var last = vis[^1];
-        double ly = Y(last.Close);
+        double ly = Y(livePrice);
         if (ly >= 0 && ly <= priceH)
         {
-            // Dotted horizontal line spanning across chart
+            // Dotted horizontal line extending from live candle all the way to the price axis
             dc.DrawLine(LastPen, new Point(0, ly), new Point(plotW, ly));
 
             // High-contrast pill badge on price axis
-            var badgeBrush = last.Close >= last.Open ? TvUp : TvDown;
+            var lastCandle = all[^1];
+            var badgeBrush = lastCandle.Close >= lastCandle.Open ? TvUp : TvDown;
             var pillRect = new Rect(plotW + 3, ly - 9.5, axisW - 6, 19);
             dc.DrawRoundedRectangle(badgeBrush, null, pillRect, 2, 2);
 
             // Bold white text for supreme legibility
-            var tag = Txt(last.Close.ToString("N2", CultureInfo.InvariantCulture), White, 11, bold: true);
+            var tag = Txt(livePrice.ToString("N2", CultureInfo.InvariantCulture), White, 11, bold: true);
             dc.DrawText(tag, new Point(plotW + 6, ly - 7.5));
         }
 
-        // Indicator Pills: Paused history or custom pan
-        if (_panOffset > 0 || Math.Abs(_verticalPriceOffset) > 0.5 || Math.Abs(_priceScaleFactor - 1.0) > 0.1)
+        // Status Indicator Pill (Top Left)
+        int defaultCenterPan = -(count / 2);
+        bool isHistorical = _panOffset > 0;
+        bool isCustomPan = Math.Abs(_panOffset - defaultCenterPan) > 4 || Math.Abs(_verticalPriceOffset) > 1.0 || Math.Abs(_priceScaleFactor - 1.0) > 0.1;
+
+        if (isHistorical)
         {
-            string status = _panOffset > 0
-                ? $"◀ PAUSED ({_panOffset} candles back) · Double-click to LIVE CENTER"
-                : "↔ Custom Pan · Double-click to LIVE CENTER";
-            var histPill = Txt(status, Frozen(255, 179, 0), 10);
+            var histPill = Txt($"◀ PAUSED ({_panOffset} candles back) · Double-click to LIVE CENTER", Frozen(255, 179, 0), 10);
             dc.DrawRectangle(DarkGrey, null, new Rect(10, 8, histPill.Width + 12, 18));
             dc.DrawText(histPill, new Point(16, 10));
+        }
+        else if (isCustomPan)
+        {
+            var customPill = Txt("↔ Custom View · Double-click to LIVE CENTER", Frozen(100, 180, 255), 9.5);
+            dc.DrawRectangle(DarkGrey, null, new Rect(10, 8, customPill.Width + 10, 16));
+            dc.DrawText(customPill, new Point(15, 9));
         }
 
         // TradingView Interactive Crosshair Tracker
@@ -381,13 +415,28 @@ public class CandleChart : FrameworkElement
                 }
 
                 // Hovered time badge on bottom X axis
-                int hoverIdx = (int)Math.Floor(hp.X / slot);
-                if (hoverIdx >= 0 && hoverIdx < vis.Count)
+                int hoverSlot = (int)Math.Floor(hp.X / slot);
+                int hoverK = hoverSlot - (count - total + _panOffset);
+
+                if (hoverK >= 0 && hoverK < total)
                 {
-                    var hc = vis[hoverIdx];
+                    var hc = all[hoverK];
                     var hts = DateTimeOffset.FromUnixTimeMilliseconds(hc.TimeMs).ToOffset(TimeSpan.FromHours(5.5));
                     string timeStr = hts.ToString(IsDaily ? "dd MMM yyyy" : "HH:mm:ss", CultureInfo.InvariantCulture);
                     var timeText = Txt(timeStr, White, 10);
+                    double tx = Math.Max(2, Math.Min(plotW - timeText.Width - 8, hp.X - timeText.Width / 2));
+                    dc.DrawRoundedRectangle(AxisTagBg, null, new Rect(tx - 4, h - timeH + 2, timeText.Width + 8, 17), 2, 2);
+                    dc.DrawText(timeText, new Point(tx, h - timeH + 3.5));
+                }
+                else if (hoverK >= total && total > 0)
+                {
+                    // Projecting future time in the blank right margin area!
+                    long stepMs = total > 1 ? (all[^1].TimeMs - all[^2].TimeMs) : 60000;
+                    if (stepMs <= 0) stepMs = 60000;
+                    long futureMs = all[^1].TimeMs + (hoverK - (total - 1)) * stepMs;
+                    var fts = DateTimeOffset.FromUnixTimeMilliseconds(futureMs).ToOffset(TimeSpan.FromHours(5.5));
+                    string timeStr = fts.ToString(IsDaily ? "dd MMM yyyy" : "HH:mm:ss", CultureInfo.InvariantCulture);
+                    var timeText = Txt(timeStr, Frozen(180, 180, 180), 10);
                     double tx = Math.Max(2, Math.Min(plotW - timeText.Width - 8, hp.X - timeText.Width / 2));
                     dc.DrawRoundedRectangle(AxisTagBg, null, new Rect(tx - 4, h - timeH + 2, timeText.Width + 8, 17), 2, 2);
                     dc.DrawText(timeText, new Point(tx, h - timeH + 3.5));
