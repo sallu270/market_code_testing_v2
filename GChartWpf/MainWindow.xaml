@@ -139,7 +139,7 @@
                             </DataGrid.RowStyle>
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding CeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
-                                <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding CeVolume, StringFormat='{}{0:N0;-N0;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding CeVolume, StringFormat='{}{0:#,##0;-#,##0;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding CeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding CeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding CeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
@@ -147,7 +147,7 @@
                                 <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding PeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding PeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding PeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding PeVolume, StringFormat='{}{0:N0;-N0;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding PeVolume, StringFormat='{}{0:#,##0;-#,##0;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding PeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
                             </DataGrid.Columns>
                         </DataGrid>
