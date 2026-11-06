@@ -64,6 +64,15 @@
         <Setter Property="FontWeight" Value="Bold"/>
     </Style>
 
+    <Style x:Key="CsvButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="#0F3D3D"/>
+        <Setter Property="BorderBrush" Value="#009999"/>
+        <Setter Property="Foreground" Value="#53E0C1"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Padding" Value="10,4"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+
     <Style x:Key="NavTab" TargetType="RadioButton">
         <Setter Property="Foreground" Value="{StaticResource Text}"/>
         <Setter Property="Cursor" Value="Hand"/>

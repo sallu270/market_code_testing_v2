@@ -28,6 +28,7 @@ public class MainViewModel : ObservableObject
         ExitPositionCommand = new RelayCommand(_ => ExitPosition());
         RefreshStocksCommand = new RelayCommand(async _ => await LoadStocksAsync());
         SaveSelectionsCommand = new RelayCommand(async _ => await SaveSelectionsAsync());
+        ExportTradesCsvCommand = new RelayCommand(_ => ExportTradesCsv());
 
         _timer.Tick += async (_, _) => { Clock = DateTime.Now.ToString("HH:mm:ss"); await RefreshAsync(); };
         Clock = DateTime.Now.ToString("HH:mm:ss");
@@ -47,6 +48,7 @@ public class MainViewModel : ObservableObject
     public ICommand ExitPositionCommand { get; }
     public ICommand RefreshStocksCommand { get; }
     public ICommand SaveSelectionsCommand { get; }
+    public ICommand ExportTradesCsvCommand { get; }
 
     // ---------------- navigation ----------------
     string _mode = "Index";
@@ -270,6 +272,47 @@ public class MainViewModel : ObservableObject
         if (ok != MessageBoxResult.Yes) return;
         try { await _src.ExitPositionAsync(); StatusMessage = "Exit order sent."; await RefreshAsync(); }
         catch (Exception ex) { StatusMessage = "Exit failed: " + ex.Message; }
+    }
+
+    void ExportTradesCsv()
+    {
+        try
+        {
+            if (Trades.Count == 0)
+            {
+                MessageBox.Show("No executed trades available to export.", "Trades Journal", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var sfd = new Microsoft.Win32.SaveFileDialog
+            {
+                FileName = $"trades_journal_{DateTime.Now:yyyy-MM-dd}.csv",
+                DefaultExt = ".csv",
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
+            };
+
+            if (sfd.ShowDialog() != true) return;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("Trade ID,Side,Symbol,Entry Time,Entry Price,Exit Time,Exit Price,Net P&L (INR),Bot Speed,Status");
+            foreach (var t in Trades)
+            {
+                sb.AppendLine($"\"{t.TradeId}\",\"{t.Side}\",\"{t.Symbol}\",\"{t.EntryTime}\",{t.Entry:F2},\"{t.ExitTime}\",{t.Exit:F2},{t.NetPnl:F2},\"{t.BotMsText}\",\"{t.Status}\"");
+            }
+
+            System.IO.File.WriteAllText(sfd.FileName, sb.ToString(), System.Text.Encoding.UTF8);
+
+            StatusMessage = $"Exported {Trades.Count} trades to CSV.";
+            var res = MessageBox.Show($"Successfully exported {Trades.Count} trades to:\n{sfd.FileName}\n\nWould you like to open the file now?", "Export Successful", MessageBoxButton.YesNo, MessageBoxImage.Information);
+            if (res == MessageBoxResult.Yes)
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(sfd.FileName) { UseShellExecute = true });
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to export CSV: {ex.Message}", "Export Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 }
 

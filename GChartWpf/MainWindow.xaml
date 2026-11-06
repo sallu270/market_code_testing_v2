@@ -225,7 +225,11 @@
             <!-- ========== TRADES JOURNAL ========== -->
             <Grid Visibility="{Binding IsJournalMode, Converter={StaticResource BoolVis}}" Background="{StaticResource Panel}">
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                <TextBlock Text="EXECUTED TRADES JOURNAL" FontWeight="Bold" Foreground="{StaticResource Teal}" Margin="12,10"/>
+                <Grid Grid.Row="0" Margin="12,8,12,8">
+                    <TextBlock Text="EXECUTED TRADES JOURNAL" FontWeight="Bold" Foreground="{StaticResource Teal}" VerticalAlignment="Center" FontSize="12.5"/>
+                    <Button Content="📥 Export CSV" HorizontalAlignment="Right" Command="{Binding ExportTradesCsvCommand}"
+                            Style="{StaticResource CsvButton}"/>
+                </Grid>
                 <DataGrid Grid.Row="1" ItemsSource="{Binding Trades}" IsReadOnly="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="ID" Width="1.1*" Binding="{Binding TradeId}" ElementStyle="{StaticResource CellText}"/>
