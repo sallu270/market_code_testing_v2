@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("GChartWpf")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+69036b4b4914ee68dc3e743564ddea3ad842196a")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2eec5eed18bde0ad83da65bbb7e2c7aba07f51d5")]
 [assembly: System.Reflection.AssemblyProductAttribute("GChartWpf")]
 [assembly: System.Reflection.AssemblyTitleAttribute("GChartWpf")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

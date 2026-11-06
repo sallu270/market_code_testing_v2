@@ -46,3 +46,18 @@ public class SideBrushConverter : IValueConverter
     };
     public object ConvertBack(object? v, Type t, object? p, CultureInfo c) => throw new NotSupportedException();
 }
+
+public class RadioMatchConverter : IValueConverter
+{
+    public object Convert(object? v, Type t, object? p, CultureInfo c)
+    {
+        if (v == null || p == null) return false;
+        return v.ToString() == p.ToString();
+    }
+    public object ConvertBack(object? v, Type t, object? p, CultureInfo c)
+    {
+        if (v is bool b && b && p != null && int.TryParse(p.ToString(), out int val))
+            return val;
+        return Binding.DoNothing;
+    }
+}

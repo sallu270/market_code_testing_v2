@@ -10,5 +10,6 @@ public interface IDataSource
     Task<List<TradeRow>> GetTradesAsync();
     Task<List<StockRow>> GetStocksAsync();
     Task SaveSelectionsAsync(Dictionary<string, int> selections);
+    Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots);
     Task ExitPositionAsync();
 }

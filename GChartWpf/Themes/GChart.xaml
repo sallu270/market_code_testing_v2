@@ -19,6 +19,7 @@
     <conv:BuildUpBrushConverter x:Key="BuildUpBrush"/>
     <conv:SignBrushConverter x:Key="SignBrush"/>
     <conv:SideBrushConverter x:Key="SideBrush"/>
+    <conv:RadioMatchConverter x:Key="RadioMatch"/>
     <BooleanToVisibilityConverter x:Key="BoolVis"/>
 
     <Style TargetType="TextBlock">

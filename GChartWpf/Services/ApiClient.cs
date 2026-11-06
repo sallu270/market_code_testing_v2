@@ -93,11 +93,21 @@ public class ApiClient : IDataSource
         var r = doc.RootElement;
         var pos = O(r, "current_position");
         bool has = pos.ValueKind == JsonValueKind.Object && S(pos, "status") != "CLOSED";
+        var idxLots = O(r, "index_lots");
+        int nLots = 1, bnLots = 1, sLots = 1;
+        if (idxLots.ValueKind == JsonValueKind.Object)
+        {
+            if (idxLots.TryGetProperty("NSE_INDEX|Nifty 50", out var np) && np.TryGetInt32(out var nv)) nLots = nv;
+            if (idxLots.TryGetProperty("NSE_INDEX|Nifty Bank", out var bnp) && bnp.TryGetInt32(out var bnv)) bnLots = bnv;
+            if (idxLots.TryGetProperty("BSE_INDEX|SENSEX", out var sp) && sp.TryGetInt32(out var sv)) sLots = sv;
+        }
+
         return new StatusInfo
         {
             State = S(r, "state"), Spot = D(r, "spot_price"), Expiry = S(r, "active_expiry"),
             HasPosition = has, PositionSymbol = has ? S(pos, "symbol") : "", EntryPrice = has ? D(pos, "entry_price") : 0,
-            TodayPnl = D(r, "today_net_pnl_inr"), TodayPoints = D(r, "today_pnl_points"), TodayTrades = (int)D(r, "today_trades")
+            TodayPnl = D(r, "today_net_pnl_inr"), TodayPoints = D(r, "today_pnl_points"), TodayTrades = (int)D(r, "today_trades"),
+            NiftyLots = nLots, BankNiftyLots = bnLots, SensexLots = sLots
         };
     }
 
@@ -137,6 +147,21 @@ public class ApiClient : IDataSource
     {
         var body = JsonSerializer.Serialize(new { selections });
         using var resp = await _http.PostAsync("/api/stocks/select", new StringContent(body, Encoding.UTF8, "application/json"));
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots)
+    {
+        var body = JsonSerializer.Serialize(new
+        {
+            index_lots = new Dictionary<string, int>
+            {
+                { "NSE_INDEX|Nifty 50", niftyLots },
+                { "NSE_INDEX|Nifty Bank", bankNiftyLots },
+                { "BSE_INDEX|SENSEX", sensexLots }
+            }
+        });
+        using var resp = await _http.PostAsync("/api/strategy/config", new StringContent(body, Encoding.UTF8, "application/json"));
         resp.EnsureSuccessStatusCode();
     }
 

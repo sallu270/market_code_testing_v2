@@ -28,6 +28,10 @@ public class MainViewModel : ObservableObject
         ExitPositionCommand = new RelayCommand(_ => ExitPosition());
         RefreshStocksCommand = new RelayCommand(async _ => await LoadStocksAsync());
         SaveSelectionsCommand = new RelayCommand(async _ => await SaveSelectionsAsync());
+        SaveIndexLotsCommand = new RelayCommand(async _ => await SaveIndexLotsAsync());
+        SetNiftyLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) NiftyLots = v; });
+        SetBankNiftyLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) BankNiftyLots = v; });
+        SetSensexLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) SensexLots = v; });
         ExportTradesCsvCommand = new RelayCommand(_ => ExportTradesCsv());
 
         _timer.Tick += async (_, _) => { Clock = DateTime.Now.ToString("HH:mm:ss"); await RefreshAsync(); };
@@ -48,6 +52,10 @@ public class MainViewModel : ObservableObject
     public ICommand ExitPositionCommand { get; }
     public ICommand RefreshStocksCommand { get; }
     public ICommand SaveSelectionsCommand { get; }
+    public ICommand SaveIndexLotsCommand { get; }
+    public ICommand SetNiftyLotsCommand { get; }
+    public ICommand SetBankNiftyLotsCommand { get; }
+    public ICommand SetSensexLotsCommand { get; }
     public ICommand ExportTradesCsvCommand { get; }
 
     // ---------------- navigation ----------------
@@ -198,6 +206,13 @@ public class MainViewModel : ObservableObject
         PnlText = (s.TodayNetPnlSigned()) ;
         PointsText = $"({s.TodayPoints:N2} pts)";
         PnlBrush = s.TodayPnl > 0 ? Pal.Green : s.TodayPnl < 0 ? Pal.Red : Pal.White;
+        if (!_lotsInitialized)
+        {
+            _lotsInitialized = true;
+            if (s.NiftyLots > 0) NiftyLots = s.NiftyLots;
+            if (s.BankNiftyLots > 0) BankNiftyLots = s.BankNiftyLots;
+            if (s.SensexLots > 0) SensexLots = s.SensexLots;
+        }
     }
 
     void ApplyCandles(List<Candle> c)
@@ -271,6 +286,30 @@ public class MainViewModel : ObservableObject
         SelectedStock = Stocks.FirstOrDefault(s => s.Symbol == keep) ?? Stocks.FirstOrDefault();
         StocksInfo = $"Showing {list.Count} of {_allStocks.Count}  ·  {(TopN > 0 ? "Top " + TopN : "All")}  ·  {SideFilter}  ·  by {RankBy}";
         UpdateSelectedCount();
+    }
+
+    // ---------------- settings : morning lots ----------------
+    bool _lotsInitialized = false;
+    int _niftyLots = 1;
+    public int NiftyLots { get => _niftyLots; set { if (Set(ref _niftyLots, Math.Max(1, value))) OnPropertyChanged(nameof(NiftyLotsPreview)); } }
+    public string NiftyLotsPreview => $"{NiftyLots} lot{(NiftyLots > 1 ? "s" : "")} = {NiftyLots * 65} qty";
+
+    int _bankNiftyLots = 1;
+    public int BankNiftyLots { get => _bankNiftyLots; set { if (Set(ref _bankNiftyLots, Math.Max(1, value))) OnPropertyChanged(nameof(BankNiftyLotsPreview)); } }
+    public string BankNiftyLotsPreview => $"{BankNiftyLots} lot{(BankNiftyLots > 1 ? "s" : "")} = {BankNiftyLots * 15} qty";
+
+    int _sensexLots = 1;
+    public int SensexLots { get => _sensexLots; set { if (Set(ref _sensexLots, Math.Max(1, value))) OnPropertyChanged(nameof(SensexLotsPreview)); } }
+    public string SensexLotsPreview => $"{SensexLots} lot{(SensexLots > 1 ? "s" : "")} = {SensexLots * 10} qty";
+
+    async Task SaveIndexLotsAsync()
+    {
+        try
+        {
+            await _src.SaveIndexLotsAsync(NiftyLots, BankNiftyLots, SensexLots);
+            StatusMessage = $"Saved morning lots: NIFTY 50={NiftyLots} ({NiftyLots * 65} qty), BANK NIFTY={BankNiftyLots} ({BankNiftyLots * 15} qty), SENSEX={SensexLots} ({SensexLots * 10} qty).";
+        }
+        catch (Exception ex) { StatusMessage = "Failed to save lots: " + ex.Message; }
     }
 
     async Task SaveSelectionsAsync()

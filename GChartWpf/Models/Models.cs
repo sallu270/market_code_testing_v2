@@ -55,6 +55,9 @@ public class StatusInfo
     public double TodayPnl;
     public double TodayPoints;
     public int TodayTrades;
+    public int NiftyLots = 1;
+    public int BankNiftyLots = 1;
+    public int SensexLots = 1;
 }
 
 public class TradeRow

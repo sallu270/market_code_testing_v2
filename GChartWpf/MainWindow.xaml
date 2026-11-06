@@ -258,18 +258,131 @@
             </Grid>
 
             <!-- ========== SETTINGS ========== -->
-            <StackPanel Visibility="{Binding IsSettingsMode, Converter={StaticResource BoolVis}}" Background="{StaticResource Panel}" Margin="0">
-                <TextBlock Text="SETTINGS" FontWeight="Bold" Foreground="{StaticResource Teal}" Margin="16,14,16,10"/>
-                <StackPanel Orientation="Horizontal" Margin="16,4">
-                    <TextBlock Text="Strikes shown in option chain" Width="230" VerticalAlignment="Center"/>
-                    <RadioButton Style="{StaticResource SegButton}" GroupName="strikes" Content="6"  Command="{Binding SetStrikeTotalCommand}" CommandParameter="6"/>
-                    <RadioButton Style="{StaticResource SegButton}" GroupName="strikes" Content="8"  IsChecked="True" Command="{Binding SetStrikeTotalCommand}" CommandParameter="8"/>
-                    <RadioButton Style="{StaticResource SegButton}" GroupName="strikes" Content="10" Command="{Binding SetStrikeTotalCommand}" CommandParameter="10"/>
-                    <RadioButton Style="{StaticResource SegButton}" GroupName="strikes" Content="12" Command="{Binding SetStrikeTotalCommand}" CommandParameter="12"/>
+            <ScrollViewer Visibility="{Binding IsSettingsMode, Converter={StaticResource BoolVis}}" Background="{StaticResource Panel}" VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="24,18">
+                    <!-- Section 1: Display -->
+                    <TextBlock Text="DISPLAY &amp; OPTION CHAIN SETTINGS" FontWeight="Bold" FontSize="13" Foreground="{StaticResource Teal}" Margin="0,0,0,12"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,16">
+                        <TextBlock Text="Strikes shown in option chain" Width="240" VerticalAlignment="Center" Foreground="{StaticResource Text}"/>
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="strikes" Content="6"  Command="{Binding SetStrikeTotalCommand}" CommandParameter="6"/>
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="strikes" Content="8"  IsChecked="True" Command="{Binding SetStrikeTotalCommand}" CommandParameter="8"/>
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="strikes" Content="10" Command="{Binding SetStrikeTotalCommand}" CommandParameter="10"/>
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="strikes" Content="12" Command="{Binding SetStrikeTotalCommand}" CommandParameter="12"/>
+                    </StackPanel>
+
+                    <Border BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Margin="0,8,0,20"/>
+
+                    <!-- Section 2: Morning Lots Configuration -->
+                    <TextBlock Text="MORNING MARKET RISK &amp; LOT CONFIGURATION (Set before 09:00 AM)" FontWeight="Bold" FontSize="13" Foreground="{StaticResource Teal}" Margin="0,0,0,6"/>
+                    <TextBlock Text="Define the exact number of lots to trade for each index during automated morning entry (09:15:00 IST). Values persist to backend configuration."
+                               Foreground="{StaticResource Muted}" Margin="0,0,0,16"/>
+
+                    <!-- NIFTY 50 -->
+                    <Border Background="#121212" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,12">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="NIFTY 50  (1 Lot = 65 Qty)" Width="240" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="White"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="niftylots" Content="1"
+                                         IsChecked="{Binding NiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=1}"
+                                         Command="{Binding SetNiftyLotsCommand}" CommandParameter="1"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="niftylots" Content="2"
+                                         IsChecked="{Binding NiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=2}"
+                                         Command="{Binding SetNiftyLotsCommand}" CommandParameter="2"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="niftylots" Content="3"
+                                         IsChecked="{Binding NiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=3}"
+                                         Command="{Binding SetNiftyLotsCommand}" CommandParameter="3"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="niftylots" Content="4"
+                                         IsChecked="{Binding NiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=4}"
+                                         Command="{Binding SetNiftyLotsCommand}" CommandParameter="4"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="niftylots" Content="5"
+                                         IsChecked="{Binding NiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=5}"
+                                         Command="{Binding SetNiftyLotsCommand}" CommandParameter="5"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="niftylots" Content="10"
+                                         IsChecked="{Binding NiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=10}"
+                                         Command="{Binding SetNiftyLotsCommand}" CommandParameter="10"/>
+
+                            <TextBlock Text="Custom Lots:" Margin="16,0,8,0" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+                            <TextBox Width="50" TextAlignment="Center" Text="{Binding NiftyLots, UpdateSourceTrigger=LostFocus}" VerticalAlignment="Center"/>
+
+                            <Border Background="{StaticResource TealDark}" BorderBrush="{StaticResource Teal}" BorderThickness="1" CornerRadius="3" Padding="10,3" Margin="16,0,0,0">
+                                <TextBlock Text="{Binding NiftyLotsPreview}" FontFamily="Consolas" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- BANK NIFTY -->
+                    <Border Background="#121212" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,12">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="BANK NIFTY  (1 Lot = 15 Qty)" Width="240" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="White"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="bankniftylots" Content="1"
+                                         IsChecked="{Binding BankNiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=1}"
+                                         Command="{Binding SetBankNiftyLotsCommand}" CommandParameter="1"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="bankniftylots" Content="2"
+                                         IsChecked="{Binding BankNiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=2}"
+                                         Command="{Binding SetBankNiftyLotsCommand}" CommandParameter="2"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="bankniftylots" Content="3"
+                                         IsChecked="{Binding BankNiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=3}"
+                                         Command="{Binding SetBankNiftyLotsCommand}" CommandParameter="3"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="bankniftylots" Content="4"
+                                         IsChecked="{Binding BankNiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=4}"
+                                         Command="{Binding SetBankNiftyLotsCommand}" CommandParameter="4"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="bankniftylots" Content="5"
+                                         IsChecked="{Binding BankNiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=5}"
+                                         Command="{Binding SetBankNiftyLotsCommand}" CommandParameter="5"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="bankniftylots" Content="10"
+                                         IsChecked="{Binding BankNiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=10}"
+                                         Command="{Binding SetBankNiftyLotsCommand}" CommandParameter="10"/>
+
+                            <TextBlock Text="Custom Lots:" Margin="16,0,8,0" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+                            <TextBox Width="50" TextAlignment="Center" Text="{Binding BankNiftyLots, UpdateSourceTrigger=LostFocus}" VerticalAlignment="Center"/>
+
+                            <Border Background="{StaticResource TealDark}" BorderBrush="{StaticResource Teal}" BorderThickness="1" CornerRadius="3" Padding="10,3" Margin="16,0,0,0">
+                                <TextBlock Text="{Binding BankNiftyLotsPreview}" FontFamily="Consolas" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- SENSEX -->
+                    <Border Background="#121212" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,16">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="SENSEX  (1 Lot = 10 Qty)" Width="240" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="White"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="sensexlots" Content="1"
+                                         IsChecked="{Binding SensexLots, Converter={StaticResource RadioMatch}, ConverterParameter=1}"
+                                         Command="{Binding SetSensexLotsCommand}" CommandParameter="1"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="sensexlots" Content="2"
+                                         IsChecked="{Binding SensexLots, Converter={StaticResource RadioMatch}, ConverterParameter=2}"
+                                         Command="{Binding SetSensexLotsCommand}" CommandParameter="2"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="sensexlots" Content="3"
+                                         IsChecked="{Binding SensexLots, Converter={StaticResource RadioMatch}, ConverterParameter=3}"
+                                         Command="{Binding SetSensexLotsCommand}" CommandParameter="3"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="sensexlots" Content="4"
+                                         IsChecked="{Binding SensexLots, Converter={StaticResource RadioMatch}, ConverterParameter=4}"
+                                         Command="{Binding SetSensexLotsCommand}" CommandParameter="4"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="sensexlots" Content="5"
+                                         IsChecked="{Binding SensexLots, Converter={StaticResource RadioMatch}, ConverterParameter=5}"
+                                         Command="{Binding SetSensexLotsCommand}" CommandParameter="5"/>
+                            <RadioButton Style="{StaticResource SegButton}" GroupName="sensexlots" Content="10"
+                                         IsChecked="{Binding SensexLots, Converter={StaticResource RadioMatch}, ConverterParameter=10}"
+                                         Command="{Binding SetSensexLotsCommand}" CommandParameter="10"/>
+
+                            <TextBlock Text="Custom Lots:" Margin="16,0,8,0" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+                            <TextBox Width="50" TextAlignment="Center" Text="{Binding SensexLots, UpdateSourceTrigger=LostFocus}" VerticalAlignment="Center"/>
+
+                            <Border Background="{StaticResource TealDark}" BorderBrush="{StaticResource Teal}" BorderThickness="1" CornerRadius="3" Padding="10,3" Margin="16,0,0,0">
+                                <TextBlock Text="{Binding SensexLotsPreview}" FontFamily="Consolas" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Save Button -->
+                    <Button Style="{StaticResource CsvButton}" Content="💾  Save Morning Lot Settings"
+                            Command="{Binding SaveIndexLotsCommand}" Padding="18,8" FontSize="13" HorizontalAlignment="Left" Margin="0,0,0,20"/>
+
+                    <Border BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Margin="0,4,0,16"/>
+
+                    <TextBlock Foreground="{StaticResource Muted}" TextWrapping="Wrap"
+                               Text="Bot API address and demo mode are set in AppSettings.cs (or env vars GCHART_API / GCHART_DEMO=1, or run with --demo)."/>
                 </StackPanel>
-                <TextBlock Margin="16,18,16,0" Foreground="{StaticResource Muted}" TextWrapping="Wrap"
-                           Text="Bot API address and demo mode are set in AppSettings.cs (or env vars GCHART_API / GCHART_DEMO=1, or run with --demo)."/>
-            </StackPanel>
+            </ScrollViewer>
         </Grid>
 
         <!-- ============ 4. STATUS BAR ============ -->

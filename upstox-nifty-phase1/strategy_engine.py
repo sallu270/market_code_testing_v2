@@ -51,6 +51,17 @@ class GapEntryStrategyEngine:
         # User Configuration
         self.lots: int = 1
         self.lot_size: int = DEFAULT_LOT_SIZE
+        self.lots_file = base_dir / "index_lots.json"
+        self.index_lots: dict[str, int] = {
+            "NSE_INDEX|Nifty 50": 1,
+            "NSE_INDEX|Nifty Bank": 1,
+            "BSE_INDEX|SENSEX": 1,
+        }
+        self.index_lot_sizes: dict[str, int] = {
+            "NSE_INDEX|Nifty 50": 65,
+            "NSE_INDEX|Nifty Bank": 15,
+            "BSE_INDEX|SENSEX": 10,
+        }
         self.order_buffer: float = 0.50
         self.max_spread_pct: float = 3.0
         self.max_quote_wait_ms: int = 100
@@ -94,8 +105,33 @@ class GapEntryStrategyEngine:
         self._eod_timer: threading.Timer | None = None
 
         self._init_csv()
+        self._load_index_lots()
         self._resume_open_position()
         self._schedule_eod_squareoff()
+
+    def _load_index_lots(self) -> None:
+        if hasattr(self, "lots_file") and self.lots_file.exists():
+            try:
+                with open(self.lots_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        for k, v in data.items():
+                            if k in self.index_lots:
+                                self.index_lots[k] = max(1, int(v))
+                        if NIFTY_KEY in self.index_lots:
+                            self.lots = self.index_lots[NIFTY_KEY]
+                LOGGER.info("Loaded index lots from %s: %s", self.lots_file, self.index_lots)
+            except Exception as exc:
+                LOGGER.warning("Could not load index_lots.json: %s", exc)
+
+    def _save_index_lots(self) -> None:
+        if hasattr(self, "lots_file"):
+            try:
+                with open(self.lots_file, "w", encoding="utf-8") as f:
+                    json.dump(self.index_lots, f, indent=2)
+                LOGGER.info("Saved index lots to %s: %s", self.lots_file, self.index_lots)
+            except Exception as exc:
+                LOGGER.warning("Could not save index_lots.json: %s", exc)
 
     def set_feed(self, feed: Any) -> None:
         self.feed = feed
@@ -596,7 +632,10 @@ class GapEntryStrategyEngine:
             trade_id = f"GAP-{datetime.now(IST).strftime('%m%d%H%M%S')}-{self._trade_counter}"
             self._trade_counter += 1
 
-            total_qty = self.lots * self.lot_size
+            underlying_key = winner.get("underlying_key") or NIFTY_KEY
+            lots = self.index_lots.get(underlying_key, self.lots)
+            lot_sz = self.index_lot_sizes.get(underlying_key, self.lot_size)
+            total_qty = lots * lot_sz
             ask = winner.get("ask_price") or winner.get("ltp") or 100.0
             # Rule R17: Limit price = best ask plus buffer, rounded to 0.05 tick size
             limit_price = round(round((ask + self.order_buffer) / 0.05) * 0.05, 2)
@@ -614,8 +653,9 @@ class GapEntryStrategyEngine:
                 "side": order_side,
                 "symbol": symbol,
                 "instrument_key": inst_key,
-                "underlying_key": NIFTY_KEY,
+                "underlying_key": underlying_key,
                 "strike": strike,
+                "lots": lots,
                 "lot_size": total_qty,
                 "entry_time_ist": time_str,
                 "entry_price": entry_price,
@@ -814,6 +854,8 @@ class GapEntryStrategyEngine:
             "mode": self.mode,
             "lots": self.lots,
             "lot_size": self.lot_size,
+            "index_lots": self.index_lots,
+            "index_lot_sizes": self.index_lot_sizes,
             "order_buffer": self.order_buffer,
             "max_spread_pct": self.max_spread_pct,
             "max_quote_wait_ms": self.max_quote_wait_ms,
@@ -828,6 +870,16 @@ class GapEntryStrategyEngine:
         with self._lock:
             if "lots" in body:
                 self.lots = max(1, int(body["lots"]))
+            if "index_lots" in body and isinstance(body["index_lots"], dict):
+                for k, v in body["index_lots"].items():
+                    if k in self.index_lots:
+                        try:
+                            self.index_lots[k] = max(1, int(v))
+                        except (ValueError, TypeError):
+                            pass
+                if NIFTY_KEY in self.index_lots:
+                    self.lots = self.index_lots[NIFTY_KEY]
+                self._save_index_lots()
             if "order_buffer" in body:
                 self.order_buffer = float(body["order_buffer"])
             if "max_spread_pct" in body:
@@ -881,6 +933,8 @@ class GapEntryStrategyEngine:
                 "active_expiry": self.active_expiry,
                 "lots": self.lots,
                 "lot_size": self.lot_size,
+                "index_lots": self.index_lots,
+                "index_lot_sizes": self.index_lot_sizes,
                 "current_position": self.current_position,
                 "current_positions": {NIFTY_KEY: self.current_position} if self.current_position else {},
                 "locked_contracts": locked_table,
