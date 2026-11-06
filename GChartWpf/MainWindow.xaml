@@ -73,8 +73,8 @@
         <!-- ============ 3. CONTENT ============ -->
         <Grid Grid.Row="2">
 
-            <!-- ========== CHART FIRST, then option chain / stock list ========== -->
-            <Grid Visibility="{Binding IsChartMode, Converter={StaticResource BoolVis}}">
+            <!-- ========== 1. INDEX MODE : Candlestick Chart + Option Chain ========== -->
+            <Grid Visibility="{Binding IsIndexMode, Converter={StaticResource BoolVis}}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*" MinHeight="180"/>
                     <RowDefinition Height="Auto"/>
@@ -102,124 +102,124 @@
                     </StackPanel>
                 </Border>
 
-                <!-- bottom panel -->
-                <Grid Grid.Row="2">
+                <!-- bottom panel : Option Chain -->
+                <Border Grid.Row="2" Background="{StaticResource Panel}">
+                    <StackPanel>
+                        <DockPanel Margin="10,6,10,4">
+                            <TextBlock DockPanel.Dock="Right" Text="{Binding AtmText}" FontFamily="Consolas" Foreground="{StaticResource Amber}"/>
+                            <TextBlock Text="OPTION CHAIN" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
+                            <TextBlock Text="  · 8 strikes around spot (slides with price)" Foreground="{StaticResource Muted}"/>
+                        </DockPanel>
 
-                    <!-- ===== OPTION CHAIN : only 8 dynamic strikes ===== -->
-                    <Border Visibility="{Binding IsIndexMode, Converter={StaticResource BoolVis}}" Background="{StaticResource Panel}">
-                        <StackPanel>
-                            <DockPanel Margin="10,6,10,4">
-                                <TextBlock DockPanel.Dock="Right" Text="{Binding AtmText}" FontFamily="Consolas" Foreground="{StaticResource Amber}"/>
-                                <TextBlock Text="OPTION CHAIN" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
-                                <TextBlock Text="  · 8 strikes around spot (slides with price)" Foreground="{StaticResource Muted}"/>
-                            </DockPanel>
+                        <!-- group header; star widths mirror the grid columns below -->
+                        <Grid Height="22" Background="#101010">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="6*"/>
+                                <ColumnDefinition Width="1.3*"/>
+                                <ColumnDefinition Width="6*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="CALLS (CE)" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold" Foreground="{StaticResource Up}"/>
+                            <TextBlock Grid.Column="1" Text="STRIKE" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold" Foreground="White"/>
+                            <TextBlock Grid.Column="2" Text="PUTS (PE)" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold" Foreground="{StaticResource Down}"/>
+                        </Grid>
 
-                            <!-- group header; star widths mirror the grid columns below -->
-                            <Grid Height="22" Background="#101010">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="6*"/>
-                                    <ColumnDefinition Width="1.3*"/>
-                                    <ColumnDefinition Width="6*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="CALLS (CE)" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold" Foreground="{StaticResource Up}"/>
-                                <TextBlock Grid.Column="1" Text="STRIKE" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold" Foreground="White"/>
-                                <TextBlock Grid.Column="2" Text="PUTS (PE)" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold" Foreground="{StaticResource Down}"/>
-                            </Grid>
+                        <DataGrid ItemsSource="{Binding Strikes}" IsReadOnly="True" IsHitTestVisible="False" Focusable="False">
+                            <DataGrid.RowStyle>
+                                <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsAtm}" Value="True">
+                                            <Setter Property="Background" Value="{StaticResource AtmRow}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </DataGrid.RowStyle>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding CeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
+                                <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding CeVolume, StringFormat='{}{0:N0;-N0;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding CeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding CeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding CeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="STRIKE"   Width="1.3*" Binding="{Binding Strike, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource StrikeCell}"/>
+                                <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding PeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding PeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding PeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding PeVolume, StringFormat='{}{0:N0;-N0;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding PeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </StackPanel>
+                </Border>
+            </Grid>
 
-                            <DataGrid ItemsSource="{Binding Strikes}" IsReadOnly="True" IsHitTestVisible="False" Focusable="False">
-                                <DataGrid.RowStyle>
-                                    <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsAtm}" Value="True">
-                                                <Setter Property="Background" Value="{StaticResource AtmRow}"/>
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </DataGrid.RowStyle>
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding CeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
-                                    <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding CeVolume, StringFormat='{}{0:N0;-N0;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding CeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding CeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding CeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="STRIKE"   Width="1.3*" Binding="{Binding Strike, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource StrikeCell}"/>
-                                    <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding PeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding PeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding PeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding PeVolume, StringFormat='{}{0:N0;-N0;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding PeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
-                                </DataGrid.Columns>
-                            </DataGrid>
-                        </StackPanel>
-                    </Border>
+            <!-- ========== 2. STOCKS MODE : Full-Height NIFTY 50 Screener (No Chart) ========== -->
+            <Grid Visibility="{Binding IsStocksMode, Converter={StaticResource BoolVis}}" Background="{StaticResource Panel}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
 
-                    <!-- ===== STOCKS : Top-N / Buy / Sell filters ===== -->
-                    <Border Visibility="{Binding IsStocksMode, Converter={StaticResource BoolVis}}" Background="{StaticResource Panel}">
-                        <StackPanel>
-                            <WrapPanel Margin="10,8,10,6">
-                                <TextBox Text="{Binding Search, UpdateSourceTrigger=PropertyChanged}" Width="150" Margin="0,0,14,0" ToolTip="Search symbol"/>
+                <WrapPanel Grid.Row="0" Margin="10,8,10,6">
+                    <TextBox Text="{Binding Search, UpdateSourceTrigger=PropertyChanged}" Width="150" Margin="0,0,14,0" ToolTip="Search symbol"/>
 
-                                <TextBlock Text="Show" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                <StackPanel Orientation="Horizontal" Margin="0,0,14,0">
-                                    <RadioButton Style="{StaticResource SegButton}" GroupName="topn" Content="Top 10" IsChecked="True" Command="{Binding SetTopNCommand}" CommandParameter="10"/>
-                                    <RadioButton Style="{StaticResource SegButton}" GroupName="topn" Content="Top 20" Command="{Binding SetTopNCommand}" CommandParameter="20"/>
-                                    <RadioButton Style="{StaticResource SegButton}" GroupName="topn" Content="All 50"  Command="{Binding SetTopNCommand}" CommandParameter="0"/>
-                                </StackPanel>
+                    <TextBlock Text="Show" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,14,0">
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="topn" Content="Top 10" IsChecked="True" Command="{Binding SetTopNCommand}" CommandParameter="10"/>
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="topn" Content="Top 20" Command="{Binding SetTopNCommand}" CommandParameter="20"/>
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="topn" Content="All 50"  Command="{Binding SetTopNCommand}" CommandParameter="0"/>
+                    </StackPanel>
 
-                                <TextBlock Text="Side" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                <StackPanel Orientation="Horizontal" Margin="0,0,14,0">
-                                    <RadioButton Style="{StaticResource SegButton}" GroupName="side" Content="All"  IsChecked="True" Command="{Binding SetSideCommand}" CommandParameter="All"/>
-                                    <RadioButton Style="{StaticResource SegButton}" GroupName="side" Content="Buy"  Command="{Binding SetSideCommand}" CommandParameter="Buy"/>
-                                    <RadioButton Style="{StaticResource SegButton}" GroupName="side" Content="Sell" Command="{Binding SetSideCommand}" CommandParameter="Sell"/>
-                                </StackPanel>
+                    <TextBlock Text="Side" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,14,0">
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="side" Content="All"  IsChecked="True" Command="{Binding SetSideCommand}" CommandParameter="All"/>
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="side" Content="Buy"  Command="{Binding SetSideCommand}" CommandParameter="Buy"/>
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="side" Content="Sell" Command="{Binding SetSideCommand}" CommandParameter="Sell"/>
+                    </StackPanel>
 
-                                <TextBlock Text="Rank by" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                <StackPanel Orientation="Horizontal" Margin="0,0,14,0">
-                                    <RadioButton Style="{StaticResource SegButton}" GroupName="rank" Content="Volume" IsChecked="True" Command="{Binding SetRankCommand}" CommandParameter="Volume"/>
-                                    <RadioButton Style="{StaticResource SegButton}" GroupName="rank" Content="Change %" Command="{Binding SetRankCommand}" CommandParameter="Change %"/>
-                                </StackPanel>
+                    <TextBlock Text="Rank by" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,14,0">
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="rank" Content="Volume" IsChecked="True" Command="{Binding SetRankCommand}" CommandParameter="Volume"/>
+                        <RadioButton Style="{StaticResource SegButton}" GroupName="rank" Content="Change %" Command="{Binding SetRankCommand}" CommandParameter="Change %"/>
+                    </StackPanel>
 
-                                <TextBlock Text="{Binding SelectedCount}" Foreground="{StaticResource Teal}" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,14,0"/>
-                                <Button Content="⟳ Refresh" Command="{Binding RefreshStocksCommand}" Margin="0,0,6,0"/>
-                                <Button Content="💾 Save Selections" Command="{Binding SaveSelectionsCommand}"/>
-                            </WrapPanel>
+                    <TextBlock Text="{Binding SelectedCount}" Foreground="{StaticResource Teal}" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                    <Button Content="⟳ Refresh" Command="{Binding RefreshStocksCommand}" Margin="0,0,6,0"/>
+                    <Button Content="💾 Save Selections" Command="{Binding SaveSelectionsCommand}"/>
+                </WrapPanel>
 
-                            <TextBlock Text="{Binding StocksInfo}" Foreground="{StaticResource Muted}" FontFamily="Consolas" Margin="12,0,0,4"/>
+                <TextBlock Grid.Row="1" Text="{Binding StocksInfo}" Foreground="{StaticResource Muted}" FontFamily="Consolas" Margin="12,0,0,6"/>
 
-                            <DataGrid ItemsSource="{Binding Stocks}" SelectedItem="{Binding SelectedStock, Mode=TwoWay}" MaxHeight="290" IsReadOnly="True">
-                                <DataGrid.Columns>
-                                    <DataGridTemplateColumn Header="✓" Width="40">
-                                        <DataGridTemplateColumn.CellTemplate>
-                                            <DataTemplate>
-                                                <CheckBox IsChecked="{Binding Selected, UpdateSourceTrigger=PropertyChanged}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                            </DataTemplate>
-                                        </DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
-                                    <DataGridTextColumn Header="Symbol" Width="1.3*" Binding="{Binding Symbol}" ElementStyle="{StaticResource CellText}"/>
-                                    <DataGridTextColumn Header="LTP (₹)" Width="1.1*" Binding="{Binding Price, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Chg %" Width="1*" Binding="{Binding ChangePct, StringFormat='{}{0:+0.00;-0.00;0.00}'}">
-                                        <DataGridTextColumn.ElementStyle>
-                                            <Style TargetType="TextBlock" BasedOn="{StaticResource NumCell}">
-                                                <Setter Property="Foreground" Value="{Binding ChangePct, Converter={StaticResource SignBrush}}"/>
-                                            </Style>
-                                        </DataGridTextColumn.ElementStyle>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Header="Volume" Width="1.2*" Binding="{Binding Volume, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTextColumn Header="Build-up" Width="1.5*" Binding="{Binding BuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
-                                    <DataGridTextColumn Header="Signal" Width="0.8*" Binding="{Binding Signal}" ElementStyle="{StaticResource SideCell}"/>
-                                    <DataGridTextColumn Header="Lot Size" Width="0.9*" Binding="{Binding LotSize}" ElementStyle="{StaticResource NumCell}"/>
-                                    <DataGridTemplateColumn Header="Lots" Width="80">
-                                        <DataGridTemplateColumn.CellTemplate>
-                                            <DataTemplate>
-                                                <TextBox Text="{Binding Lots, UpdateSourceTrigger=LostFocus}" Width="48" TextAlignment="Center" Padding="0,1" HorizontalAlignment="Center"/>
-                                            </DataTemplate>
-                                        </DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
-                                </DataGrid.Columns>
-                            </DataGrid>
-                        </StackPanel>
-                    </Border>
-                </Grid>
+                <DataGrid Grid.Row="2" ItemsSource="{Binding Stocks}" SelectedItem="{Binding SelectedStock, Mode=TwoWay}" IsReadOnly="True">
+                    <DataGrid.Columns>
+                        <DataGridTemplateColumn Header="✓" Width="40">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <CheckBox IsChecked="{Binding Selected, UpdateSourceTrigger=PropertyChanged}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Symbol" Width="1.3*" Binding="{Binding Symbol}" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="LTP (₹)" Width="1.1*" Binding="{Binding Price, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumCell}"/>
+                        <DataGridTextColumn Header="Chg %" Width="1*" Binding="{Binding ChangePct, StringFormat='{}{0:+0.00;-0.00;0.00}'}">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource NumCell}">
+                                    <Setter Property="Foreground" Value="{Binding ChangePct, Converter={StaticResource SignBrush}}"/>
+                                </Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Header="Volume" Width="1.2*" Binding="{Binding Volume, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumCell}"/>
+                        <DataGridTextColumn Header="Build-up" Width="1.5*" Binding="{Binding BuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
+                        <DataGridTextColumn Header="Signal" Width="0.8*" Binding="{Binding Signal}" ElementStyle="{StaticResource SideCell}"/>
+                        <DataGridTextColumn Header="Lot Size" Width="0.9*" Binding="{Binding LotSize}" ElementStyle="{StaticResource NumCell}"/>
+                        <DataGridTemplateColumn Header="Lots" Width="80">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBox Text="{Binding Lots, UpdateSourceTrigger=LostFocus}" Width="48" TextAlignment="Center" Padding="0,1" HorizontalAlignment="Center"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
             </Grid>
 
             <!-- ========== TRADES JOURNAL ========== -->

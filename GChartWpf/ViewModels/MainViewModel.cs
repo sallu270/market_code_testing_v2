@@ -67,7 +67,7 @@ public class MainViewModel : ObservableObject
     }
     public bool IsIndexMode => Mode == "Index";
     public bool IsStocksMode => Mode == "Stocks";
-    public bool IsChartMode => IsIndexMode || IsStocksMode;
+    public bool IsChartMode => IsIndexMode;
     public bool IsJournalMode => Mode == "Journal";
     public bool IsSettingsMode => Mode == "Settings";
 
@@ -94,7 +94,7 @@ public class MainViewModel : ObservableObject
     public bool IsDaily => Timeframe == "1d";
     IReadOnlyList<Candle>? _candles;
     public IReadOnlyList<Candle>? Candles { get => _candles; set => Set(ref _candles, value); }
-    public string ChartTitle => IsStocksMode && SelectedStock != null ? SelectedStock.Symbol : AppSettings.IndexName;
+    public string ChartTitle => AppSettings.IndexName;
     string _lo = "—", _lh = "—", _ll = "—", _lc = "—", _lchg = "0.00 (0.00%)", _lv = "—";
     public string LegendO { get => _lo; set => Set(ref _lo, value); }
     public string LegendH { get => _lh; set => Set(ref _lh, value); }
@@ -139,7 +139,7 @@ public class MainViewModel : ObservableObject
         _busy = true;
         try
         {
-            string key = IsStocksMode && SelectedStock != null ? SelectedStock.Key : AppSettings.IndexKey;
+            string key = AppSettings.IndexKey;
             var tStatus = _src.GetStatusAsync();
             var tCandles = IsChartMode ? _src.GetCandlesAsync(key, Timeframe) : null;
             var tChain = IsIndexMode ? _src.GetChainAsync(AppSettings.IndexKey) : null;
