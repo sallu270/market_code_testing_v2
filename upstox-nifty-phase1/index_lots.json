@@ -1,5 +1,12 @@
 {
-  "NSE_INDEX|Nifty 50": 1,
-  "NSE_INDEX|Nifty Bank": 1,
-  "BSE_INDEX|SENSEX": 1
+  "index_lots": {
+    "NSE_INDEX|Nifty 50": 1,
+    "NSE_INDEX|Nifty Bank": 1,
+    "BSE_INDEX|SENSEX": 1
+  },
+  "index_enabled": {
+    "NSE_INDEX|Nifty 50": true,
+    "NSE_INDEX|Nifty Bank": true,
+    "BSE_INDEX|SENSEX": true
+  }
 }

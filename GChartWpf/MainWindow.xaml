@@ -278,9 +278,10 @@
                                Foreground="{StaticResource Muted}" Margin="0,0,0,16"/>
 
                     <!-- NIFTY 50 -->
-                    <Border Background="#121212" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,12">
+                    <Border Background="#121212" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,12"
+                            Opacity="{Binding NiftyCardOpacity}">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="NIFTY 50  (1 Lot = 65 Qty)" Width="240" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="White"/>
+                            <TextBlock Text="NIFTY 50  (1 Lot = 65 Qty)" Width="220" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="White"/>
                             <RadioButton Style="{StaticResource SegButton}" GroupName="niftylots" Content="1"
                                          IsChecked="{Binding NiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=1}"
                                          Command="{Binding SetNiftyLotsCommand}" CommandParameter="1"/>
@@ -306,13 +307,20 @@
                             <Border Background="{StaticResource TealDark}" BorderBrush="{StaticResource Teal}" BorderThickness="1" CornerRadius="3" Padding="10,3" Margin="16,0,0,0">
                                 <TextBlock Text="{Binding NiftyLotsPreview}" FontFamily="Consolas" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
                             </Border>
+
+                            <Button Command="{Binding ToggleNiftyEnabledCommand}" Style="{StaticResource {x:Type Button}}"
+                                    Background="#181818" BorderBrush="{Binding NiftyStatusBrush}" BorderThickness="1.5"
+                                    Padding="14,4" Margin="24,0,0,0" ToolTip="Click to toggle between Active and Paused today">
+                                <TextBlock Text="{Binding NiftyStatusText}" FontWeight="Bold" Foreground="{Binding NiftyStatusBrush}"/>
+                            </Button>
                         </StackPanel>
                     </Border>
 
                     <!-- BANK NIFTY -->
-                    <Border Background="#121212" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,12">
+                    <Border Background="#121212" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,12"
+                            Opacity="{Binding BankNiftyCardOpacity}">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="BANK NIFTY  (1 Lot = 15 Qty)" Width="240" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="White"/>
+                            <TextBlock Text="BANK NIFTY  (1 Lot = 15 Qty)" Width="220" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="White"/>
                             <RadioButton Style="{StaticResource SegButton}" GroupName="bankniftylots" Content="1"
                                          IsChecked="{Binding BankNiftyLots, Converter={StaticResource RadioMatch}, ConverterParameter=1}"
                                          Command="{Binding SetBankNiftyLotsCommand}" CommandParameter="1"/>
@@ -338,13 +346,20 @@
                             <Border Background="{StaticResource TealDark}" BorderBrush="{StaticResource Teal}" BorderThickness="1" CornerRadius="3" Padding="10,3" Margin="16,0,0,0">
                                 <TextBlock Text="{Binding BankNiftyLotsPreview}" FontFamily="Consolas" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
                             </Border>
+
+                            <Button Command="{Binding ToggleBankNiftyEnabledCommand}" Style="{StaticResource {x:Type Button}}"
+                                    Background="#181818" BorderBrush="{Binding BankNiftyStatusBrush}" BorderThickness="1.5"
+                                    Padding="14,4" Margin="24,0,0,0" ToolTip="Click to toggle between Active and Paused today">
+                                <TextBlock Text="{Binding BankNiftyStatusText}" FontWeight="Bold" Foreground="{Binding BankNiftyStatusBrush}"/>
+                            </Button>
                         </StackPanel>
                     </Border>
 
                     <!-- SENSEX -->
-                    <Border Background="#121212" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,16">
+                    <Border Background="#121212" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12" Margin="0,0,0,16"
+                            Opacity="{Binding SensexCardOpacity}">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="SENSEX  (1 Lot = 10 Qty)" Width="240" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="White"/>
+                            <TextBlock Text="SENSEX  (1 Lot = 10 Qty)" Width="220" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="White"/>
                             <RadioButton Style="{StaticResource SegButton}" GroupName="sensexlots" Content="1"
                                          IsChecked="{Binding SensexLots, Converter={StaticResource RadioMatch}, ConverterParameter=1}"
                                          Command="{Binding SetSensexLotsCommand}" CommandParameter="1"/>
@@ -370,6 +385,12 @@
                             <Border Background="{StaticResource TealDark}" BorderBrush="{StaticResource Teal}" BorderThickness="1" CornerRadius="3" Padding="10,3" Margin="16,0,0,0">
                                 <TextBlock Text="{Binding SensexLotsPreview}" FontFamily="Consolas" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
                             </Border>
+
+                            <Button Command="{Binding ToggleSensexEnabledCommand}" Style="{StaticResource {x:Type Button}}"
+                                    Background="#181818" BorderBrush="{Binding SensexStatusBrush}" BorderThickness="1.5"
+                                    Padding="14,4" Margin="24,0,0,0" ToolTip="Click to toggle between Active and Paused today">
+                                <TextBlock Text="{Binding SensexStatusText}" FontWeight="Bold" Foreground="{Binding SensexStatusBrush}"/>
+                            </Button>
                         </StackPanel>
                     </Border>
 

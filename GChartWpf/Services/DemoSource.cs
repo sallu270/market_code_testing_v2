@@ -121,5 +121,6 @@ public class DemoSource : IDataSource
 
     public Task SaveSelectionsAsync(Dictionary<string, int> selections) => Task.CompletedTask;
     public Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots) => Task.CompletedTask;
+    public Task SaveIndexConfigAsync(int niftyLots, int bankNiftyLots, int sensexLots, bool niftyEnabled, bool bankNiftyEnabled, bool sensexEnabled) => Task.CompletedTask;
     public Task ExitPositionAsync() { _hasPos = false; return Task.CompletedTask; }
 }

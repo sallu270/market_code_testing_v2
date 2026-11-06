@@ -58,6 +58,9 @@ public class StatusInfo
     public int NiftyLots = 1;
     public int BankNiftyLots = 1;
     public int SensexLots = 1;
+    public bool NiftyEnabled = true;
+    public bool BankNiftyEnabled = true;
+    public bool SensexEnabled = true;
 }
 
 public class TradeRow

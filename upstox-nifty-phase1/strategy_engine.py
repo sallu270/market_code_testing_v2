@@ -62,6 +62,11 @@ class GapEntryStrategyEngine:
             "NSE_INDEX|Nifty Bank": 15,
             "BSE_INDEX|SENSEX": 10,
         }
+        self.index_enabled: dict[str, bool] = {
+            "NSE_INDEX|Nifty 50": True,
+            "NSE_INDEX|Nifty Bank": True,
+            "BSE_INDEX|SENSEX": True,
+        }
         self.order_buffer: float = 0.50
         self.max_spread_pct: float = 3.0
         self.max_quote_wait_ms: int = 100
@@ -115,21 +120,32 @@ class GapEntryStrategyEngine:
                 with open(self.lots_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if isinstance(data, dict):
-                        for k, v in data.items():
-                            if k in self.index_lots:
-                                self.index_lots[k] = max(1, int(v))
+                        lots_data = data.get("index_lots") if "index_lots" in data else data
+                        if isinstance(lots_data, dict):
+                            for k, v in lots_data.items():
+                                if k in self.index_lots:
+                                    self.index_lots[k] = max(1, int(v))
+                        enabled_data = data.get("index_enabled")
+                        if isinstance(enabled_data, dict):
+                            for k, v in enabled_data.items():
+                                if k in self.index_enabled:
+                                    self.index_enabled[k] = bool(v)
                         if NIFTY_KEY in self.index_lots:
                             self.lots = self.index_lots[NIFTY_KEY]
-                LOGGER.info("Loaded index lots from %s: %s", self.lots_file, self.index_lots)
+                LOGGER.info("Loaded index lots & status from %s: lots=%s, enabled=%s", self.lots_file, self.index_lots, self.index_enabled)
             except Exception as exc:
                 LOGGER.warning("Could not load index_lots.json: %s", exc)
 
     def _save_index_lots(self) -> None:
         if hasattr(self, "lots_file"):
             try:
+                payload = {
+                    "index_lots": self.index_lots,
+                    "index_enabled": self.index_enabled,
+                }
                 with open(self.lots_file, "w", encoding="utf-8") as f:
-                    json.dump(self.index_lots, f, indent=2)
-                LOGGER.info("Saved index lots to %s: %s", self.lots_file, self.index_lots)
+                    json.dump(payload, f, indent=2)
+                LOGGER.info("Saved index config to %s: %s", self.lots_file, payload)
             except Exception as exc:
                 LOGGER.warning("Could not save index_lots.json: %s", exc)
 
@@ -264,6 +280,7 @@ class GapEntryStrategyEngine:
                 ce_map: dict[float, dict[str, Any]] = {}
                 pe_map: dict[float, dict[str, Any]] = {}
                 for c in matched:
+                    c["underlying_key"] = underlying_key
                     k = c.get("instrument_key")
                     strike = float(c.get("strike_price") or 0.0)
                     itype = str(c.get("instrument_type") or "").upper()
@@ -336,6 +353,7 @@ class GapEntryStrategyEngine:
                 self.hot_cache[k] = {
                     "instrument_key": k,
                     "trading_symbol": contract.get("trading_symbol") or k,
+                    "underlying_key": contract.get("underlying_key") or underlying_key,
                     "strike": float(contract.get("strike_price") or 0.0),
                     "side": str(contract.get("instrument_type") or "").upper(),
                     "ref_ltp": None,
@@ -541,6 +559,19 @@ class GapEntryStrategyEngine:
             if self.state != "ARMED":
                 return None
             if inst_key not in self.locked_keys:
+                return None
+
+            # Check if this index is paused for today
+            u_key = entry.get("underlying_key")
+            if not u_key:
+                sym = entry.get("trading_symbol", "")
+                if "BANK" in sym:
+                    u_key = "NSE_INDEX|Nifty Bank"
+                elif "SENSEX" in sym:
+                    u_key = "BSE_INDEX|SENSEX"
+                else:
+                    u_key = NIFTY_KEY
+            if not self.index_enabled.get(u_key, True):
                 return None
 
             # --- Rule R8: POSITIVE TICK EVALUATION ---
@@ -856,6 +887,7 @@ class GapEntryStrategyEngine:
             "lot_size": self.lot_size,
             "index_lots": self.index_lots,
             "index_lot_sizes": self.index_lot_sizes,
+            "index_enabled": self.index_enabled,
             "order_buffer": self.order_buffer,
             "max_spread_pct": self.max_spread_pct,
             "max_quote_wait_ms": self.max_quote_wait_ms,
@@ -879,6 +911,11 @@ class GapEntryStrategyEngine:
                             pass
                 if NIFTY_KEY in self.index_lots:
                     self.lots = self.index_lots[NIFTY_KEY]
+                self._save_index_lots()
+            if "index_enabled" in body and isinstance(body["index_enabled"], dict):
+                for k, v in body["index_enabled"].items():
+                    if k in self.index_enabled:
+                        self.index_enabled[k] = bool(v)
                 self._save_index_lots()
             if "order_buffer" in body:
                 self.order_buffer = float(body["order_buffer"])
@@ -935,6 +972,7 @@ class GapEntryStrategyEngine:
                 "lot_size": self.lot_size,
                 "index_lots": self.index_lots,
                 "index_lot_sizes": self.index_lot_sizes,
+                "index_enabled": self.index_enabled,
                 "current_position": self.current_position,
                 "current_positions": {NIFTY_KEY: self.current_position} if self.current_position else {},
                 "locked_contracts": locked_table,

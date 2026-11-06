@@ -102,12 +102,22 @@ public class ApiClient : IDataSource
             if (idxLots.TryGetProperty("BSE_INDEX|SENSEX", out var sp) && sp.TryGetInt32(out var sv)) sLots = sv;
         }
 
+        var idxEnabled = O(r, "index_enabled");
+        bool nEn = true, bnEn = true, sEn = true;
+        if (idxEnabled.ValueKind == JsonValueKind.Object)
+        {
+            if (idxEnabled.TryGetProperty("NSE_INDEX|Nifty 50", out var nep)) nEn = nep.ValueKind == JsonValueKind.True;
+            if (idxEnabled.TryGetProperty("NSE_INDEX|Nifty Bank", out var bnep)) bnEn = bnep.ValueKind == JsonValueKind.True;
+            if (idxEnabled.TryGetProperty("BSE_INDEX|SENSEX", out var sep)) sEn = sep.ValueKind == JsonValueKind.True;
+        }
+
         return new StatusInfo
         {
             State = S(r, "state"), Spot = D(r, "spot_price"), Expiry = S(r, "active_expiry"),
             HasPosition = has, PositionSymbol = has ? S(pos, "symbol") : "", EntryPrice = has ? D(pos, "entry_price") : 0,
             TodayPnl = D(r, "today_net_pnl_inr"), TodayPoints = D(r, "today_pnl_points"), TodayTrades = (int)D(r, "today_trades"),
-            NiftyLots = nLots, BankNiftyLots = bnLots, SensexLots = sLots
+            NiftyLots = nLots, BankNiftyLots = bnLots, SensexLots = sLots,
+            NiftyEnabled = nEn, BankNiftyEnabled = bnEn, SensexEnabled = sEn
         };
     }
 
@@ -150,7 +160,10 @@ public class ApiClient : IDataSource
         resp.EnsureSuccessStatusCode();
     }
 
-    public async Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots)
+    public Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots)
+        => SaveIndexConfigAsync(niftyLots, bankNiftyLots, sensexLots, true, true, true);
+
+    public async Task SaveIndexConfigAsync(int niftyLots, int bankNiftyLots, int sensexLots, bool niftyEnabled, bool bankNiftyEnabled, bool sensexEnabled)
     {
         var body = JsonSerializer.Serialize(new
         {
@@ -159,6 +172,12 @@ public class ApiClient : IDataSource
                 { "NSE_INDEX|Nifty 50", niftyLots },
                 { "NSE_INDEX|Nifty Bank", bankNiftyLots },
                 { "BSE_INDEX|SENSEX", sensexLots }
+            },
+            index_enabled = new Dictionary<string, bool>
+            {
+                { "NSE_INDEX|Nifty 50", niftyEnabled },
+                { "NSE_INDEX|Nifty Bank", bankNiftyEnabled },
+                { "BSE_INDEX|SENSEX", sensexEnabled }
             }
         });
         using var resp = await _http.PostAsync("/api/strategy/config", new StringContent(body, Encoding.UTF8, "application/json"));

@@ -28,7 +28,10 @@ public class MainViewModel : ObservableObject
         ExitPositionCommand = new RelayCommand(_ => ExitPosition());
         RefreshStocksCommand = new RelayCommand(async _ => await LoadStocksAsync());
         SaveSelectionsCommand = new RelayCommand(async _ => await SaveSelectionsAsync());
-        SaveIndexLotsCommand = new RelayCommand(async _ => await SaveIndexLotsAsync());
+        SaveIndexLotsCommand = new RelayCommand(async _ => await SaveIndexConfigAsync());
+        ToggleNiftyEnabledCommand = new RelayCommand(async _ => { NiftyEnabled = !NiftyEnabled; await SaveIndexConfigAsync(); });
+        ToggleBankNiftyEnabledCommand = new RelayCommand(async _ => { BankNiftyEnabled = !BankNiftyEnabled; await SaveIndexConfigAsync(); });
+        ToggleSensexEnabledCommand = new RelayCommand(async _ => { SensexEnabled = !SensexEnabled; await SaveIndexConfigAsync(); });
         SetNiftyLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) NiftyLots = v; });
         SetBankNiftyLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) BankNiftyLots = v; });
         SetSensexLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) SensexLots = v; });
@@ -53,6 +56,9 @@ public class MainViewModel : ObservableObject
     public ICommand RefreshStocksCommand { get; }
     public ICommand SaveSelectionsCommand { get; }
     public ICommand SaveIndexLotsCommand { get; }
+    public ICommand ToggleNiftyEnabledCommand { get; }
+    public ICommand ToggleBankNiftyEnabledCommand { get; }
+    public ICommand ToggleSensexEnabledCommand { get; }
     public ICommand SetNiftyLotsCommand { get; }
     public ICommand SetBankNiftyLotsCommand { get; }
     public ICommand SetSensexLotsCommand { get; }
@@ -212,6 +218,9 @@ public class MainViewModel : ObservableObject
             if (s.NiftyLots > 0) NiftyLots = s.NiftyLots;
             if (s.BankNiftyLots > 0) BankNiftyLots = s.BankNiftyLots;
             if (s.SensexLots > 0) SensexLots = s.SensexLots;
+            NiftyEnabled = s.NiftyEnabled;
+            BankNiftyEnabled = s.BankNiftyEnabled;
+            SensexEnabled = s.SensexEnabled;
         }
     }
 
@@ -288,28 +297,83 @@ public class MainViewModel : ObservableObject
         UpdateSelectedCount();
     }
 
-    // ---------------- settings : morning lots ----------------
+    // ---------------- settings : morning lots & index trade/pause ----------------
     bool _lotsInitialized = false;
+
+    bool _niftyEnabled = true;
+    public bool NiftyEnabled
+    {
+        get => _niftyEnabled;
+        set
+        {
+            if (Set(ref _niftyEnabled, value))
+            {
+                OnPropertyChanged(nameof(NiftyStatusText));
+                OnPropertyChanged(nameof(NiftyStatusBrush));
+                OnPropertyChanged(nameof(NiftyCardOpacity));
+            }
+        }
+    }
+    public string NiftyStatusText => NiftyEnabled ? "✅ ACTIVE" : "⏸️ PAUSED TODAY";
+    public Brush NiftyStatusBrush => NiftyEnabled ? Pal.Green : Pal.Amber;
+    public double NiftyCardOpacity => NiftyEnabled ? 1.0 : 0.6;
+
     int _niftyLots = 1;
     public int NiftyLots { get => _niftyLots; set { if (Set(ref _niftyLots, Math.Max(1, value))) OnPropertyChanged(nameof(NiftyLotsPreview)); } }
     public string NiftyLotsPreview => $"{NiftyLots} lot{(NiftyLots > 1 ? "s" : "")} = {NiftyLots * 65} qty";
+
+    bool _bankNiftyEnabled = true;
+    public bool BankNiftyEnabled
+    {
+        get => _bankNiftyEnabled;
+        set
+        {
+            if (Set(ref _bankNiftyEnabled, value))
+            {
+                OnPropertyChanged(nameof(BankNiftyStatusText));
+                OnPropertyChanged(nameof(BankNiftyStatusBrush));
+                OnPropertyChanged(nameof(BankNiftyCardOpacity));
+            }
+        }
+    }
+    public string BankNiftyStatusText => BankNiftyEnabled ? "✅ ACTIVE" : "⏸️ PAUSED TODAY";
+    public Brush BankNiftyStatusBrush => BankNiftyEnabled ? Pal.Green : Pal.Amber;
+    public double BankNiftyCardOpacity => BankNiftyEnabled ? 1.0 : 0.6;
 
     int _bankNiftyLots = 1;
     public int BankNiftyLots { get => _bankNiftyLots; set { if (Set(ref _bankNiftyLots, Math.Max(1, value))) OnPropertyChanged(nameof(BankNiftyLotsPreview)); } }
     public string BankNiftyLotsPreview => $"{BankNiftyLots} lot{(BankNiftyLots > 1 ? "s" : "")} = {BankNiftyLots * 15} qty";
 
+    bool _sensexEnabled = true;
+    public bool SensexEnabled
+    {
+        get => _sensexEnabled;
+        set
+        {
+            if (Set(ref _sensexEnabled, value))
+            {
+                OnPropertyChanged(nameof(SensexStatusText));
+                OnPropertyChanged(nameof(SensexStatusBrush));
+                OnPropertyChanged(nameof(SensexCardOpacity));
+            }
+        }
+    }
+    public string SensexStatusText => SensexEnabled ? "✅ ACTIVE" : "⏸️ PAUSED TODAY";
+    public Brush SensexStatusBrush => SensexEnabled ? Pal.Green : Pal.Amber;
+    public double SensexCardOpacity => SensexEnabled ? 1.0 : 0.6;
+
     int _sensexLots = 1;
     public int SensexLots { get => _sensexLots; set { if (Set(ref _sensexLots, Math.Max(1, value))) OnPropertyChanged(nameof(SensexLotsPreview)); } }
     public string SensexLotsPreview => $"{SensexLots} lot{(SensexLots > 1 ? "s" : "")} = {SensexLots * 10} qty";
 
-    async Task SaveIndexLotsAsync()
+    async Task SaveIndexConfigAsync()
     {
         try
         {
-            await _src.SaveIndexLotsAsync(NiftyLots, BankNiftyLots, SensexLots);
-            StatusMessage = $"Saved morning lots: NIFTY 50={NiftyLots} ({NiftyLots * 65} qty), BANK NIFTY={BankNiftyLots} ({BankNiftyLots * 15} qty), SENSEX={SensexLots} ({SensexLots * 10} qty).";
+            await _src.SaveIndexConfigAsync(NiftyLots, BankNiftyLots, SensexLots, NiftyEnabled, BankNiftyEnabled, SensexEnabled);
+            StatusMessage = $"Saved: NIFTY 50={(NiftyEnabled ? $"{NiftyLots} lot(s)" : "PAUSED")}, BANK NIFTY={(BankNiftyEnabled ? $"{BankNiftyLots} lot(s)" : "PAUSED")}, SENSEX={(SensexEnabled ? $"{SensexLots} lot(s)" : "PAUSED")}.";
         }
-        catch (Exception ex) { StatusMessage = "Failed to save lots: " + ex.Message; }
+        catch (Exception ex) { StatusMessage = "Failed to save index settings: " + ex.Message; }
     }
 
     async Task SaveSelectionsAsync()
