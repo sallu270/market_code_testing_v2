@@ -274,6 +274,82 @@ class TestOIBuildupStrategy(unittest.TestCase):
         self.assertEqual(trade["lot_size"], 5 * 65)
         self.assertEqual(self.engine.state, "HOLDING")
 
+    def test_stock_options_top5_buildup_and_entry(self):
+        """Acceptance test: Top stocks options planning, locking, 16-condition evaluation, and 15:15 squareoff."""
+        self.engine.load_stock_configs()
+        self.assertIn("RELIANCE", self.engine.stock_underlyings)
+        rel_st = self.engine.stock_underlyings["RELIANCE"]
+        rel_st["lots"] = 2
+        rel_st["enabled"] = True
+
+        # Plan 8 mock contracts (4 CE, 4 PE)
+        rel_keys = [f"NSE_FO|RELIANCE_{side}_{stk}" for side in ("CE", "PE") for stk in (2400, 2420, 2440, 2460)]
+        rel_st["planned_keys"] = rel_keys
+        rel_st["locked_keys"] = rel_keys
+        rel_st["state"] = "LOCKED"
+
+        for k in rel_keys:
+            side = "CE" if "_CE_" in k else "PE"
+            stk = float(k.split("_")[-1])
+            self.engine.contracts_by_key[k] = {
+                "instrument_key": k,
+                "trading_symbol": f"RELIANCE {stk} {side}",
+                "strike_price": stk,
+                "instrument_type": side,
+                "lot_size": 250,
+                "underlying_key": "RELIANCE",
+            }
+            self.engine.hot_cache[k] = {
+                "instrument_key": k,
+                "trading_symbol": f"RELIANCE {stk} {side}",
+                "underlying_key": "RELIANCE",
+                "strike": stk,
+                "side": side,
+                "ltp": 50.0,
+                "oi": 10000.0,
+                "prev_oi": 10000.0,
+                "bid_price": 49.5,
+                "ask_price": 50.0,
+                "spread_pct": 1.0,
+            }
+
+        # Take stock snapshot
+        self.engine.take_stock_snapshot("RELIANCE")
+        self.assertTrue(rel_st["snapshot_taken"])
+        self.assertEqual(len(rel_st["snapshot"]), 8)
+
+        # Simulate OI changes: CE SC + PE SB -> Rule 1 CE Buy ⭐⭐⭐
+        for k in rel_keys:
+            if "_CE_" in k:
+                self.engine.hot_cache[k]["ltp"] = 60.0   # +20% Price UP
+                self.engine.hot_cache[k]["oi"] = 8000.0   # -20% OI DOWN -> SC
+                self.engine.hot_cache[k]["ask_price"] = 60.0
+                self.engine.hot_cache[k]["bid_price"] = 59.8
+            else:
+                self.engine.hot_cache[k]["ltp"] = 40.0   # -20% Price DOWN
+                self.engine.hot_cache[k]["oi"] = 12000.0  # +20% OI UP -> SB
+                self.engine.hot_cache[k]["ask_price"] = 40.0
+                self.engine.hot_cache[k]["bid_price"] = 39.8
+
+        # Evaluate OI buildup for RELIANCE
+        self.engine.re_eval_min_interval_sec = 0.0
+        trade = self.engine.evaluate_stock_oi_buildup("RELIANCE")
+        self.assertIsNotNone(trade)
+        self.assertEqual(trade["side"], "BUY_CE")
+        self.assertEqual(trade["rule_number"], 1)
+        self.assertEqual(trade["stars"], "⭐⭐⭐")
+        self.assertEqual(trade["lots"], 4)  # 2 base lots * 2 for full size = 4
+        self.assertEqual(trade["lot_size"], 1000)  # 4 * 250 lot size = 1000
+        self.assertEqual(trade["status"], "OPEN")
+        self.assertEqual(rel_st["state"], "HOLDING")
+
+        # 15:15:00 Clock Square-off
+        self.engine.squareoff_all_stocks_1515()
+        self.assertEqual(rel_st["state"], "CLOSED")
+        self.assertIsNone(rel_st["current_position"])
+        self.assertEqual(trade["status"], "CLOSED")
+        self.assertEqual(trade["exit_reason"], "SQUAREOFF_1515")
+
 
 if __name__ == "__main__":
     unittest.main()

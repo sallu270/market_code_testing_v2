@@ -205,11 +205,15 @@ def strategy_schedule_worker() -> None:
                 if "09:14:55" <= now_time < "09:15:00":
                     if strategy_engine.state in ("SETUP", "PLANNING"):
                         strategy_engine.lock_contracts()
+                    if hasattr(strategy_engine, "lock_all_stocks"):
+                        strategy_engine.lock_all_stocks()
 
                 # Snapshot at 09:15:00 (No trading, data collection only)
                 elif "09:15:00" <= now_time < "09:18:00":
                     if not getattr(strategy_engine, "snapshot_taken", False):
                         strategy_engine.take_snapshot()
+                    if hasattr(strategy_engine, "snapshot_all_stocks"):
+                        strategy_engine.snapshot_all_stocks()
 
                 # From 09:18:00: Evaluation window active
                 elif now_time >= "09:18:00":
@@ -217,10 +221,17 @@ def strategy_schedule_worker() -> None:
                         strategy_engine.take_snapshot()
                     if strategy_engine.state in ("LOCKED", "DATA_COLLECTION"):
                         strategy_engine.state = "ARMED"
+                    if hasattr(strategy_engine, "snapshot_all_stocks"):
+                        strategy_engine.snapshot_all_stocks()
+                    if hasattr(strategy_engine, "arm_all_stocks"):
+                        strategy_engine.arm_all_stocks()
 
                 # EOD square-off at 15:15:00 by clock
-                if now_time >= "15:15:00" and strategy_engine.state == "HOLDING":
-                    strategy_engine.manual_exit(reason="SQUAREOFF_1515")
+                if now_time >= "15:15:00":
+                    if strategy_engine.state == "HOLDING":
+                        strategy_engine.manual_exit(reason="SQUAREOFF_1515")
+                    if hasattr(strategy_engine, "squareoff_all_stocks_1515"):
+                        strategy_engine.squareoff_all_stocks_1515()
 
             # Periodic SSE status broadcast (every 1.5 seconds)
             cur_ms = int(time.time() * 1000)
@@ -520,12 +531,31 @@ def api_stocks_screener() -> Response:
     stocks = stock_screener.fetch_quotes()
     return jsonify({"stocks": stocks, "count": len(stocks)})
 
+@app.get("/api/stocks/config")
+def api_stocks_config_get() -> Response:
+    """Get top N stocks configuration (top_n, lots, enabled)."""
+    top_n = request.args.get("top_n", default=None, type=int)
+    cfg = stock_screener.get_top_stocks_config(top_n=top_n)
+    return jsonify(cfg)
+
+@app.post("/api/stocks/config")
+def api_stocks_config_save() -> Response:
+    """Save top N stocks configuration (top_n, lots, enabled)."""
+    body = request.get_json(silent=True) or {}
+    saved = stock_screener.save_top_stocks_config(body)
+    if hasattr(strategy_engine, "load_stock_configs"):
+        strategy_engine.load_stock_configs()
+    publish("strategy_update", strategy_engine.get_status())
+    return jsonify({"success": True, "config": saved})
+
 @app.post("/api/stocks/select")
 def api_stocks_select() -> Response:
     """Save selected stocks and lot quantities."""
     body = request.get_json(silent=True) or {}
     selections = body.get("selections") or {}
     stock_screener.save_selected_stocks(selections)
+    if hasattr(strategy_engine, "load_stock_configs"):
+        strategy_engine.load_stock_configs()
     return jsonify({"success": True, "selections": selections})
 
 @app.get("/api/stocks/plan/<symbol>")

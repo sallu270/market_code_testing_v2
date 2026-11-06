@@ -35,12 +35,31 @@ public class MainViewModel : ObservableObject
         SetNiftyLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) NiftyLots = v; });
         SetBankNiftyLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) BankNiftyLots = v; });
         SetSensexLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) SensexLots = v; });
+        SetSettingsTopNCommand = new RelayCommand(async p => { if (int.TryParse(p?.ToString(), out var n)) await LoadTopStocksConfigAsync(n); });
+        ToggleStockEnabledCommand = new RelayCommand(p => { if (p is StockConfigRow r) r.Enabled = !r.Enabled; });
+        SaveTopStocksConfigCommand = new RelayCommand(async _ => await SaveTopStocksConfigAsync());
+        ViewStockOptionsCommand = new RelayCommand(p =>
+        {
+            if (p is StockRow sr)
+            {
+                SelectedStockSymbol = sr.Symbol;
+                SelectedStockKey = sr.Key;
+                Mode = "StockOption:" + sr.Symbol;
+            }
+            else if (p is StockConfigRow scr)
+            {
+                SelectedStockSymbol = scr.Symbol;
+                SelectedStockKey = scr.Key;
+                Mode = "StockOption:" + scr.Symbol;
+            }
+        });
         ExportTradesCsvCommand = new RelayCommand(_ => ExportTradesCsv());
 
         _timer.Tick += async (_, _) => { Clock = DateTime.Now.ToString("HH:mm:ss"); await RefreshAsync(); };
         Clock = DateTime.Now.ToString("HH:mm:ss");
         _timer.Start();
         _ = RefreshAsync();
+        _ = LoadTopStocksConfigAsync();
     }
 
     public void Stop() => _timer.Stop();
@@ -62,6 +81,10 @@ public class MainViewModel : ObservableObject
     public ICommand SetNiftyLotsCommand { get; }
     public ICommand SetBankNiftyLotsCommand { get; }
     public ICommand SetSensexLotsCommand { get; }
+    public ICommand SetSettingsTopNCommand { get; }
+    public ICommand ToggleStockEnabledCommand { get; }
+    public ICommand SaveTopStocksConfigCommand { get; }
+    public ICommand ViewStockOptionsCommand { get; }
     public ICommand ExportTradesCsvCommand { get; }
 
     // ---------------- navigation ----------------
@@ -75,6 +98,7 @@ public class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(IsNifty50Mode));
             OnPropertyChanged(nameof(IsBankNiftyMode));
             OnPropertyChanged(nameof(IsSensexMode));
+            OnPropertyChanged(nameof(IsStockOptionMode));
             OnPropertyChanged(nameof(IsIndexMode));
             OnPropertyChanged(nameof(IsStocksMode));
             OnPropertyChanged(nameof(IsChartMode));
@@ -91,16 +115,23 @@ public class MainViewModel : ObservableObject
     public bool IsNifty50Mode => Mode == "Nifty50" || Mode == "Index";
     public bool IsBankNiftyMode => Mode == "BankNifty";
     public bool IsSensexMode => Mode == "Sensex";
-    public bool IsIndexMode => IsNifty50Mode || IsBankNiftyMode || IsSensexMode;
+    public bool IsStockOptionMode => Mode.StartsWith("StockOption:");
+    public bool IsIndexMode => IsNifty50Mode || IsBankNiftyMode || IsSensexMode || IsStockOptionMode;
     public bool IsStocksMode => Mode == "Stocks";
     public bool IsChartMode => IsIndexMode;
     public bool IsJournalMode => Mode == "Journal";
     public bool IsSettingsMode => Mode == "Settings";
 
+    string _selectedStockSymbol = "RELIANCE";
+    string _selectedStockKey = "NSE_EQ|INE002A01018";
+    public string SelectedStockSymbol { get => _selectedStockSymbol; set => Set(ref _selectedStockSymbol, value); }
+    public string SelectedStockKey { get => _selectedStockKey; set => Set(ref _selectedStockKey, value); }
+
     public string CurrentIndexKey => Mode switch
     {
         "BankNifty" => AppSettings.BankNiftyKey,
         "Sensex" => AppSettings.SensexKey,
+        var m when m.StartsWith("StockOption:") => _selectedStockKey,
         _ => AppSettings.NiftyKey
     };
 
@@ -108,6 +139,7 @@ public class MainViewModel : ObservableObject
     {
         "BankNifty" => AppSettings.BankNiftyName,
         "Sensex" => AppSettings.SensexName,
+        var m when m.StartsWith("StockOption:") => _selectedStockSymbol,
         _ => AppSettings.NiftyName
     };
 
@@ -376,6 +408,49 @@ public class MainViewModel : ObservableObject
             StatusMessage = $"Saved: NIFTY 50={(NiftyEnabled ? $"{NiftyLots} lot(s)" : "PAUSED")}, BANK NIFTY={(BankNiftyEnabled ? $"{BankNiftyLots} lot(s)" : "PAUSED")}, SENSEX={(SensexEnabled ? $"{SensexLots} lot(s)" : "PAUSED")}.";
         }
         catch (Exception ex) { StatusMessage = "Failed to save index settings: " + ex.Message; }
+    }
+
+    int _settingsTopN = 5;
+    public int SettingsTopN
+    {
+        get => _settingsTopN;
+        set => Set(ref _settingsTopN, value);
+    }
+
+    public ObservableCollection<StockConfigRow> TopStocksConfig { get; } = new();
+
+    public async Task LoadTopStocksConfigAsync(int? topN = null)
+    {
+        try
+        {
+            var res = await _src.GetTopStocksConfigAsync(topN);
+            if (res != null)
+            {
+                SettingsTopN = res.TopN;
+                TopStocksConfig.Clear();
+                foreach (var s in res.Stocks)
+                {
+                    TopStocksConfig.Add(s);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "Failed to load top stocks config: " + ex.Message;
+        }
+    }
+
+    public async Task SaveTopStocksConfigAsync()
+    {
+        try
+        {
+            await _src.SaveTopStocksConfigAsync(SettingsTopN, TopStocksConfig.ToList());
+            StatusMessage = $"Saved Top {SettingsTopN} Stock Options settings.";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "Failed to save stock options config: " + ex.Message;
+        }
     }
 
     async Task SaveSelectionsAsync()

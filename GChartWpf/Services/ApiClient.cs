@@ -165,6 +165,55 @@ public class ApiClient : IDataSource
         resp.EnsureSuccessStatusCode();
     }
 
+    public async Task<TopStocksConfigResponse?> GetTopStocksConfigAsync(int? topN = null)
+    {
+        var url = topN.HasValue ? $"/api/stocks/config?top_n={topN.Value}" : "/api/stocks/config";
+        using var doc = await GetJson(url);
+        var root = doc.RootElement;
+        var res = new TopStocksConfigResponse
+        {
+            TopN = root.TryGetProperty("top_n", out var tn) ? tn.GetInt32() : 5,
+            Stocks = new List<StockConfigRow>()
+        };
+        if (root.TryGetProperty("stocks", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var el in arr.EnumerateArray())
+            {
+                res.Stocks.Add(new StockConfigRow
+                {
+                    Symbol = S(el, "symbol"),
+                    Name = S(el, "name"),
+                    Key = S(el, "key"),
+                    LotSize = (int)D(el, "lot_size"),
+                    StrikeStep = D(el, "strike_step"),
+                    Lots = Math.Max(1, (int)D(el, "lots")),
+                    Enabled = !el.TryGetProperty("enabled", out var en) || en.ValueKind != JsonValueKind.False
+                });
+            }
+        }
+        return res;
+    }
+
+    public async Task SaveTopStocksConfigAsync(int topN, List<StockConfigRow> stocks)
+    {
+        var body = JsonSerializer.Serialize(new
+        {
+            top_n = topN,
+            stocks = stocks.Select(s => new
+            {
+                symbol = s.Symbol,
+                name = s.Name,
+                key = s.Key,
+                lot_size = s.LotSize,
+                strike_step = s.StrikeStep,
+                lots = s.Lots,
+                enabled = s.Enabled
+            })
+        });
+        using var resp = await _http.PostAsync("/api/stocks/config", new StringContent(body, Encoding.UTF8, "application/json"));
+        resp.EnsureSuccessStatusCode();
+    }
+
     public Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots)
         => SaveIndexConfigAsync(niftyLots, bankNiftyLots, sensexLots, true, true, true);
 

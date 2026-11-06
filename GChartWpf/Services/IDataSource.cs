@@ -10,6 +10,8 @@ public interface IDataSource
     Task<List<TradeRow>> GetTradesAsync();
     Task<List<StockRow>> GetStocksAsync();
     Task SaveSelectionsAsync(Dictionary<string, int> selections);
+    Task<TopStocksConfigResponse?> GetTopStocksConfigAsync(int? topN = null);
+    Task SaveTopStocksConfigAsync(int topN, List<StockConfigRow> stocks);
     Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots);
     Task SaveIndexConfigAsync(int niftyLots, int bankNiftyLots, int sensexLots, bool niftyEnabled, bool bankNiftyEnabled, bool sensexEnabled);
     Task ExitPositionAsync();

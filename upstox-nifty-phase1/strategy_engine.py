@@ -13,6 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from database import MarketDatabase
+from stock_screener import StockScreener, NIFTY_50_STOCKS
 
 LOGGER = logging.getLogger("strategy_engine")
 IST = ZoneInfo("Asia/Kolkata")
@@ -202,8 +203,13 @@ class GapEntryStrategyEngine:
         self._trade_counter: int = 1
         self._eod_timer: threading.Timer | None = None
 
+        # Stock Options Engines (Top N stocks from selected_stocks.json)
+        self.stock_underlyings: dict[str, dict[str, Any]] = {}
+        self.stock_screener = StockScreener(base_dir=base_dir, access_token=access_token)
+
         self._init_csv()
         self._load_index_lots()
+        self.load_stock_configs()
         self._resume_open_position()
         self._schedule_eod_squareoff()
 
@@ -256,6 +262,364 @@ class GapEntryStrategyEngine:
 
     def set_access_token(self, token: str) -> None:
         self.access_token = token
+        if hasattr(self, "stock_screener"):
+            self.stock_screener.set_access_token(token)
+
+    def load_stock_configs(self) -> None:
+        """Loads selected stocks from selected_stocks.json and registers them."""
+        with self._lock:
+            if not hasattr(self, "stock_screener"):
+                self.stock_screener = StockScreener(base_dir=self.base_dir, access_token=self.access_token)
+            cfg = self.stock_screener.get_top_stocks_config()
+            raw_stocks = cfg.get("stocks") or []
+
+            current_syms = set()
+            for s in raw_stocks:
+                sym = s.get("symbol", "").upper()
+                if not sym:
+                    continue
+                current_syms.add(sym)
+                lots = max(1, int(s.get("lots", 1)))
+                enabled = bool(s.get("enabled", True))
+                lot_size = int(s.get("lot_size", 100))
+                key = s.get("key", "")
+                strike_step = float(s.get("strike_step", 10.0))
+
+                if sym not in self.stock_underlyings:
+                    self.stock_underlyings[sym] = {
+                        "symbol": sym,
+                        "key": key,
+                        "lot_size": lot_size,
+                        "strike_step": strike_step,
+                        "lots": lots,
+                        "enabled": enabled,
+                        "spot_price": None,
+                        "state": "SETUP",
+                        "planned_keys": [],
+                        "locked_keys": [],
+                        "snapshot": {},
+                        "snapshot_taken": False,
+                        "last_evaluation": {
+                            "decision": "WAIT",
+                            "reason": f"Before 09:18:00 evaluation window for {sym}",
+                            "delta_ce": 0.0,
+                            "delta_pe": 0.0,
+                            "ce_type": None,
+                            "pe_type": None,
+                            "rule": None,
+                            "stars": "",
+                            "size": "",
+                            "summary_line": f"{sym} WAIT: Pre-09:18",
+                        },
+                        "current_position": None,
+                        "_last_eval_time": 0.0,
+                        "today_trades_count": 0,
+                    }
+                else:
+                    self.stock_underlyings[sym]["lots"] = lots
+                    self.stock_underlyings[sym]["enabled"] = enabled
+                    if key:
+                        self.stock_underlyings[sym]["key"] = key
+                    if lot_size > 0:
+                        self.stock_underlyings[sym]["lot_size"] = lot_size
+                    if strike_step > 0:
+                        self.stock_underlyings[sym]["strike_step"] = strike_step
+
+            # Remove any stocks removed from config
+            for sym in list(self.stock_underlyings.keys()):
+                if sym not in current_syms:
+                    del self.stock_underlyings[sym]
+
+            LOGGER.info("Loaded %d stock option underlyings: %s", len(self.stock_underlyings), list(self.stock_underlyings.keys()))
+
+    def plan_stock_contracts(self, stock_sym: str, spot: float | None = None) -> list[str]:
+        """Plans 8 ITM contracts for a constituent stock and subscribes to feed."""
+        stock_sym = stock_sym.upper()
+        stock_state = self.stock_underlyings.get(stock_sym)
+        if not stock_state or not stock_state.get("enabled", True):
+            return []
+
+        if spot is not None and spot > 0:
+            stock_state["spot_price"] = spot
+        elif stock_state.get("spot_price"):
+            spot = float(stock_state["spot_price"])
+
+        res = self.stock_screener.plan_stock_itm_contracts(stock_sym, spot)
+        if not res or "error" in res:
+            LOGGER.warning("Could not plan ITM contracts for %s: %s", stock_sym, res.get("error") if res else "None")
+            return []
+
+        planned_list = res.get("planned_contracts") or []
+        keys = []
+        for c in planned_list:
+            k = c.get("instrument_key")
+            if not k:
+                continue
+            keys.append(k)
+            self.contracts_by_key[k] = {
+                "instrument_key": k,
+                "trading_symbol": c.get("symbol") or k,
+                "strike_price": c.get("strike"),
+                "instrument_type": c.get("side"),
+                "lot_size": c.get("lot_size", stock_state["lot_size"]),
+                "underlying_key": stock_sym,
+            }
+            if k not in self.hot_cache:
+                self.hot_cache[k] = {
+                    "instrument_key": k,
+                    "trading_symbol": c.get("symbol") or k,
+                    "underlying_key": stock_sym,
+                    "strike": float(c.get("strike") or 0.0),
+                    "side": str(c.get("side") or "").upper(),
+                    "ref_ltp": None,
+                    "ref_source": None,
+                    "prev_close": 0.0,
+                    "prev_oi": 0.0,
+                    "oi": None,
+                    "build_up": "Neutral",
+                    "build_up_class": "bu-neutral",
+                    "ltp": None,
+                    "bid_price": 0.0,
+                    "bid_qty": 0.0,
+                    "ask_price": 0.0,
+                    "ask_qty": 0.0,
+                    "spread_pct": None,
+                    "last_trade_ms": None,
+                    "last_quote_ms": None,
+                }
+
+        stock_state["planned_keys"] = keys
+        if stock_state.get("state") == "SETUP":
+            stock_state["state"] = "PLANNING"
+
+        if self.feed and hasattr(self.feed, "subscribe") and keys:
+            self.feed.subscribe(keys)
+
+        LOGGER.info("Planned 8 ITM contracts for %s: %s", stock_sym, keys)
+        return keys
+
+    def lock_stock_contracts(self, stock_sym: str) -> None:
+        stock_sym = stock_sym.upper()
+        st = self.stock_underlyings.get(stock_sym)
+        if not st or not st.get("enabled", True):
+            return
+        if not st.get("planned_keys") and st.get("spot_price"):
+            self.plan_stock_contracts(stock_sym, st["spot_price"])
+        if not st.get("planned_keys"):
+            return
+        st["locked_keys"] = list(st["planned_keys"])
+        for k in st["locked_keys"]:
+            entry = self.hot_cache.get(k)
+            if entry:
+                if entry.get("ltp") is not None and float(entry["ltp"]) > 0:
+                    entry["ref_ltp"] = float(entry["ltp"])
+                    entry["ref_source"] = "ltp"
+                else:
+                    entry["ref_ltp"] = float(entry.get("bid_price") or 0.0)
+                    entry["ref_source"] = "bid"
+        st["state"] = "LOCKED"
+        LOGGER.info("LOCKED 8 contracts for %s: %s", stock_sym, st["locked_keys"])
+
+    def take_stock_snapshot(self, stock_sym: str) -> None:
+        stock_sym = stock_sym.upper()
+        st = self.stock_underlyings.get(stock_sym)
+        if not st or not st.get("enabled", True):
+            return
+        keys = st.get("locked_keys") or st.get("planned_keys") or []
+        if not keys:
+            return
+        snap = {}
+        for k in keys:
+            entry = self.hot_cache.get(k, {})
+            ltp = float(entry.get("ltp") or entry.get("ref_ltp") or 0.0)
+            oi = float(entry.get("oi") or entry.get("prev_oi") or 0.0)
+            bid = float(entry.get("bid_price") or 0.0)
+            ask = float(entry.get("ask_price") or 0.0)
+            snap[k] = {
+                "ltp": ltp,
+                "oi": oi,
+                "bid": bid,
+                "ask": ask,
+                "strike": float(entry.get("strike") or 0.0),
+                "side": entry.get("side"),
+            }
+        st["snapshot"] = snap
+        st["snapshot_taken"] = True
+        st["state"] = "DATA_COLLECTION"
+        LOGGER.info("SNAPSHOT taken at 09:15:00 for %s (%d contracts)", stock_sym, len(snap))
+
+    @staticmethod
+    def _classify_buildup(p_dir: str, oi_dir: str) -> str:
+        if p_dir == "UP" and oi_dir == "UP":
+            return "LB"
+        if p_dir == "DOWN" and oi_dir == "UP":
+            return "SB"
+        if p_dir == "UP" and oi_dir == "DOWN":
+            return "SC"
+        if p_dir == "DOWN" and oi_dir == "DOWN":
+            return "LU"
+        return "Neutral"
+
+    def evaluate_stock_oi_buildup(self, stock_sym: str, trigger_ms: int | None = None) -> dict[str, Any] | None:
+        """Evaluates 16-condition table for a stock using its 8 locked contracts."""
+        stock_sym = stock_sym.upper()
+        st = self.stock_underlyings.get(stock_sym)
+        if not st or not st.get("enabled", True):
+            return None
+        if st.get("current_position") is not None or st.get("today_trades_count", 0) >= self.max_trades_per_day:
+            return None
+
+        now_ts = time.time()
+        if now_ts - st.get("_last_eval_time", 0.0) < self.re_eval_min_interval_sec:
+            return None
+        st["_last_eval_time"] = now_ts
+
+        snap = st.get("snapshot") or {}
+        locked_keys = st.get("locked_keys") or []
+        if len(locked_keys) < 8 or len(snap) < 8:
+            return None
+
+        ce_keys = [k for k in locked_keys if self.hot_cache.get(k, {}).get("side") == "CE"]
+        pe_keys = [k for k in locked_keys if self.hot_cache.get(k, {}).get("side") == "PE"]
+        if len(ce_keys) != 4 or len(pe_keys) != 4:
+            return None
+
+        ce_oi_fresh = any(
+            float(self.hot_cache.get(k, {}).get("oi") or 0.0) != float(snap.get(k, {}).get("oi") or 0.0)
+            for k in ce_keys
+        )
+        pe_oi_fresh = any(
+            float(self.hot_cache.get(k, {}).get("oi") or 0.0) != float(snap.get(k, {}).get("oi") or 0.0)
+            for k in pe_keys
+        )
+        if not (ce_oi_fresh and pe_oi_fresh):
+            return None
+
+        ce_curr_oi_sum = sum(float(self.hot_cache.get(k, {}).get("oi") or 0.0) for k in ce_keys)
+        ce_snap_oi_sum = sum(float(snap.get(k, {}).get("oi") or 0.0) for k in ce_keys)
+        delta_ce = ce_curr_oi_sum - ce_snap_oi_sum
+
+        pe_curr_oi_sum = sum(float(self.hot_cache.get(k, {}).get("oi") or 0.0) for k in pe_keys)
+        pe_snap_oi_sum = sum(float(snap.get(k, {}).get("oi") or 0.0) for k in pe_keys)
+        delta_pe = pe_curr_oi_sum - pe_snap_oi_sum
+
+        ce_curr_ltp_sum = sum(float(self.hot_cache.get(k, {}).get("ltp") or snap.get(k, {}).get("ltp") or 0.0) for k in ce_keys)
+        ce_snap_ltp_sum = sum(float(snap.get(k, {}).get("ltp") or 0.0) for k in ce_keys)
+        ce_price_pct = ((ce_curr_ltp_sum - ce_snap_ltp_sum) / ce_snap_ltp_sum * 100.0) if ce_snap_ltp_sum > 0 else 0.0
+
+        pe_curr_ltp_sum = sum(float(self.hot_cache.get(k, {}).get("ltp") or snap.get(k, {}).get("ltp") or 0.0) for k in pe_keys)
+        pe_snap_ltp_sum = sum(float(snap.get(k, {}).get("ltp") or 0.0) for k in pe_keys)
+        pe_price_pct = ((pe_curr_ltp_sum - pe_snap_ltp_sum) / pe_snap_ltp_sum * 100.0) if pe_snap_ltp_sum > 0 else 0.0
+
+        ce_oi_pct = (delta_ce / ce_snap_oi_sum * 100.0) if ce_snap_oi_sum > 0 else 0.0
+        pe_oi_pct = (delta_pe / pe_snap_oi_sum * 100.0) if pe_snap_oi_sum > 0 else 0.0
+
+        ce_price_dir = "UP" if ce_price_pct > self.price_threshold_pct else "DOWN" if ce_price_pct < -self.price_threshold_pct else "FLAT"
+        ce_oi_dir = "UP" if ce_oi_pct > self.oi_threshold_pct else "DOWN" if ce_oi_pct < -self.oi_threshold_pct else "FLAT"
+        pe_price_dir = "UP" if pe_price_pct > self.price_threshold_pct else "DOWN" if pe_price_pct < -self.price_threshold_pct else "FLAT"
+        pe_oi_dir = "UP" if pe_oi_pct > self.oi_threshold_pct else "DOWN" if pe_oi_pct < -self.oi_threshold_pct else "FLAT"
+
+        if "FLAT" in (ce_price_dir, ce_oi_dir, pe_price_dir, pe_oi_dir):
+            st["last_evaluation"] = {
+                "decision": "WAIT",
+                "reason": "At least one direction is FLAT",
+                "delta_ce": delta_ce,
+                "delta_pe": delta_pe,
+                "summary_line": f"{stock_sym} WAIT: FLAT direction",
+            }
+            return None
+
+        ce_type = self._classify_buildup(ce_price_dir, ce_oi_dir)
+        pe_type = self._classify_buildup(pe_price_dir, pe_oi_dir)
+        table_entry = DECISION_TABLE.get((ce_type, pe_type), {"rule": None, "decision": "No trade", "side": None, "stars": "", "size": ""})
+
+        decision = table_entry["decision"]
+        side = table_entry.get("side")
+        stars = table_entry.get("stars", "")
+        size = table_entry.get("size", "")
+        rule_num = table_entry.get("rule")
+
+        st["last_evaluation"] = {
+            "decision": decision,
+            "rule": rule_num,
+            "stars": stars,
+            "size": size,
+            "delta_ce": delta_ce,
+            "delta_pe": delta_pe,
+            "ce_type": ce_type,
+            "pe_type": pe_type,
+            "summary_line": f"{stock_sym} ΔCE: {delta_ce:+,.0f} | ΔPE: {delta_pe:+,.0f} | {ce_type}+{pe_type} -> {decision} {stars}",
+        }
+
+        if decision in ("CE Buy", "PE Buy") and side:
+            winner = self._select_best_strike(side, locked_keys=locked_keys)
+            if not winner:
+                LOGGER.warning("%s %s trigger: No valid contract with spread <= %.1f%%", stock_sym, side, self.max_spread_pct)
+                return None
+
+            trade = self._execute_entry_order(
+                winner=winner,
+                side=side,
+                size=size,
+                rule_num=rule_num,
+                stars=stars,
+                delta_ce=delta_ce,
+                delta_pe=delta_pe,
+                ce_type=ce_type,
+                pe_type=pe_type,
+                time_str=datetime.now(IST).strftime("%H:%M:%S.%f")[:-3],
+                trigger_ms=trigger_ms or int(time.time() * 1000),
+            )
+            st["current_position"] = trade
+            st["today_trades_count"] = st.get("today_trades_count", 0) + 1
+            st["state"] = "HOLDING"
+            return trade
+
+        return None
+
+    def plan_all_stocks(self) -> None:
+        for sym, st in self.stock_underlyings.items():
+            if st.get("enabled", True) and st.get("state") in ("SETUP", "PLANNING"):
+                self.plan_stock_contracts(sym)
+
+    def lock_all_stocks(self) -> None:
+        for sym, st in self.stock_underlyings.items():
+            if st.get("enabled", True) and st.get("state") in ("SETUP", "PLANNING"):
+                self.lock_stock_contracts(sym)
+
+    def snapshot_all_stocks(self) -> None:
+        for sym, st in self.stock_underlyings.items():
+            if st.get("enabled", True) and not st.get("snapshot_taken", False):
+                self.take_stock_snapshot(sym)
+
+    def arm_all_stocks(self) -> None:
+        for sym, st in self.stock_underlyings.items():
+            if st.get("enabled", True) and st.get("state") in ("LOCKED", "DATA_COLLECTION"):
+                st["state"] = "ARMED"
+
+    def squareoff_all_stocks_1515(self) -> None:
+        with self._lock:
+            for sym, st in self.stock_underlyings.items():
+                if st.get("state") == "HOLDING" and st.get("current_position"):
+                    pos = st["current_position"]
+                    if pos.get("status") == "OPEN":
+                        inst_key = pos["instrument_key"]
+                        cached = self.hot_cache.get(inst_key)
+                        bid = cached.get("bid_price") if cached else 0.0
+                        ltp = cached.get("ltp") if cached else 0.0
+                        exit_price = bid if bid > 0 else (ltp if ltp > 0 else float(pos["entry_price"]) - 0.50)
+                        qty = int(pos["lot_size"])
+                        pts = round(exit_price - float(pos["entry_price"]), 2)
+                        pos["exit_time_ist"] = datetime.now(IST).strftime("%H:%M:%S.%f")[:-3]
+                        pos["exit_price"] = exit_price
+                        pos["exit_reason"] = "SQUAREOFF_1515"
+                        pos["pnl_points"] = pts
+                        pos["net_pnl"] = round(pts * qty, 2)
+                        pos["status"] = "CLOSED"
+                        st["state"] = "CLOSED"
+                        st["current_position"] = None
+                        self.current_positions[sym] = None
+                        LOGGER.info("15:15:00 EOD Square-Off executed for %s @ %.2f", sym, exit_price)
 
     # -------------------------------------------------------------------------
     # Initialisation & State Resumption
@@ -820,6 +1184,30 @@ class GapEntryStrategyEngine:
 
             return None
 
+        # --- 1b. STOCK SPOT TICK ---
+        stock_sym_for_spot = next((sym for sym, d in self.stock_underlyings.items() if d.get("key") == inst_key), None)
+        if stock_sym_for_spot:
+            st = self.stock_underlyings[stock_sym_for_spot]
+            st["spot_price"] = ltp
+            with self._lock:
+                if st.get("state") in ("SETUP", "PLANNING"):
+                    if now_time_hms < self.lock_time:
+                        st["state"] = "PLANNING"
+                        self.plan_stock_contracts(stock_sym_for_spot, ltp)
+                    elif self.lock_time <= now_time_hms < self.snapshot_time:
+                        if st.get("state") != "LOCKED":
+                            self.lock_stock_contracts(stock_sym_for_spot)
+                    elif self.snapshot_time <= now_time_hms < self.entry_start_time:
+                        if not st.get("snapshot_taken"):
+                            self.take_stock_snapshot(stock_sym_for_spot)
+
+                if now_time_hms >= self.snapshot_time and not st.get("snapshot_taken"):
+                    self.take_stock_snapshot(stock_sym_for_spot)
+
+                if now_time_hms >= self.entry_start_time and st.get("state") == "DATA_COLLECTION":
+                    st["state"] = "ARMED"
+            return None
+
         # --- 2. OPTION CONTRACT TICK ---
         with self._lock:
             entry = self.hot_cache.get(inst_key)
@@ -890,6 +1278,35 @@ class GapEntryStrategyEngine:
                         self.current_position["pnl_points"] = pts
                         self.current_position["net_pnl"] = net
 
+            # Check if this contract belongs to a stock option underlying
+            stock_sym = next((sym for sym, d in self.stock_underlyings.items() if inst_key in d.get("locked_keys", [])), None)
+            if stock_sym:
+                st = self.stock_underlyings[stock_sym]
+                if not st.get("enabled", True):
+                    return None
+
+                # If holding: update unrealized P&L
+                if st.get("state") == "HOLDING" and st.get("current_position"):
+                    pos = st["current_position"]
+                    if pos.get("instrument_key") == inst_key:
+                        current_price = entry["bid_price"] if (entry and entry.get("bid_price", 0) > 0) else ltp
+                        if current_price > 0:
+                            entry_price = float(pos["entry_price"])
+                            qty = int(pos["lot_size"])
+                            pts = round(current_price - entry_price, 2)
+                            net = round(pts * qty, 2)
+                            pos["current_price"] = current_price
+                            pos["pnl_points"] = pts
+                            pos["net_pnl"] = net
+
+                if st.get("current_position") is not None or st.get("today_trades_count", 0) >= self.max_trades_per_day:
+                    return None
+
+                if now_time_hms >= self.entry_start_time and now_time_hms < self.entry_end_time:
+                    trade = self.evaluate_stock_oi_buildup(stock_sym, trigger_ms=ts_ms)
+                    return trade
+                return None
+
             # If holding, exited, or contract not in locked set: nothing to trigger
             if self.current_position is not None or self.today_trades_count >= self.max_trades_per_day:
                 return None
@@ -912,11 +1329,12 @@ class GapEntryStrategyEngine:
     # Strike Selection (Tightest Spread among 4 ITM candidates of chosen side)
     # -------------------------------------------------------------------------
 
-    def _select_best_strike(self, side: str) -> dict[str, Any] | None:
+    def _select_best_strike(self, side: str, locked_keys: list[str] | None = None) -> dict[str, Any] | None:
         """Section 6.2: Among the 4 locked ITM contracts on chosen side, pick tightest spread %."""
+        target_keys = locked_keys if locked_keys is not None else self.locked_keys
         candidates = [
             e for e in self.hot_cache.values()
-            if e.get("instrument_key") in self.locked_keys and e.get("side") == side
+            if e.get("instrument_key") in target_keys and e.get("side") == side
         ]
 
         valid: list[dict[str, Any]] = []
@@ -964,17 +1382,29 @@ class GapEntryStrategyEngine:
             self.today_trades_count += 1
 
             underlying_key = winner.get("underlying_key") or NIFTY_KEY
-            lot_sz = self.index_lot_sizes.get(underlying_key, self.lot_size)
-
-            # Sizing as per stars/size (Section 6.3)
-            if size == "full":
-                lots = self.lots_full
-            elif size == "normal":
-                lots = self.lots_normal
-            elif size == "scalp":
-                lots = self.lots_scalp
+            if underlying_key in self.stock_underlyings:
+                st = self.stock_underlyings[underlying_key]
+                lot_sz = st.get("lot_size", self.lot_size)
+                base_lots = st.get("lots", 1)
+                if size == "full":
+                    lots = max(1, base_lots * 2)
+                elif size == "normal":
+                    lots = base_lots
+                elif size == "scalp":
+                    lots = max(1, base_lots // 2) if base_lots > 1 else 1
+                else:
+                    lots = base_lots
             else:
-                lots = self.index_lots.get(underlying_key, self.lots)
+                lot_sz = self.index_lot_sizes.get(underlying_key, self.lot_size)
+                # Sizing as per stars/size (Section 6.3)
+                if size == "full":
+                    lots = self.lots_full
+                elif size == "normal":
+                    lots = self.lots_normal
+                elif size == "scalp":
+                    lots = self.lots_scalp
+                else:
+                    lots = self.index_lots.get(underlying_key, self.lots)
 
             total_qty = lots * lot_sz
 
@@ -1375,6 +1805,21 @@ class GapEntryStrategyEngine:
                 "today_net_pnl_inr": round(today_pnl, 2),
                 "today_pnl_points": round(today_pnl_pts, 2),
                 "lifetime_trades": len(trades),
+                "stock_underlyings": {
+                    sym: {
+                        "symbol": d["symbol"],
+                        "name": d.get("name", sym),
+                        "lot_size": d["lot_size"],
+                        "lots": d["lots"],
+                        "enabled": d["enabled"],
+                        "state": d["state"],
+                        "spot_price": d["spot_price"],
+                        "last_evaluation": d["last_evaluation"],
+                        "has_position": d["current_position"] is not None,
+                        "position": d["current_position"],
+                    }
+                    for sym, d in self.stock_underlyings.items()
+                },
                 "config": self.get_config(),
                 "csv_path": str(self.csv_path),
             }

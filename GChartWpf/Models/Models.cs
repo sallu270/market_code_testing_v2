@@ -104,3 +104,47 @@ public class StockRow : ObservableObject
     /// <summary>BUY for Long Build-up, SELL for Short Build-up, otherwise —</summary>
     public string Signal => BuildUp == "Long Build-up" ? "BUY" : BuildUp == "Short Build-up" ? "SELL" : "—";
 }
+
+public class TopStocksConfigResponse
+{
+    public int TopN { get; set; } = 5;
+    public List<StockConfigRow> Stocks { get; set; } = new();
+}
+
+public class StockConfigRow : ObservableObject
+{
+    public string Symbol { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Key { get; set; } = "";
+    public int LotSize { get; set; } = 100;
+    public double StrikeStep { get; set; } = 10.0;
+
+    int _lots = 1;
+    public int Lots
+    {
+        get => _lots;
+        set
+        {
+            if (Set(ref _lots, Math.Max(1, value)))
+            {
+                OnPropertyChanged(nameof(QuantityPreview));
+            }
+        }
+    }
+
+    bool _enabled = true;
+    public bool Enabled
+    {
+        get => _enabled;
+        set
+        {
+            if (Set(ref _enabled, value))
+            {
+                OnPropertyChanged(nameof(StatusText));
+            }
+        }
+    }
+
+    public string StatusText => Enabled ? "ACTIVE" : "PAUSED TODAY";
+    public string QuantityPreview => $"{Lots} lot{(Lots > 1 ? "s" : "")} = {Lots * LotSize} qty";
+}

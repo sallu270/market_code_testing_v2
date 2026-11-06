@@ -120,6 +120,22 @@ public class DemoSource : IDataSource
     }
 
     public Task SaveSelectionsAsync(Dictionary<string, int> selections) => Task.CompletedTask;
+    public Task<TopStocksConfigResponse?> GetTopStocksConfigAsync(int? topN = null)
+    {
+        var n = topN ?? 5;
+        var names = new[] { "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "BHARTIARTL", "ITC", "SBIN", "LT", "BAJFINANCE" };
+        var list = names.Take(n).Select(s => new StockConfigRow
+        {
+            Symbol = s,
+            Name = s + " Ltd.",
+            Key = "NSE_EQ|" + s,
+            LotSize = 250,
+            Lots = 1,
+            Enabled = true
+        }).ToList();
+        return Task.FromResult<TopStocksConfigResponse?>(new TopStocksConfigResponse { TopN = n, Stocks = list });
+    }
+    public Task SaveTopStocksConfigAsync(int topN, List<StockConfigRow> stocks) => Task.CompletedTask;
     public Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots) => Task.CompletedTask;
     public Task SaveIndexConfigAsync(int niftyLots, int bankNiftyLots, int sensexLots, bool niftyEnabled, bool bankNiftyEnabled, bool sensexEnabled) => Task.CompletedTask;
     public Task ExitPositionAsync() { _hasPos = false; return Task.CompletedTask; }
