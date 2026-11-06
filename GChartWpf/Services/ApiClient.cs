@@ -117,7 +117,12 @@ public class ApiClient : IDataSource
             HasPosition = has, PositionSymbol = has ? S(pos, "symbol") : "", EntryPrice = has ? D(pos, "entry_price") : 0,
             TodayPnl = D(r, "today_net_pnl_inr"), TodayPoints = D(r, "today_pnl_points"), TodayTrades = (int)D(r, "today_trades"),
             NiftyLots = nLots, BankNiftyLots = bnLots, SensexLots = sLots,
-            NiftyEnabled = nEn, BankNiftyEnabled = bnEn, SensexEnabled = sEn
+            NiftyEnabled = nEn, BankNiftyEnabled = bnEn, SensexEnabled = sEn,
+            DeltaCe = D(r, "delta_ce"), DeltaPe = D(r, "delta_pe"),
+            CeBuildup = S(r, "ce_buildup"), PeBuildup = S(r, "pe_buildup"),
+            Stars = S(r, "stars"), Decision = S(r, "decision"),
+            SummaryLine = S(r, "summary_line"),
+            RuleNumber = r.TryGetProperty("rule_number", out var rp) && rp.ValueKind == JsonValueKind.Number ? rp.GetInt32() : null
         };
     }
 

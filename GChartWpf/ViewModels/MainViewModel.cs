@@ -114,7 +114,7 @@ public class MainViewModel : ObservableObject
     public string ChartTitle => CurrentIndexName;
 
     // ---------------- header strip ----------------
-    string _clock = "", _spotText = "NC=—", _state = "SETUP", _expiry = "", _posText = "FLAT (NO POSITION)", _pnlText = "₹0.00", _pts = "(0.00 pts)", _status = "Starting…", _connText = "Connecting";
+    string _clock = "", _spotText = "NC=—", _state = "SETUP", _expiry = "", _posText = "FLAT (NO POSITION)", _pnlText = "₹0.00", _pts = "(0.00 pts)", _status = "Starting…", _connText = "Connecting", _strategySummary = "WAIT: Pre-09:18 Data Collection";
     public string Clock { get => _clock; set => Set(ref _clock, value); }
     public string SpotText { get => _spotText; set => Set(ref _spotText, value); }
     public string State { get => _state; set => Set(ref _state, value); }
@@ -123,6 +123,7 @@ public class MainViewModel : ObservableObject
     public string PnlText { get => _pnlText; set => Set(ref _pnlText, value); }
     public string PointsText { get => _pts; set => Set(ref _pts, value); }
     public string StatusMessage { get => _status; set => Set(ref _status, value); }
+    public string StrategySummary { get => _strategySummary; set => Set(ref _strategySummary, value); }
     public string ConnText { get => _connText; set => Set(ref _connText, value); }
     Brush _pnlBrush = Pal.White, _chgBrush = Pal.White, _connBrush = Pal.Amber, _posBrush = Pal.Grey;
     public Brush PnlBrush { get => _pnlBrush; set => Set(ref _pnlBrush, value); }
@@ -212,6 +213,7 @@ public class MainViewModel : ObservableObject
         PnlText = (s.TodayNetPnlSigned()) ;
         PointsText = $"({s.TodayPoints:N2} pts)";
         PnlBrush = s.TodayPnl > 0 ? Pal.Green : s.TodayPnl < 0 ? Pal.Red : Pal.White;
+        if (!string.IsNullOrEmpty(s.SummaryLine)) StrategySummary = s.SummaryLine;
         if (!_lotsInitialized)
         {
             _lotsInitialized = true;

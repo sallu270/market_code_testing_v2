@@ -201,17 +201,24 @@ def strategy_schedule_worker() -> None:
                 if strategy_engine.state in ("SETUP", "PLANNING") and strategy_engine.spot_price:
                     strategy_engine.plan_8_itm_contracts(strategy_engine.spot_price)
 
-                # Rule R6: Lock at 09:14:55
+                # Lock at 09:14:55
                 if "09:14:55" <= now_time < "09:15:00":
                     if strategy_engine.state in ("SETUP", "PLANNING"):
                         strategy_engine.lock_contracts()
 
-                # Rule R8: Arm at 09:15:00
-                elif now_time >= "09:15:00":
-                    if strategy_engine.state == "LOCKED":
-                        strategy_engine.arm_bot()
+                # Snapshot at 09:15:00 (No trading, data collection only)
+                elif "09:15:00" <= now_time < "09:18:00":
+                    if not getattr(strategy_engine, "snapshot_taken", False):
+                        strategy_engine.take_snapshot()
 
-                # Rule R22: EOD square-off at 15:15:00
+                # From 09:18:00: Evaluation window active
+                elif now_time >= "09:18:00":
+                    if not getattr(strategy_engine, "snapshot_taken", False):
+                        strategy_engine.take_snapshot()
+                    if strategy_engine.state in ("LOCKED", "DATA_COLLECTION"):
+                        strategy_engine.state = "ARMED"
+
+                # EOD square-off at 15:15:00 by clock
                 if now_time >= "15:15:00" and strategy_engine.state == "HOLDING":
                     strategy_engine.manual_exit(reason="SQUAREOFF_1515")
 

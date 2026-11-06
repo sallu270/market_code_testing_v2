@@ -408,7 +408,10 @@
 
         <!-- ============ 4. STATUS BAR ============ -->
         <Border Grid.Row="3" Background="#101010" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0">
-            <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource Muted}" FontFamily="Consolas" VerticalAlignment="Center" Margin="12,0"/>
+            <DockPanel Margin="12,0">
+                <TextBlock DockPanel.Dock="Right" Text="{Binding StrategySummary}" Foreground="{StaticResource Teal}" FontFamily="Consolas" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource Muted}" FontFamily="Consolas" VerticalAlignment="Center"/>
+            </DockPanel>
         </Border>
     </Grid>
 </Window>

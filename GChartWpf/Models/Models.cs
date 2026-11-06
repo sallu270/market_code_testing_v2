@@ -61,6 +61,14 @@ public class StatusInfo
     public bool NiftyEnabled = true;
     public bool BankNiftyEnabled = true;
     public bool SensexEnabled = true;
+    public double DeltaCe;
+    public double DeltaPe;
+    public string CeBuildup = "";
+    public string PeBuildup = "";
+    public int? RuleNumber;
+    public string Stars = "";
+    public string Decision = "WAIT";
+    public string SummaryLine = "";
 }
 
 public class TradeRow
