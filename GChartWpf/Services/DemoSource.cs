@@ -33,7 +33,13 @@ public class DemoSource : IDataSource
 
     public Task<List<Candle>> GetCandlesAsync(string key, string tf)
     {
-        double start = key == AppSettings.IndexKey ? 23500 : 500 + Math.Abs(key.GetHashCode() % 3000);
+        double start = key switch
+        {
+            AppSettings.BankNiftyKey => 51200,
+            AppSettings.SensexKey => 79400,
+            AppSettings.NiftyKey => 24600,
+            _ => 500 + Math.Abs(key.GetHashCode() % 3000)
+        };
         var h = History(key, start);
         // nudge the last candle so the chart looks live
         double p = _last[key]; var last = h[^1]; double cl = p + (_r.NextDouble() - 0.5) * start * 0.0004;
@@ -50,12 +56,26 @@ public class DemoSource : IDataSource
 
     public async Task<ChainSnapshot?> GetChainAsync(string key)
     {
-        await GetCandlesAsync(AppSettings.IndexKey, "1m");
-        double spot = Spot; double atm = Math.Round(spot / 50) * 50;
-        var snap = new ChainSnapshot { Spot = spot, Expiry = "2026-11-10" };
-        for (int i = -10; i <= 10; i++)
+        await GetCandlesAsync(key, "1m");
+        double start = key switch
         {
-            double k = atm + i * 50;
+            AppSettings.BankNiftyKey => 51200,
+            AppSettings.SensexKey => 79400,
+            _ => 24600
+        };
+        double spot = _last.GetValueOrDefault(key, start);
+        double step = (key == AppSettings.BankNiftyKey || key == AppSettings.SensexKey) ? 100 : 50;
+        string expiry = key switch
+        {
+            AppSettings.BankNiftyKey => "2026-11-11",
+            AppSettings.SensexKey => "2026-11-13",
+            _ => "2026-11-12"
+        };
+        double atm = Math.Round(spot / step) * step;
+        var snap = new ChainSnapshot { Spot = spot, Expiry = expiry };
+        for (int i = -4; i <= 4; i++)
+        {
+            double k = atm + i * step;
             snap.Strikes.Add(new ChainStrike { Strike = k, Ce = Leg(Math.Max(spot - k, 0), spot, k), Pe = Leg(Math.Max(k - spot, 0), spot, k) });
         }
         return snap;

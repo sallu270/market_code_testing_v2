@@ -19,13 +19,17 @@
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
                     <TextBlock Text="GChart" FontWeight="Black" FontSize="15" Foreground="{StaticResource Teal}"
                                VerticalAlignment="Center" Margin="12,0,10,0"/>
-                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="NIFTY Index" IsChecked="True"
-                                 Command="{Binding SetModeCommand}" CommandParameter="Index"/>
-                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="Stocks"
+                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="NIFTY 50" IsChecked="True"
+                                 Command="{Binding SetModeCommand}" CommandParameter="Nifty50"/>
+                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="BANK NIFTY"
+                                 Command="{Binding SetModeCommand}" CommandParameter="BankNifty"/>
+                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="SENSEX"
+                                 Command="{Binding SetModeCommand}" CommandParameter="Sensex"/>
+                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="STOCKS"
                                  Command="{Binding SetModeCommand}" CommandParameter="Stocks"/>
-                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="Trades Journal"
+                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="JOURNAL"
                                  Command="{Binding SetModeCommand}" CommandParameter="Journal"/>
-                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="Settings"
+                    <RadioButton Style="{StaticResource NavTab}" GroupName="mode" Content="SETTINGS"
                                  Command="{Binding SetModeCommand}" CommandParameter="Settings"/>
                 </StackPanel>
 
@@ -107,8 +111,8 @@
                     <StackPanel>
                         <DockPanel Margin="10,6,10,4">
                             <TextBlock DockPanel.Dock="Right" Text="{Binding AtmText}" FontFamily="Consolas" Foreground="{StaticResource Amber}"/>
-                            <TextBlock Text="OPTION CHAIN" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
-                            <TextBlock Text="  · 8 strikes around spot (slides with price)" Foreground="{StaticResource Muted}"/>
+                            <TextBlock Text="{Binding CurrentIndexName}" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
+                            <TextBlock Text=" OPTION CHAIN · 8 ITM strikes around spot" Foreground="{StaticResource Muted}"/>
                         </DockPanel>
 
                         <!-- group header; star widths mirror the grid columns below -->

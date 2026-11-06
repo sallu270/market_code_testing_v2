@@ -51,25 +51,53 @@ public class MainViewModel : ObservableObject
     public ICommand ExportTradesCsvCommand { get; }
 
     // ---------------- navigation ----------------
-    string _mode = "Index";
+    string _mode = "Nifty50";
     public string Mode
     {
         get => _mode;
         set
         {
             if (!Set(ref _mode, value)) return;
-            OnPropertyChanged(nameof(IsIndexMode)); OnPropertyChanged(nameof(IsStocksMode));
-            OnPropertyChanged(nameof(IsChartMode)); OnPropertyChanged(nameof(IsJournalMode)); OnPropertyChanged(nameof(IsSettingsMode));
+            OnPropertyChanged(nameof(IsNifty50Mode));
+            OnPropertyChanged(nameof(IsBankNiftyMode));
+            OnPropertyChanged(nameof(IsSensexMode));
+            OnPropertyChanged(nameof(IsIndexMode));
+            OnPropertyChanged(nameof(IsStocksMode));
+            OnPropertyChanged(nameof(IsChartMode));
+            OnPropertyChanged(nameof(IsJournalMode));
+            OnPropertyChanged(nameof(IsSettingsMode));
+            OnPropertyChanged(nameof(CurrentIndexKey));
+            OnPropertyChanged(nameof(CurrentIndexName));
             OnPropertyChanged(nameof(ChartTitle));
             if (value == "Stocks" && Stocks.Count == 0) _ = LoadStocksAsync();
+            Candles = null;
             _ = RefreshAsync();
         }
     }
-    public bool IsIndexMode => Mode == "Index";
+    public bool IsNifty50Mode => Mode == "Nifty50" || Mode == "Index";
+    public bool IsBankNiftyMode => Mode == "BankNifty";
+    public bool IsSensexMode => Mode == "Sensex";
+    public bool IsIndexMode => IsNifty50Mode || IsBankNiftyMode || IsSensexMode;
     public bool IsStocksMode => Mode == "Stocks";
     public bool IsChartMode => IsIndexMode;
     public bool IsJournalMode => Mode == "Journal";
     public bool IsSettingsMode => Mode == "Settings";
+
+    public string CurrentIndexKey => Mode switch
+    {
+        "BankNifty" => AppSettings.BankNiftyKey,
+        "Sensex" => AppSettings.SensexKey,
+        _ => AppSettings.NiftyKey
+    };
+
+    public string CurrentIndexName => Mode switch
+    {
+        "BankNifty" => AppSettings.BankNiftyName,
+        "Sensex" => AppSettings.SensexName,
+        _ => AppSettings.NiftyName
+    };
+
+    public string ChartTitle => CurrentIndexName;
 
     // ---------------- header strip ----------------
     string _clock = "", _spotText = "NC=—", _state = "SETUP", _expiry = "", _posText = "FLAT (NO POSITION)", _pnlText = "₹0.00", _pts = "(0.00 pts)", _status = "Starting…", _connText = "Connecting";
@@ -94,7 +122,6 @@ public class MainViewModel : ObservableObject
     public bool IsDaily => Timeframe == "1d";
     IReadOnlyList<Candle>? _candles;
     public IReadOnlyList<Candle>? Candles { get => _candles; set => Set(ref _candles, value); }
-    public string ChartTitle => AppSettings.IndexName;
     string _lo = "—", _lh = "—", _ll = "—", _lc = "—", _lchg = "0.00 (0.00%)", _lv = "—";
     public string LegendO { get => _lo; set => Set(ref _lo, value); }
     public string LegendH { get => _lh; set => Set(ref _lh, value); }
@@ -139,10 +166,10 @@ public class MainViewModel : ObservableObject
         _busy = true;
         try
         {
-            string key = AppSettings.IndexKey;
+            string key = CurrentIndexKey;
             var tStatus = _src.GetStatusAsync();
             var tCandles = IsChartMode ? _src.GetCandlesAsync(key, Timeframe) : null;
-            var tChain = IsIndexMode ? _src.GetChainAsync(AppSettings.IndexKey) : null;
+            var tChain = IsIndexMode ? _src.GetChainAsync(key) : null;
 
             ApplyStatus(await tStatus);
             if (tCandles != null) ApplyCandles(await tCandles);

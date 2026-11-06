@@ -10,7 +10,7 @@ namespace GChartWpf.Services;
 public class ApiClient : IDataSource
 {
     readonly HttpClient _http;
-    string _expiry = "";
+    readonly Dictionary<string, string> _expiries = new();
 
     public ApiClient(string baseUrl)
     {
@@ -62,11 +62,11 @@ public class ApiClient : IDataSource
     public async Task<ChainSnapshot?> GetChainAsync(string key)
     {
         var url = $"/api/option-chain?instrument_key={Uri.EscapeDataString(key)}";
-        if (_expiry != "") url += $"&expiry_date={_expiry}";
+        if (_expiries.TryGetValue(key, out var exp) && !string.IsNullOrEmpty(exp)) url += $"&expiry_date={exp}";
         using var doc = await GetJson(url);
         var root = doc.RootElement;
         var snap = new ChainSnapshot { Spot = D(root, "spot_price"), Expiry = S(root, "expiry_date") };
-        if (snap.Expiry != "") _expiry = snap.Expiry;
+        if (snap.Expiry != "") _expiries[key] = snap.Expiry;
 
         foreach (var s in Arr(root, "strikes"))
             snap.Strikes.Add(new ChainStrike { Strike = D(s, "strike_price"), Ce = Leg(O(s, "call_options")), Pe = Leg(O(s, "put_options")) });

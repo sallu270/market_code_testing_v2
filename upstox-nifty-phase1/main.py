@@ -181,13 +181,14 @@ def strategy_schedule_worker() -> None:
     """
     LOGGER.info("Opening Gap Entry Strategy schedule worker started.")
     time.sleep(2)
-    # Preload contracts once at startup
+    # Preload contracts once at startup for all 3 supported indices
     if settings.configured and settings.access_token:
-        try:
-            strategy_engine.load_contracts_if_needed()
-            LOGGER.info("Gap Entry Strategy contracts preloaded: %s", len(strategy_engine.all_contracts))
-        except Exception as exc:
-            LOGGER.warning("Startup contract load failed: %s", exc)
+        for ukey in ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank", "BSE_INDEX|SENSEX"]:
+            try:
+                strategy_engine.load_contracts_if_needed(ukey)
+            except Exception as exc:
+                LOGGER.warning("Startup contract load failed for %s: %s", ukey, exc)
+        LOGGER.info("Gap Entry Strategy contracts preloaded across indices.")
 
     last_broadcast_ms = 0
     while True:

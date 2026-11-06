@@ -70,6 +70,10 @@ class GapEntryStrategyEngine:
         self.contracts_by_key: dict[str, dict[str, Any]] = {}
         self.ce_by_strike: dict[float, dict[str, Any]] = {}
         self.pe_by_strike: dict[float, dict[str, Any]] = {}
+        self.contracts_by_underlying: dict[str, list[dict[str, Any]]] = {}
+        self.expiries_by_underlying: dict[str, str] = {}
+        self.ce_by_underlying: dict[str, dict[float, dict[str, Any]]] = {}
+        self.pe_by_underlying: dict[str, dict[float, dict[str, Any]]] = {}
 
         # 8 Locked ITM Contracts (4 CE + 4 PE)
         self.planned_keys: list[str] = []
@@ -181,15 +185,15 @@ class GapEntryStrategyEngine:
     # Strike Loading & Planning (09:00 to 09:14:55)
     # -------------------------------------------------------------------------
 
-    def load_contracts_if_needed(self) -> bool:
-        """Fetch NIFTY option contracts from Upstox API and isolate nearest expiry."""
-        if self.all_contracts:
+    def load_contracts_if_needed(self, underlying_key: str = NIFTY_KEY) -> bool:
+        """Fetch option contracts for index (NIFTY 50, BANK NIFTY, SENSEX) and isolate nearest expiry."""
+        if underlying_key in self.contracts_by_underlying and self.contracts_by_underlying[underlying_key]:
             return True
         if not self.access_token:
             return False
 
         try:
-            url = f"https://api.upstox.com/v2/option/contract?instrument_key={urllib.parse.quote(NIFTY_KEY, safe='|')}"
+            url = f"https://api.upstox.com/v2/option/contract?instrument_key={urllib.parse.quote(underlying_key, safe='|')}"
             req = urllib.request.Request(
                 url,
                 headers={
@@ -209,54 +213,75 @@ class GapEntryStrategyEngine:
                 if not expiries:
                     return False
 
-                self.active_expiry = expiries[0]
-                self.all_contracts = [
-                    c for c in contracts if c.get("expiry") == self.active_expiry
-                ]
+                act_exp = expiries[0]
+                matched = [c for c in contracts if c.get("expiry") == act_exp]
+                self.contracts_by_underlying[underlying_key] = matched
+                self.expiries_by_underlying[underlying_key] = act_exp
 
-                self.contracts_by_key.clear()
-                self.ce_by_strike.clear()
-                self.pe_by_strike.clear()
+                if underlying_key == NIFTY_KEY:
+                    self.active_expiry = act_exp
+                    self.all_contracts = matched
+                    self.contracts_by_key.clear()
+                    self.ce_by_strike.clear()
+                    self.pe_by_strike.clear()
 
-                for c in self.all_contracts:
+                ce_map: dict[float, dict[str, Any]] = {}
+                pe_map: dict[float, dict[str, Any]] = {}
+                for c in matched:
                     k = c.get("instrument_key")
                     strike = float(c.get("strike_price") or 0.0)
                     itype = str(c.get("instrument_type") or "").upper()
                     if k:
                         self.contracts_by_key[k] = c
                     if itype == "CE":
-                        self.ce_by_strike[strike] = c
+                        ce_map[strike] = c
+                        if underlying_key == NIFTY_KEY:
+                            self.ce_by_strike[strike] = c
                     elif itype == "PE":
-                        self.pe_by_strike[strike] = c
+                        pe_map[strike] = c
+                        if underlying_key == NIFTY_KEY:
+                            self.pe_by_strike[strike] = c
+
+                self.ce_by_underlying[underlying_key] = ce_map
+                self.pe_by_underlying[underlying_key] = pe_map
 
                 LOGGER.info(
-                    "Loaded %s contracts for NIFTY expiry %s (%s CE, %s PE).",
-                    len(self.all_contracts),
-                    self.active_expiry,
-                    len(self.ce_by_strike),
-                    len(self.pe_by_strike),
+                    "Loaded %s contracts for %s expiry %s (%s CE, %s PE).",
+                    len(matched),
+                    underlying_key,
+                    act_exp,
+                    len(ce_map),
+                    len(pe_map),
                 )
                 return True
         except Exception as exc:
-            LOGGER.error("Failed to load option contracts: %s", exc)
+            LOGGER.error("Failed to load option contracts for %s: %s", underlying_key, exc)
             return False
 
-    def plan_8_itm_contracts(self, spot: float) -> list[str]:
+    def plan_8_itm_contracts(self, spot: float, underlying_key: str = NIFTY_KEY) -> list[str]:
         """
         Rule R5:
         CE ITM = the 4 largest strikes below spot.
         PE ITM = the 4 smallest strikes above spot.
         A strike equal to spot is excluded.
         """
-        if not self.ce_by_strike or not self.pe_by_strike:
-            self.load_contracts_if_needed()
+        ce_dict = self.ce_by_underlying.get(underlying_key) or self.ce_by_strike
+        pe_dict = self.pe_by_underlying.get(underlying_key) or self.pe_by_strike
+        if not ce_dict or not pe_dict:
+            self.load_contracts_if_needed(underlying_key)
+            ce_dict = self.ce_by_underlying.get(underlying_key) or self.ce_by_strike
+            pe_dict = self.pe_by_underlying.get(underlying_key) or self.pe_by_strike
 
-        ce_strikes = sorted([s for s in self.ce_by_strike.keys() if s < spot], reverse=True)[:4]
-        pe_strikes = sorted([s for s in self.pe_by_strike.keys() if s > spot])[:4]
+        ce_strikes = sorted([s for s in ce_dict.keys() if s < spot], reverse=True)[:4]
+        pe_strikes = sorted([s for s in pe_dict.keys() if s > spot])[:4]
 
         keys: list[str] = []
         for s in ce_strikes:
-            c = self.ce_by_strike.get(s)
+            c = ce_dict.get(s)
+            if c and c.get("instrument_key"):
+                keys.append(c["instrument_key"])
+        for s in pe_strikes:
+            c = pe_dict.get(s)
             if c and c.get("instrument_key"):
                 keys.append(c["instrument_key"])
         for s in pe_strikes:
