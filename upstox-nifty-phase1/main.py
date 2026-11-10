@@ -684,6 +684,20 @@ def api_strategy_export_ticks() -> Response:
         headers={"Content-Disposition": "attachment; filename=today_ticks.csv"},
     )
 
+@app.get("/api/database/stats")
+def api_database_stats() -> Response:
+    """Get database size, row counts, and health stats."""
+    return jsonify(database.get_db_stats())
+
+@app.post("/api/database/prune")
+def api_database_prune() -> Response:
+    """Prune raw ticks older than N days (default 3) to reclaim disk space."""
+    body = request.get_json(silent=True) or {}
+    days = int(body.get("days_to_keep", 3))
+    run_vac = bool(body.get("run_vacuum", False))
+    res = database.prune_old_ticks(days_to_keep=days, run_vacuum=run_vac)
+    return jsonify({"success": True, "stats": res})
+
 @app.get("/api/stream")
 def api_stream() -> Response:
     subscriber: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=500)

@@ -1,5 +1,50 @@
 {
-  "RELIANCE": 2,
-  "INFY": 3,
-  "TCS": 1
+  "top_n": 5,
+  "stocks": [
+    {
+      "symbol": "RELIANCE",
+      "name": "Reliance Industries Ltd.",
+      "key": "NSE_EQ|INE002A01018",
+      "lot_size": 250,
+      "strike_step": 20.0,
+      "lots": 2,
+      "enabled": true
+    },
+    {
+      "symbol": "HDFCBANK",
+      "name": "HDFC Bank Ltd.",
+      "key": "NSE_EQ|INE040A01034",
+      "lot_size": 550,
+      "strike_step": 10.0,
+      "lots": 1,
+      "enabled": true
+    },
+    {
+      "symbol": "ICICIBANK",
+      "name": "ICICI Bank Ltd.",
+      "key": "NSE_EQ|INE090A01021",
+      "lot_size": 700,
+      "strike_step": 10.0,
+      "lots": 1,
+      "enabled": true
+    },
+    {
+      "symbol": "INFY",
+      "name": "Infosys Ltd.",
+      "key": "NSE_EQ|INE009A01021",
+      "lot_size": 400,
+      "strike_step": 20.0,
+      "lots": 3,
+      "enabled": true
+    },
+    {
+      "symbol": "TCS",
+      "name": "Tata Consultancy Services Ltd.",
+      "key": "NSE_EQ|INE467B01029",
+      "lot_size": 175,
+      "strike_step": 20.0,
+      "lots": 1,
+      "enabled": true
+    }
+  ]
 }

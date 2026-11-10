@@ -5,6 +5,7 @@
     <!-- ===== Palette (GChart look: black canvas, teal headers, neon candles) ===== -->
     <SolidColorBrush x:Key="Bg" Color="#000000"/>
     <SolidColorBrush x:Key="Panel" Color="#0A0A0A"/>
+    <SolidColorBrush x:Key="Surface" Color="#111111"/>
     <SolidColorBrush x:Key="Bar" Color="#121212"/>
     <SolidColorBrush x:Key="Line" Color="#2A2A2A"/>
     <SolidColorBrush x:Key="Teal" Color="#009999"/>

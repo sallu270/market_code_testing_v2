@@ -565,6 +565,70 @@ class MarketDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_db_stats(self) -> dict[str, Any]:
+        """Returns database size, row counts, and disk statistics."""
+        with self._lock:
+            size_bytes = self.path.stat().st_size if self.path.exists() else 0
+            size_mb = round(size_bytes / (1024 * 1024), 2)
+            size_gb = round(size_bytes / (1024 * 1024 * 1024), 2)
+
+            tick_count = self._connection.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+            candle_count = self._connection.execute("SELECT COUNT(*) FROM candles_1m").fetchone()[0]
+            trade_count = self._connection.execute("SELECT COUNT(*) FROM strategy_trades").fetchone()[0]
+
+            oldest_tick = self._connection.execute("SELECT MIN(exchange_timestamp_ms) FROM ticks").fetchone()[0]
+            newest_tick = self._connection.execute("SELECT MAX(exchange_timestamp_ms) FROM ticks").fetchone()[0]
+
+            return {
+                "file_path": str(self.path),
+                "size_bytes": size_bytes,
+                "size_mb": size_mb,
+                "size_gb": size_gb,
+                "tick_count": tick_count,
+                "candle_count": candle_count,
+                "trade_count": trade_count,
+                "oldest_tick_ms": oldest_tick,
+                "newest_tick_ms": newest_tick,
+            }
+
+    def prune_old_ticks(self, days_to_keep: int = 3, run_vacuum: bool = False) -> dict[str, Any]:
+        """
+        Deletes raw ticks older than `days_to_keep` days to reclaim storage.
+        Preserves all 1-minute candles and strategy trade records permanently!
+        """
+        import time
+        with self._lock:
+            cutoff_ms = int((time.time() - (days_to_keep * 86400)) * 1000)
+            initial_size = self.path.stat().st_size if self.path.exists() else 0
+
+            cur = self._connection.cursor()
+            cur.execute("DELETE FROM ticks WHERE exchange_timestamp_ms < ?", (cutoff_ms,))
+            deleted_ticks = cur.rowcount
+            self._connection.commit()
+
+            # Checkpoint WAL file to release pages
+            try:
+                self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                self._connection.commit()
+            except Exception:
+                pass
+
+            if run_vacuum:
+                try:
+                    self._connection.execute("VACUUM;")
+                    self._connection.commit()
+                except Exception:
+                    pass
+
+            final_size = self.path.stat().st_size if self.path.exists() else 0
+            return {
+                "deleted_ticks": deleted_ticks,
+                "cutoff_ms": cutoff_ms,
+                "initial_size_mb": round(initial_size / (1024 * 1024), 2),
+                "final_size_mb": round(final_size / (1024 * 1024), 2),
+                "space_saved_mb": round(max(0, initial_size - final_size) / (1024 * 1024), 2),
+            }
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
