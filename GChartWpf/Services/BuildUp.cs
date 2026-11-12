@@ -36,8 +36,8 @@ public static class ChainWindow
         {
             Strike = s.Strike,
             IsAtm = s.Strike == atm,
-            CeBuildUp = s.Ce.BuildUp, CeVolume = s.Ce.Volume, CeBid = s.Ce.Bid, CeAsk = s.Ce.Ask, CeLtp = s.Ce.Ltp,
-            PeLtp = s.Pe.Ltp, PeBid = s.Pe.Bid, PeAsk = s.Pe.Ask, PeVolume = s.Pe.Volume, PeBuildUp = s.Pe.BuildUp
+            CeBuildUp = s.Ce.BuildUp, CeOi = s.Ce.Oi, CeVolume = s.Ce.Volume, CeBid = s.Ce.Bid, CeAsk = s.Ce.Ask, CeLtp = s.Ce.Ltp,
+            PeLtp = s.Pe.Ltp, PeBid = s.Pe.Bid, PeAsk = s.Pe.Ask, PeVolume = s.Pe.Volume, PeOi = s.Pe.Oi, PeBuildUp = s.Pe.BuildUp
         }).ToList();
     }
 }

@@ -32,6 +32,7 @@ public class StrikeRow
     public bool IsAtm { get; set; }
 
     public string CeBuildUp { get; set; } = "—";
+    public double CeOi { get; set; }
     public double CeVolume { get; set; }
     public double CeBid { get; set; }
     public double CeAsk { get; set; }
@@ -41,6 +42,7 @@ public class StrikeRow
     public double PeBid { get; set; }
     public double PeAsk { get; set; }
     public double PeVolume { get; set; }
+    public double PeOi { get; set; }
     public string PeBuildUp { get; set; } = "—";
 }
 
@@ -55,6 +57,9 @@ public class IndexStatusInfo
     public double EntryPrice;
     public string SummaryLine = "";
     public int TodayTradesCount;
+    public double FuturesLtp;
+    public double FuturesOi;
+    public string FuturesBuildup = "Neutral";
 }
 
 public class StatusInfo
@@ -68,6 +73,9 @@ public class StatusInfo
     public double TodayPnl;
     public double TodayPoints;
     public int TodayTrades;
+    public double FuturesLtp;
+    public double FuturesOi;
+    public string FuturesBuildup = "Neutral";
     public int NiftyLots = 1;
     public int BankNiftyLots = 1;
     public int SensexLots = 1;

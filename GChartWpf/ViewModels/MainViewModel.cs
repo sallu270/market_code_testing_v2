@@ -170,6 +170,10 @@ public class MainViewModel : ObservableObject
     public Brush ChgBrush { get => _chgBrush; set => Set(ref _chgBrush, value); }
     public Brush ConnBrush { get => _connBrush; set => Set(ref _connBrush, value); }
     public Brush PosBrush { get => _posBrush; set => Set(ref _posBrush, value); }
+    string _futuresText = "FUT: —";
+    public string FuturesText { get => _futuresText; set => Set(ref _futuresText, value); }
+    Brush _futuresBrush = new SolidColorBrush(Color.FromRgb(0, 229, 255));
+    public Brush FuturesBrush { get => _futuresBrush; set => Set(ref _futuresBrush, value); }
 
     // ---------------- chart ----------------
     string _tf = "1m";
@@ -290,6 +294,23 @@ public class MainViewModel : ObservableObject
         PnlText = (s.TodayNetPnlSigned()) ;
         PointsText = $"({s.TodayPoints:N2} pts)";
         PnlBrush = s.TodayPnl > 0 ? Pal.Green : s.TodayPnl < 0 ? Pal.Red : Pal.White;
+
+        var futLtp = curIdxInfo != null && curIdxInfo.FuturesLtp > 0 ? curIdxInfo.FuturesLtp : s.FuturesLtp;
+        var futOi = curIdxInfo != null && curIdxInfo.FuturesOi > 0 ? curIdxInfo.FuturesOi : s.FuturesOi;
+        var futBu = curIdxInfo != null && !string.IsNullOrEmpty(curIdxInfo.FuturesBuildup) ? curIdxInfo.FuturesBuildup : s.FuturesBuildup;
+
+        if (futLtp > 0 || futOi > 0)
+        {
+            var buShort = futBu.Replace("Long Build-up", "LB").Replace("Short Build-up", "SB").Replace("Short Covering", "SC").Replace("Long Unwinding", "LU");
+            FuturesText = $"FUT: {futLtp:N2}  ·  OI: {futOi:#,##0} ({buShort})";
+            FuturesBrush = (buShort == "LB" || buShort == "SC") ? Pal.Green : (buShort == "SB" || buShort == "LU") ? Pal.Red : new SolidColorBrush(Color.FromRgb(0, 229, 255));
+        }
+        else
+        {
+            FuturesText = "FUT: —";
+            FuturesBrush = Pal.Grey;
+        }
+
         var summary = curIdxInfo != null && !string.IsNullOrEmpty(curIdxInfo.SummaryLine) ? curIdxInfo.SummaryLine : s.SummaryLine;
         if (!string.IsNullOrEmpty(summary)) StrategySummary = summary;
         if (!_lotsInitialized)

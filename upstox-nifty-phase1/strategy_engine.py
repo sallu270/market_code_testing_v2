@@ -3316,6 +3316,9 @@ class GapEntryStrategyEngine:
                 "enabled": self.enabled,
                 "mode": self.mode,
                 "spot_price": self.spot_price,
+                "futures_ltp": self.index_underlyings.get(NIFTY_KEY, {}).get("futures_ltp"),
+                "futures_oi": self.index_underlyings.get(NIFTY_KEY, {}).get("futures_oi"),
+                "futures_buildup": self.index_underlyings.get(NIFTY_KEY, {}).get("futures_buildup", "Neutral"),
                 "active_expiry": self.active_expiry,
                 "lots": self.lots,
                 "lot_size": self.lot_size,
@@ -3367,11 +3370,15 @@ class GapEntryStrategyEngine:
                         "daily_loss_limit_inr": d.get("daily_loss_limit_inr", self.daily_loss_limit_inr),
                         "futures_key": d.get("futures_key", ""),
                         "futures_ltp": d.get("futures_ltp"),
+                        "futures_oi": d.get("futures_oi"),
                         "futures_buildup": d.get("futures_buildup", "Neutral"),
                         "locked_contracts_count": len(d.get("locked_keys") or []),
                     }
                     for ukey, d in self.index_underlyings.items()
                 },
+                "futures_ltp": self.index_underlyings.get(NIFTY_KEY, {}).get("futures_ltp"),
+                "futures_oi": self.index_underlyings.get(NIFTY_KEY, {}).get("futures_oi"),
+                "futures_buildup": self.index_underlyings.get(NIFTY_KEY, {}).get("futures_buildup", "Neutral"),
                 "alerts": self.get_alerts(limit=20),
                 "stock_underlyings": {
                     sym: {

@@ -124,7 +124,10 @@ public class ApiClient : IDataSource
                     State = S(val, "state"),
                     SpotPrice = D(val, "spot_price"),
                     HasPosition = val.TryGetProperty("has_position", out var hp) && hp.ValueKind == JsonValueKind.True,
-                    TodayTradesCount = (int)D(val, "today_trades_count")
+                    TodayTradesCount = (int)D(val, "today_trades_count"),
+                    FuturesLtp = D(val, "futures_ltp"),
+                    FuturesOi = D(val, "futures_oi"),
+                    FuturesBuildup = S(val, "futures_buildup") is { Length: > 0 } fb ? fb : "Neutral"
                 };
                 if (val.TryGetProperty("position", out var posElem) && posElem.ValueKind == JsonValueKind.Object)
                 {
@@ -144,6 +147,7 @@ public class ApiClient : IDataSource
             State = S(r, "state"), Spot = D(r, "spot_price"), Expiry = S(r, "active_expiry"),
             HasPosition = has, PositionSymbol = has ? S(pos, "symbol") : "", EntryPrice = has ? D(pos, "entry_price") : 0,
             TodayPnl = D(r, "today_net_pnl_inr"), TodayPoints = D(r, "today_pnl_points"), TodayTrades = (int)D(r, "today_trades"),
+            FuturesLtp = D(r, "futures_ltp"), FuturesOi = D(r, "futures_oi"), FuturesBuildup = S(r, "futures_buildup") is { Length: > 0 } rfb ? rfb : "Neutral",
             NiftyLots = nLots, BankNiftyLots = bnLots, SensexLots = sLots,
             NiftyEnabled = nEn, BankNiftyEnabled = bnEn, SensexEnabled = sEn,
             DeltaCe = D(r, "delta_ce"), DeltaPe = D(r, "delta_pe"),

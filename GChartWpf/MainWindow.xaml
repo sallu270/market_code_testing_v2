@@ -69,6 +69,9 @@
                     <Border Background="{StaticResource TealDark}" BorderBrush="{StaticResource Teal}" BorderThickness="1" CornerRadius="3" Padding="8,1" Margin="0,0,14,0">
                         <TextBlock Text="{Binding State}" FontFamily="Consolas" FontWeight="Bold" Foreground="{StaticResource Teal}"/>
                     </Border>
+                    <Border Background="#161616" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="3" Padding="8,1" Margin="0,0,14,0">
+                        <TextBlock Text="{Binding FuturesText}" FontFamily="Consolas" FontWeight="Bold" Foreground="{Binding FuturesBrush}"/>
+                    </Border>
                     <TextBlock Text="{Binding Expiry}" FontFamily="Consolas" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,24,0"/>
                 </StackPanel>
 
@@ -140,9 +143,9 @@
                         <!-- group header; star widths mirror the grid columns below -->
                         <Grid Height="22" Background="#101010">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="6*"/>
-                                <ColumnDefinition Width="1.3*"/>
-                                <ColumnDefinition Width="6*"/>
+                                <ColumnDefinition Width="6.8*"/>
+                                <ColumnDefinition Width="1.2*"/>
+                                <ColumnDefinition Width="6.8*"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="CALLS (CE)" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold" Foreground="{StaticResource Up}"/>
                             <TextBlock Grid.Column="1" Text="STRIKE" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold" Foreground="White"/>
@@ -160,17 +163,19 @@
                                 </Style>
                             </DataGrid.RowStyle>
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding CeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
-                                <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding CeVolume, StringFormat='{}{0:#,##0;-#,##0;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Build-up" Width="1.5*" Binding="{Binding CeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
+                                <DataGridTextColumn Header="OI"       Width="1.2*" Binding="{Binding CeOi, StringFormat='{}{0:#,##0;-#,##0;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Volume"   Width="1.1*" Binding="{Binding CeVolume, StringFormat='{}{0:#,##0;-#,##0;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding CeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding CeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding CeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                <DataGridTextColumn Header="STRIKE"   Width="1.3*" Binding="{Binding Strike, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource StrikeCell}"/>
-                                <DataGridTextColumn Header="LTP"      Width="1.2*" Binding="{Binding PeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="LTP"      Width="1*"   Binding="{Binding CeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="STRIKE"   Width="1.2*" Binding="{Binding Strike, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource StrikeCell}"/>
+                                <DataGridTextColumn Header="LTP"      Width="1*"   Binding="{Binding PeLtp, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="Bid"      Width="1*"   Binding="{Binding PeBid, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
                                 <DataGridTextColumn Header="Ask"      Width="1*"   Binding="{Binding PeAsk, StringFormat='{}{0:0.00;-0.00;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                <DataGridTextColumn Header="Volume"   Width="1.2*" Binding="{Binding PeVolume, StringFormat='{}{0:#,##0;-#,##0;—}'}" ElementStyle="{StaticResource NumCell}"/>
-                                <DataGridTextColumn Header="Build-up" Width="1.6*" Binding="{Binding PeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
+                                <DataGridTextColumn Header="Volume"   Width="1.1*" Binding="{Binding PeVolume, StringFormat='{}{0:#,##0;-#,##0;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="OI"       Width="1.2*" Binding="{Binding PeOi, StringFormat='{}{0:#,##0;-#,##0;—}'}" ElementStyle="{StaticResource NumCell}"/>
+                                <DataGridTextColumn Header="Build-up" Width="1.5*" Binding="{Binding PeBuildUp}" ElementStyle="{StaticResource BuildUpCell}"/>
                             </DataGrid.Columns>
                         </DataGrid>
                     </StackPanel>

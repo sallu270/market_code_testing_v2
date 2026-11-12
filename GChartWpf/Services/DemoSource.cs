@@ -97,7 +97,8 @@ public class DemoSource : IDataSource
     public Task<StatusInfo?> GetStatusAsync() => Task.FromResult<StatusInfo?>(new StatusInfo
     {
         State = _hasPos ? "HOLDING" : "SETUP", Spot = Spot, Expiry = "10 NOV 2026", HasPosition = _hasPos,
-        PositionSymbol = "NIFTY 10 Nov 2026 CE 23500", EntryPrice = 99.40, TodayPnl = _hasPos ? 1840.5 : 0, TodayPoints = 28.3, TodayTrades = 1
+        PositionSymbol = "NIFTY 10 Nov 2026 CE 23500", EntryPrice = 99.40, TodayPnl = _hasPos ? 1840.5 : 0, TodayPoints = 28.3, TodayTrades = 1,
+        FuturesLtp = Spot + 28.5, FuturesOi = 1350000, FuturesBuildup = "Long Build-up"
     });
 
     public Task<List<TradeRow>> GetTradesAsync(string? date = "today") => Task.FromResult(new List<TradeRow>
