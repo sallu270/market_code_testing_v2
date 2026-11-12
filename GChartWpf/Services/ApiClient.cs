@@ -155,12 +155,15 @@ public class ApiClient : IDataSource
         };
     }
 
-    public async Task<List<TradeRow>> GetTradesAsync()
+    public async Task<List<TradeRow>> GetTradesAsync(string? date = "today")
     {
-        using var doc = await GetJson("/api/strategy/trades?limit=100");
+        var targetDate = string.IsNullOrWhiteSpace(date) ? "today" : date.Trim();
+        var endpoint = $"/api/strategy/trades?date={Uri.EscapeDataString(targetDate)}&limit=200";
+        using var doc = await GetJson(endpoint);
         return Arr(doc.RootElement, "trades").Select(t => new TradeRow
         {
             TradeId = S(t, "trade_id"),
+            TradeDate = S(t, "trade_date"),
             Side = S(t, "side"),
             Symbol = S(t, "symbol"),
             EntryTime = S(t, "entry_time_ist") is { Length: > 0 } et ? et : "—",
@@ -171,6 +174,22 @@ public class ApiClient : IDataSource
             Status = S(t, "status"),
             BotMs = D(t, "bot_latency_ms")
         }).ToList();
+    }
+
+    public async Task<List<string>> GetTradeDatesAsync()
+    {
+        try
+        {
+            using var doc = await GetJson("/api/strategy/trade-dates");
+            return Arr(doc.RootElement, "dates")
+                .Select(e => e.GetString() ?? "")
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
+        }
+        catch
+        {
+            return new List<string> { DateTime.Today.ToString("yyyy-MM-dd") };
+        }
     }
 
     // ---------- stocks ----------
@@ -270,7 +289,21 @@ public class ApiClient : IDataSource
     // ---------- action buttons ----------
     public async Task ExitPositionAsync(string? indexKey = null)
     {
-        var body = JsonSerializer.Serialize(new { index = indexKey ?? "" });
+        var body = JsonSerializer.Serialize(new { index = indexKey ?? "", scope = "ALL" });
+        using var resp = await _http.PostAsync("/api/strategy/exit", new StringContent(body, Encoding.UTF8, "application/json"));
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task ExitIndicesAsync()
+    {
+        var body = JsonSerializer.Serialize(new { scope = "INDICES" });
+        using var resp = await _http.PostAsync("/api/strategy/exit", new StringContent(body, Encoding.UTF8, "application/json"));
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task ExitStocksAsync()
+    {
+        var body = JsonSerializer.Serialize(new { scope = "STOCKS" });
         using var resp = await _http.PostAsync("/api/strategy/exit", new StringContent(body, Encoding.UTF8, "application/json"));
         resp.EnsureSuccessStatusCode();
     }

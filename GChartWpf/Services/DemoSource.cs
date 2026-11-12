@@ -100,11 +100,16 @@ public class DemoSource : IDataSource
         PositionSymbol = "NIFTY 10 Nov 2026 CE 23500", EntryPrice = 99.40, TodayPnl = _hasPos ? 1840.5 : 0, TodayPoints = 28.3, TodayTrades = 1
     });
 
-    public Task<List<TradeRow>> GetTradesAsync() => Task.FromResult(new List<TradeRow>
+    public Task<List<TradeRow>> GetTradesAsync(string? date = "today") => Task.FromResult(new List<TradeRow>
     {
-        new() { TradeId = "T-0001", Side = "CE", Symbol = "NIFTY 23400 CE", EntryTime = "09:15:00.829", Entry = 135.0, ExitTime = "15:15:00.029", Exit = 161.5, NetPnl = 1722, Status = "CLOSED", BotMs = 0.38 },
-        new() { TradeId = "T-0002", Side = "PE", Symbol = "NIFTY 23600 PE", EntryTime = "09:15:00.120", Entry = 88.2, ExitTime = "15:15:00.029", Exit = 74.0, NetPnl = -923, Status = "CLOSED", BotMs = 0.25 },
-        new() { TradeId = "T-0003", Side = "CE", Symbol = "NIFTY 23500 CE", EntryTime = "09:15:01.050", Entry = 99.4, ExitTime = "—", Exit = 0, NetPnl = 0, Status = "OPEN", BotMs = 0.42 },
+        new() { TradeId = "T-0001", TradeDate = DateTime.Today.ToString("yyyy-MM-dd"), Side = "CE", Symbol = "NIFTY 23400 CE", EntryTime = "09:15:00.829", Entry = 135.0, ExitTime = "15:15:00.029", Exit = 161.5, NetPnl = 1722, Status = "CLOSED", BotMs = 0.38 },
+        new() { TradeId = "T-0002", TradeDate = DateTime.Today.ToString("yyyy-MM-dd"), Side = "PE", Symbol = "NIFTY 23600 PE", EntryTime = "09:15:00.120", Entry = 88.2, ExitTime = "15:15:00.029", Exit = 74.0, NetPnl = -923, Status = "CLOSED", BotMs = 0.25 },
+        new() { TradeId = "T-0003", TradeDate = DateTime.Today.ToString("yyyy-MM-dd"), Side = "CE", Symbol = "NIFTY 23500 CE", EntryTime = "09:15:01.050", Entry = 99.4, ExitTime = "—", Exit = 0, NetPnl = 0, Status = "OPEN", BotMs = 0.42 },
+    });
+
+    public Task<List<string>> GetTradeDatesAsync() => Task.FromResult(new List<string>
+    {
+        DateTime.Today.ToString("yyyy-MM-dd")
     });
 
     public Task<List<StockRow>> GetStocksAsync()
@@ -139,5 +144,7 @@ public class DemoSource : IDataSource
     public Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots) => Task.CompletedTask;
     public Task SaveIndexConfigAsync(int niftyLots, int bankNiftyLots, int sensexLots, bool niftyEnabled, bool bankNiftyEnabled, bool sensexEnabled) => Task.CompletedTask;
     public Task ExitPositionAsync(string? indexKey = null) { _hasPos = false; return Task.CompletedTask; }
+    public Task ExitIndicesAsync() { _hasPos = false; return Task.CompletedTask; }
+    public Task ExitStocksAsync() { _hasPos = false; return Task.CompletedTask; }
     public Task ArmNowAsync(string? indexKey = null) => Task.CompletedTask;
 }

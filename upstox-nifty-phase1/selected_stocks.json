@@ -1,5 +1,5 @@
 {
-  "top_n": 5,
+  "top_n": 3,
   "stocks": [
     {
       "symbol": "RELIANCE",
@@ -25,24 +25,6 @@
       "key": "NSE_EQ|INE090A01021",
       "lot_size": 700,
       "strike_step": 10.0,
-      "lots": 1,
-      "enabled": true
-    },
-    {
-      "symbol": "INFY",
-      "name": "Infosys Ltd.",
-      "key": "NSE_EQ|INE009A01021",
-      "lot_size": 400,
-      "strike_step": 20.0,
-      "lots": 3,
-      "enabled": true
-    },
-    {
-      "symbol": "TCS",
-      "name": "Tata Consultancy Services Ltd.",
-      "key": "NSE_EQ|INE467B01029",
-      "lot_size": 175,
-      "strike_step": 20.0,
       "lots": 1,
       "enabled": true
     }

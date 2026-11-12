@@ -55,12 +55,12 @@
         <Border Grid.Row="1" Background="{StaticResource Bar}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1">
             <DockPanel Margin="12,0">
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Style="{StaticResource ArmButton}" Content="{Binding ArmButtonText}"
-                            Command="{Binding ArmNowCommand}" Padding="14,6" Margin="0,0,10,0"
-                            ToolTip="Arm this index now to scan 8 ITM strikes and enter when 16-condition OI rules match"/>
-                    <Button Style="{StaticResource ExitButton}" Content="⛔  Exit All Positions"
-                            Command="{Binding ExitPositionCommand}" Padding="16,6"
-                            ToolTip="Instantly square off all open positions across Nifty, Bank Nifty, Sensex, and Stocks without confirmation"/>
+                    <Button Style="{StaticResource ExitButton}" Content="⛔  Exit Indices"
+                            Command="{Binding ExitIndicesCommand}" Padding="13,6" Margin="0,0,8,0"
+                            ToolTip="Instantly cut all open trades in Nifty 50, Bank Nifty, and Sensex without confirmation"/>
+                    <Button Style="{StaticResource ExitStocksButton}" Content="⛔  Exit Stocks"
+                            Command="{Binding ExitStocksCommand}" Padding="13,6"
+                            ToolTip="Instantly cut all open trades in Stock Options (Reliance, HDFC Bank, ICICI Bank, INFY, TCS) without confirmation"/>
                 </StackPanel>
 
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
@@ -261,13 +261,33 @@
             <Grid Visibility="{Binding IsJournalMode, Converter={StaticResource BoolVis}}" Background="{StaticResource Panel}">
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                 <Grid Grid.Row="0" Margin="12,8,12,8">
-                    <TextBlock Text="EXECUTED TRADES JOURNAL" FontWeight="Bold" Foreground="{StaticResource Teal}" VerticalAlignment="Center" FontSize="12.5"/>
-                    <Button Content="📥 Export CSV" HorizontalAlignment="Right" Command="{Binding ExportTradesCsvCommand}"
-                            Style="{StaticResource CsvButton}"/>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="EXECUTED TRADES JOURNAL" FontWeight="Bold" Foreground="{StaticResource Teal}" VerticalAlignment="Center" FontSize="12.5" Margin="0,0,14,0"/>
+                        <Border Background="{StaticResource Line}" CornerRadius="3" Padding="8,2" Margin="0,0,10,0">
+                            <TextBlock Text="{Binding JournalTitleText}" FontFamily="Consolas" FontWeight="Bold" Foreground="{StaticResource Teal}" FontSize="11.5"/>
+                        </Border>
+                        <Border Background="{StaticResource Line}" CornerRadius="3" Padding="8,2" Margin="0,0,10,0">
+                            <TextBlock Text="{Binding JournalTradesSummaryText}" FontFamily="Consolas" Foreground="White" FontSize="11.5"/>
+                        </Border>
+                        <Border Background="{StaticResource Line}" CornerRadius="3" Padding="8,2">
+                            <TextBlock Text="{Binding JournalTotalPnlText}" FontFamily="Consolas" FontWeight="Bold" Foreground="{Binding JournalTotalPnlBrush}" FontSize="11.5"/>
+                        </Border>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <TextBlock Text="View Date:" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11.5"/>
+                        <ComboBox ItemsSource="{Binding AvailableTradeDates}" SelectedItem="{Binding SelectedTradeDate}" 
+                                  Width="130" Height="26" VerticalContentAlignment="Center" Margin="0,0,8,0"
+                                  Background="#1A1A1A" Foreground="White" BorderBrush="{StaticResource Line}"/>
+                        <Button Content="📅 Today" Command="{Binding SetTodayJournalCommand}"
+                                Style="{StaticResource CsvButton}" Margin="0,0,8,0" Padding="8,4"/>
+                        <Button Content="📥 Export CSV" HorizontalAlignment="Right" Command="{Binding ExportTradesCsvCommand}"
+                                Style="{StaticResource CsvButton}"/>
+                    </StackPanel>
                 </Grid>
                 <DataGrid Grid.Row="1" ItemsSource="{Binding Trades}" IsReadOnly="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="ID" Width="1.1*" Binding="{Binding TradeId}" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Date" Width="0.9*" Binding="{Binding TradeDate}" ElementStyle="{StaticResource CenterCell}"/>
                         <DataGridTextColumn Header="Side" Width="0.7*" Binding="{Binding Side}" ElementStyle="{StaticResource CenterCell}"/>
                         <DataGridTextColumn Header="Symbol" Width="1.8*" Binding="{Binding Symbol}" ElementStyle="{StaticResource CellText}"/>
                         <DataGridTextColumn Header="Entry Time" Width="1*" Binding="{Binding EntryTime}" ElementStyle="{StaticResource CenterCell}"/>
@@ -344,8 +364,6 @@
                                     Padding="14,4" Margin="24,0,0,0" ToolTip="Click to toggle between Active and Paused today">
                                 <TextBlock Text="{Binding NiftyStatusText}" FontWeight="Bold" Foreground="{Binding NiftyStatusBrush}"/>
                             </Button>
-                            <Button Command="{Binding ArmNiftyCommand}" Style="{StaticResource ArmButton}"
-                                    Padding="14,4" Margin="10,0,0,0" Content="🎯  Arm Nifty" ToolTip="Arm Nifty 50 immediately"/>
                         </StackPanel>
                     </Border>
 
@@ -385,8 +403,6 @@
                                     Padding="14,4" Margin="24,0,0,0" ToolTip="Click to toggle between Active and Paused today">
                                 <TextBlock Text="{Binding BankNiftyStatusText}" FontWeight="Bold" Foreground="{Binding BankNiftyStatusBrush}"/>
                             </Button>
-                            <Button Command="{Binding ArmBankNiftyCommand}" Style="{StaticResource ArmButton}"
-                                    Padding="14,4" Margin="10,0,0,0" Content="🎯  Arm Bank Nifty" ToolTip="Arm Bank Nifty immediately"/>
                         </StackPanel>
                     </Border>
 
@@ -426,8 +442,6 @@
                                     Padding="14,4" Margin="24,0,0,0" ToolTip="Click to toggle between Active and Paused today">
                                 <TextBlock Text="{Binding SensexStatusText}" FontWeight="Bold" Foreground="{Binding SensexStatusBrush}"/>
                             </Button>
-                            <Button Command="{Binding ArmSensexCommand}" Style="{StaticResource ArmButton}"
-                                    Padding="14,4" Margin="10,0,0,0" Content="🎯  Arm Sensex" ToolTip="Arm Sensex immediately"/>
                         </StackPanel>
                     </Border>
 

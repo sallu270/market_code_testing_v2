@@ -88,6 +88,7 @@ public class StatusInfo
 public class TradeRow
 {
     public string TradeId { get; set; } = "";
+    public string TradeDate { get; set; } = "";
     public string Side { get; set; } = "";
     public string Symbol { get; set; } = "";
     public string EntryTime { get; set; } = "—";

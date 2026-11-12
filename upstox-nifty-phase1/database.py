@@ -507,17 +507,39 @@ class MarketDatabase:
             "status": "CLOSED",
         })
 
-    def get_strategy_trades(self, limit: int = 100) -> list[dict[str, Any]]:
+    def get_strategy_trades(self, limit: int = 100, trade_date: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if trade_date and trade_date.lower() != "all":
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM strategy_trades
+                    WHERE trade_date = ?
+                    ORDER BY entry_timestamp_ms DESC
+                    LIMIT ?
+                    """,
+                    (trade_date, limit),
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM strategy_trades
+                    ORDER BY entry_timestamp_ms DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_strategy_trade_dates(self) -> list[str]:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT * FROM strategy_trades
-                ORDER BY entry_timestamp_ms DESC
-                LIMIT ?
-                """,
-                (limit,),
+                SELECT DISTINCT trade_date FROM strategy_trades
+                WHERE trade_date IS NOT NULL AND trade_date != ''
+                ORDER BY trade_date DESC
+                """
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [r[0] for r in rows if r[0]]
 
     def insert_strategy_signal(self, sig: dict[str, Any]) -> None:
         with self._lock:

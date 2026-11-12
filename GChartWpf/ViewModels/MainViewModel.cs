@@ -26,10 +26,8 @@ public class MainViewModel : ObservableObject
         SetRankCommand = new RelayCommand(p => { RankBy = (string)p!; ApplyStockFilter(); });
         SetStrikeTotalCommand = new RelayCommand(p => StrikeTotal = int.Parse((string)p!));
         ExitPositionCommand = new RelayCommand(_ => ExitPosition());
-        ArmNowCommand = new RelayCommand(async _ => await ArmNowAsync(CurrentIndexKey));
-        ArmNiftyCommand = new RelayCommand(async _ => await ArmNowAsync(AppSettings.NiftyKey));
-        ArmBankNiftyCommand = new RelayCommand(async _ => await ArmNowAsync(AppSettings.BankNiftyKey));
-        ArmSensexCommand = new RelayCommand(async _ => await ArmNowAsync(AppSettings.SensexKey));
+        ExitIndicesCommand = new RelayCommand(_ => ExitIndices());
+        ExitStocksCommand = new RelayCommand(_ => ExitStocks());
         RefreshStocksCommand = new RelayCommand(async _ => await LoadStocksAsync());
         SaveSelectionsCommand = new RelayCommand(async _ => await SaveSelectionsAsync());
         SaveIndexLotsCommand = new RelayCommand(async _ => await SaveIndexConfigAsync());
@@ -39,7 +37,7 @@ public class MainViewModel : ObservableObject
         SetNiftyLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) NiftyLots = v; });
         SetBankNiftyLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) BankNiftyLots = v; });
         SetSensexLotsCommand = new RelayCommand(p => { if (int.TryParse(p?.ToString(), out var v)) SensexLots = v; });
-        SetSettingsTopNCommand = new RelayCommand(async p => { if (int.TryParse(p?.ToString(), out var n)) await LoadTopStocksConfigAsync(n); });
+        SetSettingsTopNCommand = new RelayCommand(async p => { if (int.TryParse(p?.ToString(), out var n)) { await LoadTopStocksConfigAsync(n); await SaveTopStocksConfigAsync(); } });
         ToggleStockEnabledCommand = new RelayCommand(p => { if (p is StockConfigRow r) r.Enabled = !r.Enabled; });
         SaveTopStocksConfigCommand = new RelayCommand(async _ => await SaveTopStocksConfigAsync());
         ViewStockOptionsCommand = new RelayCommand(p =>
@@ -58,6 +56,7 @@ public class MainViewModel : ObservableObject
             }
         });
         ExportTradesCsvCommand = new RelayCommand(_ => ExportTradesCsv());
+        SetTodayJournalCommand = new RelayCommand(_ => { SelectedTradeDate = "Today"; });
 
         _timer.Tick += async (_, _) => { Clock = DateTime.Now.ToString("HH:mm:ss"); await RefreshAsync(); };
         Clock = DateTime.Now.ToString("HH:mm:ss");
@@ -76,10 +75,8 @@ public class MainViewModel : ObservableObject
     public ICommand SetRankCommand { get; }
     public ICommand SetStrikeTotalCommand { get; }
     public ICommand ExitPositionCommand { get; }
-    public ICommand ArmNowCommand { get; }
-    public ICommand ArmNiftyCommand { get; }
-    public ICommand ArmBankNiftyCommand { get; }
-    public ICommand ArmSensexCommand { get; }
+    public ICommand ExitIndicesCommand { get; }
+    public ICommand ExitStocksCommand { get; }
     public ICommand RefreshStocksCommand { get; }
     public ICommand SaveSelectionsCommand { get; }
     public ICommand SaveIndexLotsCommand { get; }
@@ -94,6 +91,7 @@ public class MainViewModel : ObservableObject
     public ICommand SaveTopStocksConfigCommand { get; }
     public ICommand ViewStockOptionsCommand { get; }
     public ICommand ExportTradesCsvCommand { get; }
+    public ICommand SetTodayJournalCommand { get; }
 
     // ---------------- navigation ----------------
     string _mode = "Nifty50";
@@ -115,7 +113,6 @@ public class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(CurrentIndexKey));
             OnPropertyChanged(nameof(CurrentIndexName));
             OnPropertyChanged(nameof(ChartTitle));
-            OnPropertyChanged(nameof(ArmButtonText));
             if (value == "Stocks" && Stocks.Count == 0) _ = LoadStocksAsync();
             Candles = null;
             _ = RefreshAsync();
@@ -140,6 +137,7 @@ public class MainViewModel : ObservableObject
     {
         "BankNifty" => AppSettings.BankNiftyKey,
         "Sensex" => AppSettings.SensexKey,
+        "Stocks" => "STOCKS",
         var m when m.StartsWith("StockOption:") => _selectedStockKey,
         _ => AppSettings.NiftyKey
     };
@@ -148,12 +146,12 @@ public class MainViewModel : ObservableObject
     {
         "BankNifty" => AppSettings.BankNiftyName,
         "Sensex" => AppSettings.SensexName,
+        "Stocks" => "Stocks",
         var m when m.StartsWith("StockOption:") => _selectedStockSymbol,
         _ => AppSettings.NiftyName
     };
 
     public string ChartTitle => CurrentIndexName;
-    public string ArmButtonText => $"🎯  Arm {CurrentIndexName}";
 
     // ---------------- header strip ----------------
     string _clock = "", _spotText = "NC=—", _state = "SETUP", _expiry = "", _posText = "FLAT (NO POSITION)", _pnlText = "₹0.00", _pts = "(0.00 pts)", _status = "Starting…", _connText = "Connecting", _strategySummary = "WAIT: Pre-09:18 Data Collection";
@@ -215,6 +213,33 @@ public class MainViewModel : ObservableObject
 
     // ---------------- journal ----------------
     public ObservableCollection<TradeRow> Trades { get; } = new();
+    public ObservableCollection<string> AvailableTradeDates { get; } = new();
+
+    private string _selectedTradeDate = "Today";
+    public string SelectedTradeDate
+    {
+        get => _selectedTradeDate;
+        set
+        {
+            if (Set(ref _selectedTradeDate, value))
+            {
+                OnPropertyChanged(nameof(JournalTitleText));
+                _lastTrades = DateTime.MinValue;
+                _ = LoadTradesAsync();
+            }
+        }
+    }
+
+    private double _journalTotalPnl;
+    public double JournalTotalPnl { get => _journalTotalPnl; private set => Set(ref _journalTotalPnl, value); }
+
+    public string JournalTitleText => SelectedTradeDate == "Today"
+        ? $"LIVE TODAY ({DateTime.Today:yyyy-MM-dd})"
+        : $"TRADES ({SelectedTradeDate})";
+
+    public string JournalTradesSummaryText => $"{Trades.Count} Trade{(Trades.Count == 1 ? "" : "s")}";
+    public string JournalTotalPnlText => $"Net P&L: {(JournalTotalPnl >= 0 ? "+" : "")}₹{JournalTotalPnl:N2}";
+    public Brush JournalTotalPnlBrush => JournalTotalPnl >= 0 ? Pal.Green : Pal.Red;
 
     // ===================== refresh loop =====================
     async Task RefreshAsync()
@@ -488,8 +513,39 @@ public class MainViewModel : ObservableObject
     async Task LoadTradesAsync()
     {
         _lastTrades = DateTime.Now;
-        var t = await _src.GetTradesAsync();
-        Trades.Clear(); foreach (var x in t) Trades.Add(x);
+        var dateParam = SelectedTradeDate.Equals("Today", StringComparison.OrdinalIgnoreCase) ? "today" : SelectedTradeDate;
+        var t = await _src.GetTradesAsync(dateParam);
+        Trades.Clear();
+        double sumPnl = 0;
+        foreach (var x in t)
+        {
+            Trades.Add(x);
+            sumPnl += x.NetPnl;
+        }
+        JournalTotalPnl = sumPnl;
+        OnPropertyChanged(nameof(JournalTradesSummaryText));
+        OnPropertyChanged(nameof(JournalTotalPnlText));
+        OnPropertyChanged(nameof(JournalTotalPnlBrush));
+
+        if (AvailableTradeDates.Count <= 1)
+        {
+            try
+            {
+                var dates = await _src.GetTradeDatesAsync();
+                var cur = SelectedTradeDate;
+                AvailableTradeDates.Clear();
+                AvailableTradeDates.Add("Today");
+                foreach (var d in dates)
+                {
+                    if (!AvailableTradeDates.Contains(d))
+                        AvailableTradeDates.Add(d);
+                }
+                if (AvailableTradeDates.Contains(cur))
+                    _selectedTradeDate = cur;
+                OnPropertyChanged(nameof(SelectedTradeDate));
+            }
+            catch { }
+        }
     }
 
     // ===================== action buttons =====================
@@ -507,25 +563,31 @@ public class MainViewModel : ObservableObject
         }
     }
 
-    async Task ArmNowAsync(string? indexKey)
+    async void ExitIndices()
     {
-        var key = string.IsNullOrEmpty(indexKey) ? CurrentIndexKey : indexKey;
-        var name = key switch
-        {
-            var k when k == AppSettings.BankNiftyKey => "BANK NIFTY",
-            var k when k == AppSettings.SensexKey => "SENSEX",
-            _ => "NIFTY 50"
-        };
-
         try
         {
-            await _src.ArmNowAsync(key);
-            StatusMessage = $"🎯 {name} ARMED immediately for trade entry.";
+            await _src.ExitIndicesAsync();
+            StatusMessage = "⚡ Immediate Square-off: All index trades (Nifty, Bank Nifty, Sensex) exited.";
             await RefreshAsync();
         }
         catch (Exception ex)
         {
-            StatusMessage = $"Arm failed: {ex.Message}";
+            StatusMessage = "Exit Indices failed: " + ex.Message;
+        }
+    }
+
+    async void ExitStocks()
+    {
+        try
+        {
+            await _src.ExitStocksAsync();
+            StatusMessage = "⚡ Immediate Square-off: All stock option trades exited.";
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "Exit Stocks failed: " + ex.Message;
         }
     }
 
@@ -539,9 +601,13 @@ public class MainViewModel : ObservableObject
                 return;
             }
 
+            var fileDateTag = SelectedTradeDate.Equals("Today", StringComparison.OrdinalIgnoreCase)
+                ? DateTime.Now.ToString("yyyy-MM-dd")
+                : SelectedTradeDate.Replace(' ', '_');
+
             var sfd = new Microsoft.Win32.SaveFileDialog
             {
-                FileName = $"trades_journal_{DateTime.Now:yyyy-MM-dd}.csv",
+                FileName = $"trades_journal_{fileDateTag}.csv",
                 DefaultExt = ".csv",
                 Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
             };
@@ -549,10 +615,10 @@ public class MainViewModel : ObservableObject
             if (sfd.ShowDialog() != true) return;
 
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("Trade ID,Side,Symbol,Entry Time,Entry Price,Exit Time,Exit Price,Net P&L (INR),Bot Speed,Status");
+            sb.AppendLine("Trade ID,Date,Side,Symbol,Entry Time,Entry Price,Exit Time,Exit Price,Net P&L (INR),Bot Speed,Status");
             foreach (var t in Trades)
             {
-                sb.AppendLine($"\"{t.TradeId}\",\"{t.Side}\",\"{t.Symbol}\",\"{t.EntryTime}\",{t.Entry:F2},\"{t.ExitTime}\",{t.Exit:F2},{t.NetPnl:F2},\"{t.BotMsText}\",\"{t.Status}\"");
+                sb.AppendLine($"\"{t.TradeId}\",\"{t.TradeDate}\",\"{t.Side}\",\"{t.Symbol}\",\"{t.EntryTime}\",{t.Entry:F2},\"{t.ExitTime}\",{t.Exit:F2},{t.NetPnl:F2},\"{t.BotMsText}\",\"{t.Status}\"");
             }
 
             System.IO.File.WriteAllText(sfd.FileName, sb.ToString(), System.Text.Encoding.UTF8);

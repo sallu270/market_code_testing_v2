@@ -64,6 +64,15 @@
         <Setter Property="BorderBrush" Value="#FF4D4D"/>
         <Setter Property="Foreground" Value="White"/>
         <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+
+    <Style x:Key="ExitStocksButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="#C2410C"/>
+        <Setter Property="BorderBrush" Value="#FB923C"/>
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Cursor" Value="Hand"/>
     </Style>
 
     <Style x:Key="ArmButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">

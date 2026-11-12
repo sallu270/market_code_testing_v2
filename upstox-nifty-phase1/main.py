@@ -89,6 +89,9 @@ def handle_status(status: dict[str, Any]) -> None:
     latest_status = status
     LOGGER.info("%s: %s", status["state"], status["message"])
     publish("status", status)
+    if not status.get("connected") and hasattr(strategy_engine, "add_alert"):
+        alert = strategy_engine.add_alert("FEED_LOST", f"Feed disconnected: {status.get('message', 'WebSocket offline')}", level="ERROR")
+        publish("alert", alert)
 
 def handle_candle(candle: dict[str, Any]) -> None:
     publish("candle", candle)
@@ -210,12 +213,16 @@ def strategy_schedule_worker() -> None:
                     if hasattr(strategy_engine, "lock_all_stocks"):
                         strategy_engine.lock_all_stocks()
 
-                # Snapshot at 09:15:00 (No trading, data collection only)
+                # Snapshot at 09:15:00: Market Open -> Arm indices for First Positive Tick
                 elif "09:15:00" <= now_time < "09:18:00":
                     if hasattr(strategy_engine, "snapshot_all_indices"):
                         strategy_engine.snapshot_all_indices()
                     elif not getattr(strategy_engine, "snapshot_taken", False):
                         strategy_engine.take_snapshot()
+                    if hasattr(strategy_engine, "arm_all_indices"):
+                        strategy_engine.arm_all_indices()
+                    elif strategy_engine.state in ("LOCKED", "DATA_COLLECTION", "PLANNING", "SETUP"):
+                        strategy_engine.state = "ARMED"
                     if hasattr(strategy_engine, "snapshot_all_stocks"):
                         strategy_engine.snapshot_all_stocks()
 
@@ -238,7 +245,30 @@ def strategy_schedule_worker() -> None:
                     if now_time < "14:45:00" and hasattr(strategy_engine, "evaluate_all_active_underlyings"):
                         strategy_engine.evaluate_all_active_underlyings()
 
-                # EOD square-off at 15:15:00 by clock
+                # Phase 3 Alerts: 14:45 Cutoff alert
+                if "14:45:00" <= now_time < "14:46:00" and "CUTOFF_1445" not in getattr(strategy_engine, "_alert_flags", set()):
+                    strategy_engine._alert_flags.add("CUTOFF_1445")
+                    alert = strategy_engine.add_alert("NO_ENTRY_AFTER_1445", "14:45 Cutoff: No new trade entries allowed for today.", level="WARNING")
+                    publish("alert", alert)
+
+                # Phase 3 Alerts: 15:10 Warning alert (5 minutes to square-off)
+                if "15:10:00" <= now_time < "15:11:00" and "WARNING_1510" not in getattr(strategy_engine, "_alert_flags", set()):
+                    strategy_engine._alert_flags.add("WARNING_1510")
+                    alert = strategy_engine.add_alert("WARNING_1510", "15:10 Warning: 5 minutes until mandatory 15:15:00 square-off.", level="WARNING")
+                    publish("alert", alert)
+
+                # Phase 3 Alerts: Stale data check (> 60 seconds without ticks during market hours)
+                if "09:15:00" <= now_time <= "15:30:00" and hasattr(strategy_engine, "last_tick_time"):
+                    if time.time() - strategy_engine.last_tick_time > 60:
+                        if "STALE_DATA" not in getattr(strategy_engine, "_alert_flags", set()):
+                            strategy_engine._alert_flags.add("STALE_DATA")
+                            alert = strategy_engine.add_alert("STALE_DATA", "Stale data: No market ticks received for >60s.", level="WARNING")
+                            publish("alert", alert)
+                    else:
+                        if "STALE_DATA" in getattr(strategy_engine, "_alert_flags", set()):
+                            strategy_engine._alert_flags.discard("STALE_DATA")
+
+                # EOD square-off at 15:15:00 by clock (strictly at live bid)
                 if now_time >= "15:15:00":
                     if hasattr(strategy_engine, "squareoff_all_indices_1515"):
                         strategy_engine.squareoff_all_indices_1515()
@@ -246,6 +276,15 @@ def strategy_schedule_worker() -> None:
                         strategy_engine.manual_exit(reason="SQUAREOFF_1515")
                     if hasattr(strategy_engine, "squareoff_all_stocks_1515"):
                         strategy_engine.squareoff_all_stocks_1515()
+
+                    # 3:15 PM EOD Watchlist Build (Dr. Vijay Bhilwade Specification)
+                    if "15:15:00" <= now_time <= "15:20:00" and not getattr(strategy_engine, "_watchlist_built_today", False):
+                        try:
+                            stock_screener.build_tomorrow_watchlist()
+                            strategy_engine._watchlist_built_today = True
+                            LOGGER.info("15:15:00 EOD Tomorrow Watchlist automatically generated.")
+                        except Exception as e:
+                            LOGGER.warning("Could not auto-generate watchlist: %s", e)
 
             # Periodic SSE status broadcast (every 1.5 seconds)
             cur_ms = int(time.time() * 1000)
@@ -504,20 +543,39 @@ def api_strategy_config() -> Response:
 
 @app.route("/api/strategy/exit", methods=["GET", "POST"])
 def api_strategy_exit() -> Response:
-    """Manual exit trigger for open position (Rule R21). If key is None or 'ALL', exits all open positions."""
+    """Manual exit trigger for open position.
+    Supports:
+      - scope="INDICES" or key="INDICES": exits all 3 indices (Nifty, Bank Nifty, Sensex).
+      - scope="STOCKS" or key="STOCKS": exits all stock options.
+      - scope="ALL" or None: exits all positions.
+      - or key for single underlying index/stock.
+    """
     body = request.get_json(silent=True) or {}
+    scope = (body.get("scope") or request.args.get("scope") or "").strip().upper()
     key = body.get("underlying_key") or body.get("index") or request.args.get("index") or None
+
+    if scope == "INDICES" or (key and str(key).strip().upper() in ("INDICES", "INDEX")):
+        closed = strategy_engine.manual_exit_indices(reason="MANUAL")
+        publish("strategy_update", strategy_engine.get_status())
+        return jsonify({"success": True, "scope": "INDICES", "closed": closed})
+
+    if scope == "STOCKS" or (key and str(key).strip().upper() in ("STOCKS", "STOCK")):
+        closed = strategy_engine.manual_exit_stocks(reason="MANUAL")
+        publish("strategy_update", strategy_engine.get_status())
+        return jsonify({"success": True, "scope": "STOCKS", "closed": closed})
+
     if key and str(key).strip().upper() in ("ALL", "", "NONE"):
         key = None
+
     pos = strategy_engine.manual_exit(reason="MANUAL", underlying_key=key)
     publish("strategy_update", strategy_engine.get_status())
     return jsonify({"success": True, "position": pos})
 
 @app.route("/api/strategy/arm-now", methods=["GET", "POST"])
 def api_strategy_arm_now() -> Response:
-    """Manual trigger: forces immediate planning, locking, snapshot, and arming for an index."""
+    """Manual trigger: forces immediate planning, locking, snapshot, and arming for an index or stock."""
     body = request.get_json(silent=True) or {}
-    key = body.get("underlying_key") or body.get("index") or request.args.get("index") or None
+    key = body.get("underlying_key") or body.get("index") or body.get("symbol") or request.args.get("index") or request.args.get("symbol") or None
     status = strategy_engine.force_arm_now(underlying_key=key)
     publish("strategy_update", status)
     return jsonify({"success": True, "status": status})
@@ -531,15 +589,44 @@ def api_strategy_reset() -> Response:
 
 @app.get("/api/strategy/trades")
 def api_strategy_trades() -> Response:
-    limit = request.args.get("limit", default=100, type=int)
-    trades = database.get_strategy_trades(limit=limit)
-    return jsonify({"trades": trades})
+    limit = request.args.get("limit", default=200, type=int)
+    date_param = request.args.get("date", default=None, type=str)
+
+    # Live today by default: only show trades from today unless specific date requested
+    if not date_param or date_param.strip().lower() == "today":
+        target_date = datetime.now(IST).strftime("%Y-%m-%d")
+    elif date_param.strip().lower() == "all":
+        target_date = None
+    else:
+        target_date = date_param.strip()
+
+    trades = database.get_strategy_trades(limit=limit, trade_date=target_date)
+    return jsonify({
+        "trades": trades,
+        "date": target_date or "all",
+        "today": datetime.now(IST).strftime("%Y-%m-%d"),
+        "count": len(trades),
+    })
+
+@app.get("/api/strategy/trade-dates")
+def api_strategy_trade_dates() -> Response:
+    dates = database.get_strategy_trade_dates()
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    if today_str not in dates:
+        dates.insert(0, today_str)
+    return jsonify({"dates": dates, "today": today_str})
 
 @app.get("/api/strategy/signals")
 def api_strategy_signals() -> Response:
     limit = request.args.get("limit", default=100, type=int)
     signals = database.get_strategy_signals(limit=limit)
     return jsonify({"signals": signals})
+
+@app.get("/api/strategy/alerts")
+def api_strategy_alerts() -> Response:
+    limit = request.args.get("limit", default=50, type=int)
+    alerts = strategy_engine.get_alerts(limit=limit) if hasattr(strategy_engine, "get_alerts") else []
+    return jsonify({"alerts": alerts})
 
 # -------------------------------------------------------------------------
 # Release 2: NIFTY 50 Stock Screener & Selection Endpoints
@@ -578,6 +665,21 @@ def api_stocks_select() -> Response:
         strategy_engine.load_stock_configs()
     return jsonify({"success": True, "selections": selections})
 
+@app.get("/api/stocks/watchlist")
+def api_stocks_watchlist_get() -> Response:
+    """Get Tomorrow Watchlist (3:15 PM EOD scoring: Top 5 Bullish, Top 5 Bearish)."""
+    wl = stock_screener.get_tomorrow_watchlist()
+    return jsonify(wl)
+
+@app.post("/api/stocks/watchlist/build")
+def api_stocks_watchlist_build() -> Response:
+    """Trigger manual re-calculation of Tomorrow Watchlist."""
+    wl = stock_screener.build_tomorrow_watchlist()
+    if hasattr(strategy_engine, "load_stock_configs"):
+        strategy_engine.load_stock_configs()
+    publish("strategy_update", strategy_engine.get_status())
+    return jsonify({"success": True, "watchlist": wl})
+
 @app.get("/api/stocks/plan/<symbol>")
 def api_stocks_plan(symbol: str) -> Response:
     """Fetch and plan 8 ITM Option contracts for a constituent NIFTY stock."""
@@ -593,7 +695,15 @@ def api_strategy_rehearsal() -> Response:
 
 @app.get("/api/strategy/export")
 def api_strategy_export() -> Response:
-    trades = database.get_strategy_trades(limit=1000)
+    date_param = request.args.get("date", default=None, type=str)
+    if not date_param or date_param.strip().lower() == "today":
+        target_date = datetime.now(IST).strftime("%Y-%m-%d")
+    elif date_param.strip().lower() == "all":
+        target_date = None
+    else:
+        target_date = date_param.strip()
+
+    trades = database.get_strategy_trades(limit=2000, trade_date=target_date)
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
