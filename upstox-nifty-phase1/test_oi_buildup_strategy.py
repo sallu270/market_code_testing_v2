@@ -21,7 +21,7 @@ if str(BASE_DIR) not in sys.path:
 
 import unittest
 from unittest.mock import MagicMock
-from strategy_engine import DECISION_TABLE, GapEntryStrategyEngine, NIFTY_KEY
+from strategy_engine import DECISION_TABLE, GapEntryStrategyEngine, NIFTY_KEY, BANKNIFTY_KEY, SENSEX_KEY
 
 
 class TestOIBuildupStrategy(unittest.TestCase):
@@ -349,6 +349,116 @@ class TestOIBuildupStrategy(unittest.TestCase):
         self.assertIsNone(rel_st["current_position"])
         self.assertEqual(trade["status"], "CLOSED")
         self.assertEqual(trade["exit_reason"], "SQUAREOFF_1515")
+
+    def test_multi_index_independent_trades(self):
+        """Acceptance test: NIFTY, BANK NIFTY, and SENSEX all plan, lock, and trade independently (1 trade per index)."""
+        from strategy_engine import BANKNIFTY_KEY, SENSEX_KEY
+
+        # Setup mock 8 contracts for BANK NIFTY
+        bn_keys = [f"BN_CE_{i}" for i in range(4)] + [f"BN_PE_{i}" for i in range(4)]
+        self.engine.index_underlyings[BANKNIFTY_KEY]["planned_keys"] = list(bn_keys)
+        self.engine.index_underlyings[BANKNIFTY_KEY]["spot_price"] = 61200.0
+
+        for i in range(4):
+            k = f"BN_CE_{i}"
+            stk = 61200 - (i * 100)
+            self.engine.contracts_by_key[k] = {
+                "instrument_key": k, "trading_symbol": f"BANKNIFTY {stk} CE", "strike_price": stk,
+                "instrument_type": "CE", "lot_size": 15, "underlying_key": BANKNIFTY_KEY
+            }
+            self.engine.hot_cache[k] = {
+                "instrument_key": k, "trading_symbol": f"BANKNIFTY {stk} CE", "strike": stk,
+                "side": "CE", "ltp": 200.0, "oi": 50000.0, "bid_price": 199.0, "ask_price": 200.0,
+                "underlying_key": BANKNIFTY_KEY
+            }
+
+        for i in range(4):
+            k = f"BN_PE_{i}"
+            stk = 61300 + (i * 100)
+            self.engine.contracts_by_key[k] = {
+                "instrument_key": k, "trading_symbol": f"BANKNIFTY {stk} PE", "strike_price": stk,
+                "instrument_type": "PE", "lot_size": 15, "underlying_key": BANKNIFTY_KEY
+            }
+            self.engine.hot_cache[k] = {
+                "instrument_key": k, "trading_symbol": f"BANKNIFTY {stk} PE", "strike": stk,
+                "side": "PE", "ltp": 200.0, "oi": 50000.0, "bid_price": 199.0, "ask_price": 200.0,
+                "underlying_key": BANKNIFTY_KEY
+            }
+
+        # Lock and snapshot Bank Nifty
+        self.engine.lock_contracts(underlying_key=BANKNIFTY_KEY)
+        self.assertEqual(len(self.engine.index_underlyings[BANKNIFTY_KEY]["locked_keys"]), 8)
+        self.engine.take_snapshot(underlying_key=BANKNIFTY_KEY)
+        self.assertTrue(self.engine.index_underlyings[BANKNIFTY_KEY]["snapshot_taken"])
+
+        # Simulate NIFTY having already traded today
+        self.engine.index_underlyings[NIFTY_KEY]["today_trades_count"] = 1
+        self.engine.today_trades_count = 1
+
+        # Simulate Bank Nifty price & OI move: CE LB + PE SB -> Rule 2 CE Buy ⭐⭐
+        for k in bn_keys:
+            if "BN_CE_" in k:
+                self.engine.hot_cache[k]["ltp"] = 220.0   # +10% UP
+                self.engine.hot_cache[k]["oi"] = 60000.0   # +20% UP -> LB
+                self.engine.hot_cache[k]["ask_price"] = 220.0
+                self.engine.hot_cache[k]["bid_price"] = 219.5
+            else:
+                self.engine.hot_cache[k]["ltp"] = 180.0   # -10% DOWN
+                self.engine.hot_cache[k]["oi"] = 60000.0   # +20% UP -> SB
+                self.engine.hot_cache[k]["ask_price"] = 180.0
+                self.engine.hot_cache[k]["bid_price"] = 179.5
+
+        # Evaluate Bank Nifty: Nifty having traded does NOT block Bank Nifty!
+        self.engine.entry_start_time = "00:00:00"
+        self.engine.entry_end_time = "23:59:59"
+        self.engine.re_eval_min_interval_sec = 0.0
+
+        trade = self.engine.evaluate_oi_buildup(underlying_key=BANKNIFTY_KEY, force=True)
+        self.assertIsNotNone(trade)
+        self.assertEqual(trade["side"], "BUY_CE")
+        self.assertEqual(trade["rule_number"], 2)
+        self.assertEqual(trade["underlying_key"], BANKNIFTY_KEY)
+        self.assertEqual(self.engine.index_underlyings[BANKNIFTY_KEY]["today_trades_count"], 1)
+        self.assertEqual(self.engine.index_underlyings[BANKNIFTY_KEY]["state"], "HOLDING")
+
+        # Second trade attempt on Bank Nifty is blocked by "1 trade at a time per index"
+        trade2 = self.engine.evaluate_oi_buildup(underlying_key=BANKNIFTY_KEY, force=True)
+        self.assertIsNone(trade2)
+
+        # 15:15:00 Clock Square-off exits Bank Nifty position
+        self.engine.squareoff_all_indices_1515()
+        self.assertEqual(self.engine.index_underlyings[BANKNIFTY_KEY]["state"], "CLOSED")
+        self.assertIsNone(self.engine.index_underlyings[BANKNIFTY_KEY]["current_position"])
+        self.assertEqual(trade["status"], "CLOSED")
+        self.assertEqual(trade["exit_reason"], "SQUAREOFF_1515")
+
+    def test_force_arm_now_single_index(self):
+        """Test Arm Now button isolation: arming Bank Nifty resets only Bank Nifty."""
+        # Setup initial completed trades on Nifty and Bank Nifty
+        self.engine.index_underlyings[NIFTY_KEY]["today_trades_count"] = 1
+        self.engine.index_underlyings[NIFTY_KEY]["state"] = "CLOSED"
+        self.engine.index_underlyings[BANKNIFTY_KEY]["today_trades_count"] = 1
+        self.engine.index_underlyings[BANKNIFTY_KEY]["state"] = "CLOSED"
+        self.engine.index_underlyings[SENSEX_KEY]["today_trades_count"] = 0
+        self.engine.index_underlyings[SENSEX_KEY]["state"] = "SETUP"
+
+        # Mock spot prices
+        self.engine.index_underlyings[BANKNIFTY_KEY]["spot_price"] = 50000.0
+        self.engine.contracts_by_underlying[BANKNIFTY_KEY] = []
+
+        # Click Arm Now on Bank Nifty only
+        res = self.engine.force_arm_now(BANKNIFTY_KEY)
+        self.assertIsNotNone(res)
+
+        # Bank Nifty state is reset to ARMED and trades count to 0
+        self.assertEqual(self.engine.index_underlyings[BANKNIFTY_KEY]["state"], "ARMED")
+        self.assertEqual(self.engine.index_underlyings[BANKNIFTY_KEY]["today_trades_count"], 0)
+
+        # NIFTY and SENSEX were NOT changed!
+        self.assertEqual(self.engine.index_underlyings[NIFTY_KEY]["state"], "CLOSED")
+        self.assertEqual(self.engine.index_underlyings[NIFTY_KEY]["today_trades_count"], 1)
+        self.assertEqual(self.engine.index_underlyings[SENSEX_KEY]["state"], "SETUP")
+        self.assertEqual(self.engine.index_underlyings[SENSEX_KEY]["today_trades_count"], 0)
 
 
 if __name__ == "__main__":

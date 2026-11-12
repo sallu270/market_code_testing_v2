@@ -14,5 +14,6 @@ public interface IDataSource
     Task SaveTopStocksConfigAsync(int topN, List<StockConfigRow> stocks);
     Task SaveIndexLotsAsync(int niftyLots, int bankNiftyLots, int sensexLots);
     Task SaveIndexConfigAsync(int niftyLots, int bankNiftyLots, int sensexLots, bool niftyEnabled, bool bankNiftyEnabled, bool sensexEnabled);
-    Task ExitPositionAsync();
+    Task ExitPositionAsync(string? indexKey = null);
+    Task ArmNowAsync(string? indexKey = null);
 }

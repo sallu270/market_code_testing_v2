@@ -18,10 +18,18 @@ from stock_screener import StockScreener, NIFTY_50_STOCKS
 LOGGER = logging.getLogger("strategy_engine")
 IST = ZoneInfo("Asia/Kolkata")
 
-# NIFTY 50 Constant
+# Index Constants
 NIFTY_KEY = "NSE_INDEX|Nifty 50"
+BANKNIFTY_KEY = "NSE_INDEX|Nifty Bank"
+SENSEX_KEY = "BSE_INDEX|SENSEX"
 NIFTY_STEP = 50.0
 DEFAULT_LOT_SIZE = 65
+
+INDEX_CONFIG: dict[str, dict[str, Any]] = {
+    NIFTY_KEY: {"name": "NIFTY 50", "step": 50.0, "lot_size": 65, "symbol_prefix": "NIFTY"},
+    BANKNIFTY_KEY: {"name": "BANK NIFTY", "step": 100.0, "lot_size": 15, "symbol_prefix": "BANKNIFTY"},
+    SENSEX_KEY: {"name": "SENSEX", "step": 100.0, "lot_size": 10, "symbol_prefix": "SENSEX"},
+}
 
 # =========================================================================
 # THE 16 CONDITIONS DECISION TABLE (Section 4)
@@ -198,10 +206,44 @@ class GapEntryStrategyEngine:
 
         # Active Trade Position & Counters
         self.current_position: dict[str, Any] | None = None
-        self.current_positions: dict[str, dict[str, Any] | None] = {NIFTY_KEY: None}
+        self.current_positions: dict[str, dict[str, Any] | None] = {NIFTY_KEY: None, BANKNIFTY_KEY: None, SENSEX_KEY: None}
         self.last_decision: dict[str, Any] | None = None
         self._trade_counter: int = 1
         self._eod_timer: threading.Timer | None = None
+
+        # Multi-Index Underlyings (NIFTY 50, BANK NIFTY, SENSEX)
+        self.index_underlyings: dict[str, dict[str, Any]] = {}
+        for ukey, cfg in INDEX_CONFIG.items():
+            self.index_underlyings[ukey] = {
+                "key": ukey,
+                "name": cfg["name"],
+                "step": cfg["step"],
+                "lot_size": self.index_lot_sizes.get(ukey, cfg["lot_size"]),
+                "symbol_prefix": cfg["symbol_prefix"],
+                "lots": self.index_lots.get(ukey, 1),
+                "enabled": self.index_enabled.get(ukey, True),
+                "spot_price": None,
+                "state": "SETUP",
+                "planned_keys": [],
+                "locked_keys": [],
+                "snapshot": {},
+                "snapshot_taken": False,
+                "last_evaluation": {
+                    "decision": "WAIT",
+                    "reason": f"Before 09:18:00 evaluation window for {cfg['name']}",
+                    "delta_ce": 0.0,
+                    "delta_pe": 0.0,
+                    "ce_type": None,
+                    "pe_type": None,
+                    "rule": None,
+                    "stars": "",
+                    "size": "",
+                    "summary_line": f"{cfg['name']} WAIT: Pre-09:18",
+                },
+                "current_position": None,
+                "_last_eval_time": 0.0,
+                "today_trades_count": 0,
+            }
 
         # Stock Options Engines (Top N stocks from selected_stocks.json)
         self.stock_underlyings: dict[str, dict[str, Any]] = {}
@@ -210,8 +252,24 @@ class GapEntryStrategyEngine:
         self._init_csv()
         self._load_index_lots()
         self.load_stock_configs()
+        self._seed_index_spots_from_db()
         self._resume_open_position()
         self._schedule_eod_squareoff()
+
+    def _seed_index_spots_from_db(self) -> None:
+        if not hasattr(self, "database") or not self.database:
+            return
+        for ukey, idx_st in self.index_underlyings.items():
+            if idx_st.get("spot_price") is None:
+                try:
+                    ticks = self.database.latest_ticks(instrument_key=ukey, limit=1)
+                    if ticks and float(ticks[0].get("ltp") or 0.0) > 0:
+                        idx_st["spot_price"] = float(ticks[0]["ltp"])
+                        if ukey == NIFTY_KEY and self.spot_price is None:
+                            self.spot_price = idx_st["spot_price"]
+                        LOGGER.info("Seeded spot price for %s from DB: %.2f", ukey, idx_st["spot_price"])
+                except Exception as exc:
+                    LOGGER.debug("Could not seed spot for %s: %s", ukey, exc)
 
     def _load_index_lots(self) -> None:
         if hasattr(self, "lots_file") and self.lots_file.exists():
@@ -237,6 +295,12 @@ class GapEntryStrategyEngine:
                             self.lots_scalp = max(1, int(data["lots_scalp"]))
                         if NIFTY_KEY in self.index_lots:
                             self.lots = self.index_lots[NIFTY_KEY]
+                        if hasattr(self, "index_underlyings"):
+                            for ukey, idx_st in self.index_underlyings.items():
+                                if ukey in self.index_lots:
+                                    idx_st["lots"] = self.index_lots[ukey]
+                                if ukey in self.index_enabled:
+                                    idx_st["enabled"] = self.index_enabled[ukey]
                 LOGGER.info("Loaded index config from %s: lots=%s, enabled=%s", self.lots_file, self.index_lots, self.index_enabled)
             except Exception as exc:
                 LOGGER.warning("Could not load index_lots.json: %s", exc)
@@ -650,6 +714,13 @@ class GapEntryStrategyEngine:
                 self._trade_counter = len(trades) + 1
                 today_trades = [t for t in trades if t.get("trade_date") == today_str]
                 self.today_trades_count = len(today_trades)
+                for tr in today_trades:
+                    ukey = tr.get("underlying_key") or NIFTY_KEY
+                    if ukey in self.index_underlyings:
+                        self.index_underlyings[ukey]["today_trades_count"] += 1
+                    elif ukey in self.stock_underlyings:
+                        self.stock_underlyings[ukey]["today_trades_count"] += 1
+
             for t in trades:
                 if t.get("status") == "OPEN":
                     trade_date = t.get("trade_date")
@@ -668,12 +739,19 @@ class GapEntryStrategyEngine:
                             pass
                         continue
 
-                    if t.get("underlying_key") == NIFTY_KEY or "NIFTY" in str(t.get("symbol", "")):
+                    u_key = t.get("underlying_key") or NIFTY_KEY
+                    if u_key in self.index_underlyings:
+                        self.index_underlyings[u_key]["current_position"] = t
+                        self.index_underlyings[u_key]["state"] = "HOLDING"
+                    elif u_key in self.stock_underlyings:
+                        self.stock_underlyings[u_key]["current_position"] = t
+                        self.stock_underlyings[u_key]["state"] = "HOLDING"
+
+                    self.current_positions[u_key] = t
+                    if u_key == NIFTY_KEY:
                         self.current_position = t
-                        self.current_positions[NIFTY_KEY] = t
                         self.state = "HOLDING"
-                        LOGGER.info("Resumed open paper position: %s", t["trade_id"])
-                        break
+                    LOGGER.info("Resumed open paper position for %s: %s", u_key, t["trade_id"])
         except Exception as exc:
             LOGGER.error("Failed to resume open position: %s", exc)
 
@@ -805,7 +883,15 @@ class GapEntryStrategyEngine:
             if c and c.get("instrument_key"):
                 keys.append(c["instrument_key"])
 
-        self.planned_keys = keys
+        if underlying_key in self.index_underlyings:
+            self.index_underlyings[underlying_key]["planned_keys"] = keys
+            if self.index_underlyings[underlying_key]["state"] == "SETUP":
+                self.index_underlyings[underlying_key]["state"] = "PLANNING"
+
+        if underlying_key == NIFTY_KEY:
+            self.planned_keys = keys
+            if self.state == "SETUP":
+                self.state = "PLANNING"
 
         # Pre-populate hot cache entries
         for k in keys:
@@ -842,81 +928,146 @@ class GapEntryStrategyEngine:
 
         return keys
 
+    def plan_all_indices(self) -> None:
+        """Plans 8 ITM contracts for all enabled indices if spot price is known."""
+        for ukey, idx_st in self.index_underlyings.items():
+            if idx_st.get("enabled", True):
+                spot = idx_st.get("spot_price")
+                if spot and spot > 0 and not idx_st.get("planned_keys"):
+                    self.plan_8_itm_contracts(spot, underlying_key=ukey)
+
     # -------------------------------------------------------------------------
     # Timeline Step 1: Lock Time (09:14:55)
     # -------------------------------------------------------------------------
 
-    def lock_contracts(self) -> None:
-        """Lock the 8 ITM contracts at 09:14:55."""
+    def lock_contracts(self, underlying_key: str | None = None) -> None:
+        """Lock the 8 ITM contracts at 09:14:55 for specified index or all indices."""
         with self._lock:
-            if not self.planned_keys and self.spot_price:
-                self.plan_8_itm_contracts(self.spot_price)
-
-            if not self.planned_keys:
-                LOGGER.warning("Cannot lock contracts: no planned strikes available.")
-                return
-
-            self.locked_keys = list(self.planned_keys)
-            self.locked_at_ms = int(time.time() * 1000)
-
-            for k in self.locked_keys:
-                entry = self.hot_cache.get(k)
-                if not entry:
+            targets = [underlying_key] if underlying_key else list(self.index_underlyings.keys())
+            for ukey in targets:
+                idx_state = self.index_underlyings.get(ukey)
+                if not idx_state or not idx_state.get("enabled", True):
                     continue
-                if entry.get("ltp") is not None and float(entry["ltp"]) > 0:
-                    entry["ref_ltp"] = float(entry["ltp"])
-                    entry["ref_source"] = "ltp"
-                else:
-                    contract = self.contracts_by_key.get(k, {})
-                    prev = float(contract.get("prev_close") or entry.get("bid_price") or 0.0)
-                    entry["ref_ltp"] = prev
-                    entry["ref_source"] = "prev_close"
 
-            self.state = "LOCKED"
-            LOGGER.info("LOCKED 8 contracts at 09:14:55: %s", self.locked_keys)
+                if not idx_state.get("planned_keys") and idx_state.get("spot_price"):
+                    self.plan_8_itm_contracts(idx_state["spot_price"], underlying_key=ukey)
+
+                p_keys = idx_state.get("planned_keys") or []
+                if not p_keys and ukey == NIFTY_KEY and self.planned_keys:
+                    p_keys = list(self.planned_keys)
+                    idx_state["planned_keys"] = p_keys
+
+                if not p_keys:
+                    LOGGER.warning("Cannot lock contracts for %s: no planned strikes available.", ukey)
+                    continue
+
+                idx_state["locked_keys"] = list(p_keys)
+                for k in idx_state["locked_keys"]:
+                    entry = self.hot_cache.get(k)
+                    if not entry:
+                        continue
+                    if entry.get("ltp") is not None and float(entry["ltp"]) > 0:
+                        entry["ref_ltp"] = float(entry["ltp"])
+                        entry["ref_source"] = "ltp"
+                    else:
+                        contract = self.contracts_by_key.get(k, {})
+                        prev = float(contract.get("prev_close") or entry.get("bid_price") or 0.0)
+                        entry["ref_ltp"] = prev
+                        entry["ref_source"] = "prev_close"
+
+                idx_state["state"] = "LOCKED"
+                if ukey == NIFTY_KEY:
+                    self.locked_keys = list(idx_state["locked_keys"])
+                    self.locked_at_ms = int(time.time() * 1000)
+                    self.state = "LOCKED"
+                LOGGER.info("LOCKED 8 contracts for %s at 09:14:55: %s", ukey, idx_state["locked_keys"])
+
+    def lock_all_indices(self) -> None:
+        self.lock_contracts()
 
     # -------------------------------------------------------------------------
     # Timeline Step 2: 09:15:00 Snapshot (Section 2 & 3)
     # -------------------------------------------------------------------------
 
-    def take_snapshot(self) -> None:
+    def take_snapshot(self, underlying_key: str | None = None) -> None:
         """
         At 09:15:00, take the snapshot of the 8 contracts: LTP, OI, bid, ask.
         NO TRADING IS ALLOWED AT 09:15:00.
         """
         with self._lock:
-            if not self.locked_keys and self.spot_price:
-                self.lock_contracts()
+            targets = [underlying_key] if underlying_key else list(self.index_underlyings.keys())
+            for ukey in targets:
+                idx_state = self.index_underlyings.get(ukey)
+                if not idx_state or not idx_state.get("enabled", True):
+                    continue
 
-            self.snapshot.clear()
-            for k in self.locked_keys:
-                c = self.hot_cache.get(k, {})
-                ltp = float(c.get("ltp") or c.get("prev_close") or 100.0)
-                oi = float(c.get("oi") or c.get("prev_oi") or 0.0)
-                bid = float(c.get("bid_price") or 0.0)
-                ask = float(c.get("ask_price") or 0.0)
-                self.snapshot[k] = {
-                    "instrument_key": k,
-                    "trading_symbol": c.get("trading_symbol") or k,
-                    "strike": float(c.get("strike") or 0.0),
-                    "side": str(c.get("side") or "").upper(),
-                    "ltp": ltp,
-                    "oi": oi,
-                    "bid": bid,
-                    "ask": ask,
-                }
-            self.snapshot_taken = True
-            self.snapshot_at_ms = int(time.time() * 1000)
-            self.state = "DATA_COLLECTION"
-            LOGGER.info("SNAPSHOT TAKEN at 09:15:00 for %d contracts. State -> DATA_COLLECTION (No entry before 09:18).", len(self.snapshot))
+                if not idx_state.get("locked_keys"):
+                    if idx_state.get("spot_price"):
+                        self.lock_contracts(underlying_key=ukey)
+                    elif ukey == NIFTY_KEY and self.locked_keys:
+                        idx_state["locked_keys"] = list(self.locked_keys)
+
+                l_keys = idx_state.get("locked_keys") or []
+                if not l_keys:
+                    continue
+
+                idx_snap = {}
+                for k in l_keys:
+                    c = self.hot_cache.get(k, {})
+                    ltp = float(c.get("ltp") or c.get("prev_close") or 100.0)
+                    oi = float(c.get("oi") or c.get("prev_oi") or 0.0)
+                    bid = float(c.get("bid_price") or 0.0)
+                    ask = float(c.get("ask_price") or 0.0)
+                    if oi == 0.0 or ltp == 100.0:
+                        try:
+                            db_tick = self.database.get_latest_tick(k)
+                            if db_tick:
+                                ltp = float(db_tick.get("ltp") or ltp)
+                                oi = float(db_tick.get("oi") or oi)
+                                bid = float(db_tick.get("bid_price") or bid)
+                                ask = float(db_tick.get("ask_price") or ask)
+                        except Exception:
+                            pass
+                    idx_snap[k] = {
+                        "instrument_key": k,
+                        "trading_symbol": c.get("trading_symbol") or k,
+                        "strike": float(c.get("strike") or 0.0),
+                        "side": str(c.get("side") or "").upper(),
+                        "ltp": ltp,
+                        "oi": oi,
+                        "bid": bid,
+                        "ask": ask,
+                    }
+                idx_state["snapshot"] = idx_snap
+                idx_state["snapshot_taken"] = True
+                idx_state["state"] = "DATA_COLLECTION"
+
+                if ukey == NIFTY_KEY:
+                    self.snapshot = dict(idx_snap)
+                    self.snapshot_taken = True
+                    self.snapshot_at_ms = int(time.time() * 1000)
+                    self.state = "DATA_COLLECTION"
+
+                LOGGER.info("SNAPSHOT TAKEN at 09:15:00 for %s (%d contracts). State -> DATA_COLLECTION", ukey, len(idx_snap))
+
+    def snapshot_all_indices(self) -> None:
+        self.take_snapshot()
+
+    def arm_all_indices(self) -> None:
+        with self._lock:
+            for ukey, idx_state in self.index_underlyings.items():
+                if idx_state.get("enabled", True) and idx_state.get("state") in ("LOCKED", "DATA_COLLECTION"):
+                    idx_state["state"] = "ARMED"
+            if self.state in ("LOCKED", "DATA_COLLECTION"):
+                self.state = "ARMED"
 
     # -------------------------------------------------------------------------
     # Timeline Step 3: From 09:18:00 OI Build-Up Evaluation & 16-Condition Table
     # -------------------------------------------------------------------------
 
-    def evaluate_oi_buildup(self, trigger_ms: int = 0, force: bool = False) -> dict[str, Any] | None:
+    def evaluate_oi_buildup(self, underlying_key: str = NIFTY_KEY, trigger_ms: int = 0, force: bool = False) -> dict[str, Any] | None:
         """
-        Evaluates the 16-condition table from 09:18:00 onwards.
+        Evaluates the 16-condition table from 09:18:00 onwards for a specific index.
         - Checks for fresh OI on both CE and PE sides.
         - Calculates Delta CE, Delta PE, price change %, OI change %.
         - Assigns direction (UP, DOWN, FLAT) based on thresholds.
@@ -929,52 +1080,84 @@ class GapEntryStrategyEngine:
             now_dt = datetime.now(IST)
             now_time_hms = now_dt.strftime("%H:%M:%S")
 
+            idx_state = self.index_underlyings.get(underlying_key)
+            if not idx_state:
+                idx_state = self.index_underlyings.get(NIFTY_KEY)
+                underlying_key = NIFTY_KEY
+            if not idx_state or not idx_state.get("enabled", True):
+                return None
+
             # 1. Trading Window Validation (Section 1 & Section 5)
             if not force and now_time_hms < self.entry_start_time:
                 res = {
                     "decision": "WAIT",
                     "reason": f"No entry before {self.entry_start_time} (Current: {now_time_hms})",
-                    "summary_line": f"WAIT: Pre-09:18 data collection only (Time: {now_time_hms})",
+                    "summary_line": f"{idx_state['name']} WAIT: Pre-09:18 data collection only (Time: {now_time_hms})",
                 }
-                self.last_evaluation = res
+                idx_state["last_evaluation"] = res
+                if underlying_key == NIFTY_KEY:
+                    self.last_evaluation = res
                 return None
 
             if not force and now_time_hms >= self.entry_end_time:
                 res = {
                     "decision": "WAIT",
                     "reason": f"No entry after {self.entry_end_time} (Current: {now_time_hms})",
-                    "summary_line": f"WAIT: Market entry closed after 14:45 (Time: {now_time_hms})",
+                    "summary_line": f"{idx_state['name']} WAIT: Market entry closed after 14:45 (Time: {now_time_hms})",
                 }
-                self.last_evaluation = res
+                idx_state["last_evaluation"] = res
+                if underlying_key == NIFTY_KEY:
+                    self.last_evaluation = res
                 return None
 
-            # 2. Daily limits and existing position
-            if self.current_position is not None:
+            # 2. Per-Index Daily limits and existing position ("1 trade at a time per index")
+            if idx_state.get("current_position") is not None:
                 return None
-            if self.today_trades_count >= self.max_trades_per_day:
+            if idx_state.get("today_trades_count", 0) >= self.max_trades_per_day:
                 return None
 
-            # 3. Snapshot validation
-            if not self.snapshot:
-                # If after 09:15:00 and no snapshot yet, auto-take snapshot
-                if self.locked_keys or (self.spot_price and self.plan_8_itm_contracts(self.spot_price)):
-                    self.take_snapshot()
+            # 3. Snapshot validation for this index
+            if underlying_key == NIFTY_KEY:
+                if self.snapshot:
+                    idx_state["snapshot"] = dict(self.snapshot)
+                if self.locked_keys:
+                    idx_state["locked_keys"] = list(self.locked_keys)
+
+            snap = idx_state.get("snapshot") or (self.snapshot if underlying_key == NIFTY_KEY else {})
+            locked_keys = idx_state.get("locked_keys") or (self.locked_keys if underlying_key == NIFTY_KEY else [])
+
+            if not snap or not locked_keys or len(locked_keys) < 8 or len(snap) < 8:
+                spot = idx_state.get("spot_price")
+                if spot and spot > 0:
+                    self.plan_8_itm_contracts(spot, underlying_key=underlying_key)
+                    self.lock_contracts(underlying_key=underlying_key)
+                    self.take_snapshot(underlying_key=underlying_key)
+                    snap = idx_state.get("snapshot") or {}
+                    locked_keys = idx_state.get("locked_keys") or []
+                elif underlying_key == NIFTY_KEY and self.snapshot and self.locked_keys:
+                    idx_state["snapshot"] = dict(self.snapshot)
+                    idx_state["locked_keys"] = list(self.locked_keys)
+                    snap = idx_state["snapshot"]
+                    locked_keys = idx_state["locked_keys"]
                 else:
                     return None
+
+            if len(locked_keys) < 8 or len(snap) < 8:
+                return None
 
             # 4. Fresh OI Check (Section 5)
             # At or after 09:18:00, evaluate when OI is fresh:
             # at least one locked contract on each side has an OI value different from its snapshot value.
             ce_fresh = False
             pe_fresh = False
-            for k in self.locked_keys:
-                snap = self.snapshot.get(k)
+            for k in locked_keys:
+                s_entry = snap.get(k)
                 curr = self.hot_cache.get(k)
-                if not snap or not curr:
+                if not s_entry or not curr:
                     continue
                 side = curr.get("side")
                 c_oi = curr.get("oi")
-                s_oi = snap.get("oi")
+                s_oi = s_entry.get("oi")
                 if c_oi is not None and s_oi is not None and c_oi != s_oi:
                     if side == "CE":
                         ce_fresh = True
@@ -984,45 +1167,47 @@ class GapEntryStrategyEngine:
             if not force and not (ce_fresh and pe_fresh):
                 res = {
                     "decision": "WAIT",
-                    "reason": "Waiting for fresh OI update on both CE and PE sides",
-                    "summary_line": f"WAIT: Awaiting fresh OI on both sides (CE fresh: {ce_fresh}, PE fresh: {pe_fresh})",
+                    "reason": f"Waiting for fresh OI update on both CE and PE sides for {idx_state['name']}",
+                    "summary_line": f"{idx_state['name']} WAIT: Awaiting fresh OI on both sides (CE: {ce_fresh}, PE: {pe_fresh})",
                 }
-                self.last_evaluation = res
+                idx_state["last_evaluation"] = res
+                if underlying_key == NIFTY_KEY:
+                    self.last_evaluation = res
                 return None
 
-            # 5. Throttling (Section 5: at most once every 5 seconds)
+            # 5. Throttling (Section 5: at most once every 5 seconds per index)
             cur_t = time.time()
-            if not force and (cur_t - self._last_eval_time < self.re_eval_min_interval_sec):
+            if not force and (cur_t - idx_state.get("_last_eval_time", 0.0) < self.re_eval_min_interval_sec):
                 return None
-            self._last_eval_time = cur_t
+            idx_state["_last_eval_time"] = cur_t
 
             # 6. Separate CE and PE locked contracts
-            ce_keys = [k for k in self.locked_keys if self.hot_cache.get(k, {}).get("side") == "CE"]
-            pe_keys = [k for k in self.locked_keys if self.hot_cache.get(k, {}).get("side") == "PE"]
+            ce_keys = [k for k in locked_keys if self.hot_cache.get(k, {}).get("side") == "CE"]
+            pe_keys = [k for k in locked_keys if self.hot_cache.get(k, {}).get("side") == "PE"]
 
             if not ce_keys or not pe_keys:
                 return None
 
             # 7. Mathematical Aggregations (Section 3)
             # CE side
-            ce_oi_snap_sum = sum(float(self.snapshot[k]["oi"]) for k in ce_keys if k in self.snapshot)
-            ce_oi_curr_sum = sum(float(self.hot_cache[k].get("oi") or self.snapshot.get(k, {}).get("oi") or 0.0) for k in ce_keys)
+            ce_oi_snap_sum = sum(float(snap[k]["oi"]) for k in ce_keys if k in snap)
+            ce_oi_curr_sum = sum(float(self.hot_cache[k].get("oi") or snap.get(k, {}).get("oi") or 0.0) for k in ce_keys)
             delta_ce = ce_oi_curr_sum - ce_oi_snap_sum
             ce_oi_pct = (delta_ce / ce_oi_snap_sum * 100.0) if ce_oi_snap_sum > 0 else 0.0
 
-            ce_ltp_snap_sum = sum(float(self.snapshot[k]["ltp"]) for k in ce_keys if k in self.snapshot)
-            ce_ltp_curr_sum = sum(float(self.hot_cache[k].get("ltp") or self.snapshot.get(k, {}).get("ltp") or 0.0) for k in ce_keys)
+            ce_ltp_snap_sum = sum(float(snap[k]["ltp"]) for k in ce_keys if k in snap)
+            ce_ltp_curr_sum = sum(float(self.hot_cache[k].get("ltp") or snap.get(k, {}).get("ltp") or 0.0) for k in ce_keys)
             ce_price_delta = ce_ltp_curr_sum - ce_ltp_snap_sum
             ce_price_pct = (ce_price_delta / ce_ltp_snap_sum * 100.0) if ce_ltp_snap_sum > 0 else 0.0
 
             # PE side
-            pe_oi_snap_sum = sum(float(self.snapshot[k]["oi"]) for k in pe_keys if k in self.snapshot)
-            pe_oi_curr_sum = sum(float(self.hot_cache[k].get("oi") or self.snapshot.get(k, {}).get("oi") or 0.0) for k in pe_keys)
+            pe_oi_snap_sum = sum(float(snap[k]["oi"]) for k in pe_keys if k in snap)
+            pe_oi_curr_sum = sum(float(self.hot_cache[k].get("oi") or snap.get(k, {}).get("oi") or 0.0) for k in pe_keys)
             delta_pe = pe_oi_curr_sum - pe_oi_snap_sum
             pe_oi_pct = (delta_pe / pe_oi_snap_sum * 100.0) if pe_oi_snap_sum > 0 else 0.0
 
-            pe_ltp_snap_sum = sum(float(self.snapshot[k]["ltp"]) for k in pe_keys if k in self.snapshot)
-            pe_ltp_curr_sum = sum(float(self.hot_cache[k].get("ltp") or self.snapshot.get(k, {}).get("ltp") or 0.0) for k in pe_keys)
+            pe_ltp_snap_sum = sum(float(snap[k]["ltp"]) for k in pe_keys if k in snap)
+            pe_ltp_curr_sum = sum(float(self.hot_cache[k].get("ltp") or snap.get(k, {}).get("ltp") or 0.0) for k in pe_keys)
             pe_price_delta = pe_ltp_curr_sum - pe_ltp_snap_sum
             pe_price_pct = (pe_price_delta / pe_ltp_snap_sum * 100.0) if pe_ltp_snap_sum > 0 else 0.0
 
@@ -1057,9 +1242,11 @@ class GapEntryStrategyEngine:
                     "rule": None,
                     "stars": "",
                     "size": "",
-                    "summary_line": f"ΔCE: {delta_ce:+,.0f} | ΔPE: {delta_pe:+,.0f} | WAIT (FLAT direction)",
+                    "summary_line": f"{idx_state['name']} ΔCE: {delta_ce:+,.0f} | ΔPE: {delta_pe:+,.0f} | WAIT (FLAT direction)",
                 }
-                self.last_evaluation = eval_res
+                idx_state["last_evaluation"] = eval_res
+                if underlying_key == NIFTY_KEY:
+                    self.last_evaluation = eval_res
                 return None
 
             # 10. Build-up Type Assignment (Section 3)
@@ -1088,7 +1275,7 @@ class GapEntryStrategyEngine:
             size = table_entry.get("size", "")
             rule_num = table_entry.get("rule")
 
-            summary_line = f"ΔCE: {delta_ce:+,.0f} | ΔPE: {delta_pe:+,.0f} | CE: {ce_type} | PE: {pe_type} | Rule #{rule_num} {stars} -> {decision}"
+            summary_line = f"{idx_state['name']} ΔCE: {delta_ce:+,.0f} | ΔPE: {delta_pe:+,.0f} | CE: {ce_type} | PE: {pe_type} | Rule #{rule_num} {stars} -> {decision}"
 
             eval_res = {
                 "decision": decision,
@@ -1108,18 +1295,19 @@ class GapEntryStrategyEngine:
                 "size": size,
                 "summary_line": summary_line,
             }
-            self.last_evaluation = eval_res
+            idx_state["last_evaluation"] = eval_res
+            if underlying_key == NIFTY_KEY:
+                self.last_evaluation = eval_res
 
             # 12. Trade Trigger (Section 6)
             if decision in ("CE Buy", "PE Buy") and side:
-                underlying_key = NIFTY_KEY
                 if not self.index_enabled.get(underlying_key, True):
                     LOGGER.info("Decision %s triggered, but index %s is paused today.", decision, underlying_key)
                     return None
 
-                winner = self._select_best_strike(side)
+                winner = self._select_best_strike(side, locked_keys=locked_keys)
                 if not winner:
-                    LOGGER.warning("Could not find valid candidate quote for %s side.", side)
+                    LOGGER.warning("Could not find valid candidate quote for %s side on %s.", side, underlying_key)
                     return None
 
                 trigger_ts_ms = trigger_ms or int(time.time() * 1000)
@@ -1135,10 +1323,35 @@ class GapEntryStrategyEngine:
                     pe_type=pe_type,
                     time_str=now_dt.strftime("%H:%M:%S.%f")[:-3],
                     trigger_ms=trigger_ts_ms,
+                    underlying_key=underlying_key,
                 )
                 return trade
 
             return None
+
+    def evaluate_all_active_underlyings(self) -> list[dict[str, Any]]:
+        """Evaluates all enabled indices and stocks whose trade conditions are ready."""
+        trades = []
+        now_dt = datetime.now(IST)
+        now_hms = now_dt.strftime("%H:%M:%S")
+        if not (self.entry_start_time <= now_hms < self.entry_end_time):
+            return trades
+
+        with self._lock:
+            for ukey, idx_st in self.index_underlyings.items():
+                if idx_st.get("enabled", True):
+                    if idx_st.get("current_position") is None and idx_st.get("today_trades_count", 0) < self.max_trades_per_day:
+                        t = self.evaluate_oi_buildup(underlying_key=ukey)
+                        if t:
+                            trades.append(t)
+
+            for sym, st in self.stock_underlyings.items():
+                if st.get("enabled", True):
+                    if st.get("current_position") is None and st.get("today_trades_count", 0) < self.max_trades_per_day:
+                        t = self.evaluate_stock_oi_buildup(sym)
+                        if t:
+                            trades.append(t)
+        return trades
 
     # -------------------------------------------------------------------------
     # Ingesting Real-Time Market Ticks
@@ -1159,28 +1372,31 @@ class GapEntryStrategyEngine:
         now_time_hms = now_dt.strftime("%H:%M:%S")
 
         # --- 1. SPOT INDEX TICK ---
-        if inst_key == NIFTY_KEY:
-            self.spot_price = ltp
+        if inst_key in self.index_underlyings:
+            idx_st = self.index_underlyings[inst_key]
+            idx_st["spot_price"] = ltp
+            if inst_key == NIFTY_KEY:
+                self.spot_price = ltp
             with self._lock:
                 # 09:00 to 09:14:55: Dynamic planning around spot
-                if self.state in ("SETUP", "PLANNING"):
+                if idx_st.get("state") in ("SETUP", "PLANNING"):
                     if now_time_hms < self.lock_time:
-                        self.state = "PLANNING"
-                        self.plan_8_itm_contracts(ltp)
-                    elif now_time_hms >= self.lock_time and now_time_hms < self.snapshot_time:
-                        if self.state != "LOCKED":
-                            self.lock_contracts()
-                    elif now_time_hms >= self.snapshot_time and now_time_hms < self.entry_start_time:
-                        if not self.snapshot_taken:
-                            self.take_snapshot()
+                        idx_st["state"] = "PLANNING"
+                        self.plan_8_itm_contracts(ltp, underlying_key=inst_key)
+                    elif self.lock_time <= now_time_hms < self.snapshot_time:
+                        if idx_st.get("state") != "LOCKED":
+                            self.lock_contracts(underlying_key=inst_key)
+                    elif self.snapshot_time <= now_time_hms < self.entry_start_time:
+                        if not idx_st.get("snapshot_taken"):
+                            self.take_snapshot(underlying_key=inst_key)
 
                 # Schedule checks
-                if now_time_hms >= self.snapshot_time and not self.snapshot_taken:
-                    self.take_snapshot()
+                if now_time_hms >= self.snapshot_time and not idx_st.get("snapshot_taken"):
+                    self.take_snapshot(underlying_key=inst_key)
 
-                if now_time_hms >= self.entry_start_time and self.state == "DATA_COLLECTION":
-                    self.state = "ARMED"
-                    LOGGER.info("09:18:00 REACHED: State -> ARMED (Evaluating OI build-up table).")
+                if now_time_hms >= self.entry_start_time and idx_st.get("state") in ("LOCKED", "DATA_COLLECTION"):
+                    idx_st["state"] = "ARMED"
+                    LOGGER.info("09:18:00 REACHED for %s: State -> ARMED (Evaluating OI build-up table).", inst_key)
 
             return None
 
@@ -1307,21 +1523,40 @@ class GapEntryStrategyEngine:
                     return trade
                 return None
 
-            # If holding, exited, or contract not in locked set: nothing to trigger
-            if self.current_position is not None or self.today_trades_count >= self.max_trades_per_day:
-                return None
-            if inst_key not in self.locked_keys:
-                return None
+            # Check if this contract belongs to an index option underlying
+            idx_key = next((ukey for ukey, d in self.index_underlyings.items() if inst_key in d.get("locked_keys", [])), None)
+            if not idx_key and inst_key in self.locked_keys:
+                idx_key = NIFTY_KEY
 
-            # Check if this index is paused today
-            u_key = entry.get("underlying_key") if entry else NIFTY_KEY
-            if not self.index_enabled.get(u_key, True):
-                return None
+            if idx_key:
+                idx_st = self.index_underlyings[idx_key]
+                if not idx_st.get("enabled", True):
+                    return None
 
-            # Re-evaluate OI build-up table when OI updates or between 09:18 and 14:45
-            if now_time_hms >= self.entry_start_time and now_time_hms < self.entry_end_time:
-                trade = self.evaluate_oi_buildup(trigger_ms=ts_ms)
-                return trade
+                # If holding: update unrealized P&L
+                if idx_st.get("state") == "HOLDING" and idx_st.get("current_position"):
+                    pos = idx_st["current_position"]
+                    if pos.get("instrument_key") == inst_key:
+                        current_price = entry["bid_price"] if (entry and entry.get("bid_price", 0) > 0) else ltp
+                        if current_price > 0:
+                            entry_price = float(pos["entry_price"])
+                            qty = int(pos.get("total_qty") or pos.get("lot_size") or 1)
+                            pts = round(current_price - entry_price, 2)
+                            net = round(pts * qty, 2)
+                            pos["current_price"] = current_price
+                            pos["pnl_points"] = pts
+                            pos["net_pnl"] = net
+
+                # Check per-index limits: 1 trade at a time per index and daily limit per index
+                if idx_st.get("current_position") is not None or idx_st.get("today_trades_count", 0) >= self.max_trades_per_day:
+                    return None
+
+                # Re-evaluate OI build-up table when OI updates or between 09:18 and 14:45
+                if now_time_hms >= self.entry_start_time and now_time_hms < self.entry_end_time:
+                    trade = self.evaluate_oi_buildup(underlying_key=idx_key, trigger_ms=ts_ms)
+                    return trade
+
+                return None
 
             return None
 
@@ -1374,6 +1609,7 @@ class GapEntryStrategyEngine:
         pe_type: str,
         time_str: str,
         trigger_ms: int,
+        underlying_key: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             today_str = datetime.now(IST).strftime("%Y-%m-%d")
@@ -1381,7 +1617,7 @@ class GapEntryStrategyEngine:
             self._trade_counter += 1
             self.today_trades_count += 1
 
-            underlying_key = winner.get("underlying_key") or NIFTY_KEY
+            underlying_key = underlying_key or winner.get("underlying_key") or NIFTY_KEY
             if underlying_key in self.stock_underlyings:
                 st = self.stock_underlyings[underlying_key]
                 lot_sz = st.get("lot_size", self.lot_size)
@@ -1392,6 +1628,18 @@ class GapEntryStrategyEngine:
                     lots = base_lots
                 elif size == "scalp":
                     lots = max(1, base_lots // 2) if base_lots > 1 else 1
+                else:
+                    lots = base_lots
+            elif underlying_key in self.index_underlyings:
+                idx_st = self.index_underlyings[underlying_key]
+                lot_sz = idx_st.get("lot_size") or self.index_lot_sizes.get(underlying_key, self.lot_size)
+                base_lots = self.index_lots.get(underlying_key, idx_st.get("lots", 1))
+                if size == "full":
+                    lots = max(base_lots, self.lots_full)
+                elif size == "normal":
+                    lots = max(base_lots, self.lots_normal)
+                elif size == "scalp":
+                    lots = max(1, min(base_lots, self.lots_scalp))
                 else:
                     lots = base_lots
             else:
@@ -1439,7 +1687,7 @@ class GapEntryStrategyEngine:
                 "pnl_points": 0.0,
                 "net_pnl": 0.0,
                 "status": "OPEN",
-                "spot_price": self.spot_price,
+                "spot_price": self.index_underlyings.get(underlying_key, {}).get("spot_price") or self.spot_price,
                 "atm_strike": strike,
                 "current_price": entry_price,
                 "build_up": bu_label,
@@ -1455,9 +1703,21 @@ class GapEntryStrategyEngine:
                 "network_latency_ms": 0.0,
             }
 
-            self.current_position = trade
-            self.current_positions[NIFTY_KEY] = trade
-            self.state = "HOLDING"
+            if underlying_key in self.index_underlyings:
+                idx_st = self.index_underlyings[underlying_key]
+                idx_st["current_position"] = trade
+                idx_st["today_trades_count"] = idx_st.get("today_trades_count", 0) + 1
+                idx_st["state"] = "HOLDING"
+                if underlying_key == NIFTY_KEY:
+                    self.current_position = trade
+                    self.state = "HOLDING"
+            elif underlying_key in self.stock_underlyings:
+                st = self.stock_underlyings[underlying_key]
+                st["current_position"] = trade
+                st["today_trades_count"] = st.get("today_trades_count", 0) + 1
+                st["state"] = "HOLDING"
+
+            self.current_positions[underlying_key] = trade
 
             self.last_decision = {
                 "timestamp_ist": time_str,
@@ -1534,72 +1794,113 @@ class GapEntryStrategyEngine:
     # Exit Management (Section 7 & 8: Paper Exit fills at live bid)
     # -------------------------------------------------------------------------
 
-    def manual_exit(self, reason: str = "MANUAL") -> dict[str, Any] | None:
-        """Manual Exit Now button or 15:15:00 EOD square-off at live bid."""
-        with self._lock:
-            pos = self.current_position
-            if not pos or pos.get("status") != "OPEN":
-                LOGGER.warning("No open position to exit.")
-                return None
+    def _exit_single_trade(self, pos: dict[str, Any], reason: str, underlying_key: str) -> dict[str, Any]:
+        now_dt = datetime.now(IST)
+        exit_time_str = now_dt.strftime("%H:%M:%S.%f")[:-3]
+        exit_ms = int(time.time() * 1000)
 
-            self.state = "EXITING"
-            now_dt = datetime.now(IST)
-            exit_time_str = now_dt.strftime("%H:%M:%S.%f")[:-3]
-            exit_ms = int(time.time() * 1000)
+        inst_key = pos["instrument_key"]
+        cached = self.hot_cache.get(inst_key)
+        bid = cached.get("bid_price") if cached else 0.0
+        ltp = cached.get("ltp") if cached else 0.0
 
-            inst_key = pos["instrument_key"]
-            cached = self.hot_cache.get(inst_key)
-            bid = cached.get("bid_price") if cached else 0.0
-            ltp = cached.get("ltp") if cached else 0.0
+        if bid > 0:
+            exit_price = bid
+        elif ltp > 0:
+            exit_price = ltp
+        else:
+            exit_price = float(pos["entry_price"]) - 0.50
 
-            # Section 8: Exit fills at live bid! Never use entry price as exit price.
-            if bid > 0:
-                exit_price = bid
-            elif ltp > 0:
-                exit_price = ltp
-            else:
-                exit_price = float(pos["entry_price"]) - 0.50  # Fallback ensuring bid-side deduction
+        entry_price = float(pos["entry_price"])
+        qty = int(pos.get("lot_size") or 1)
+        pnl_points = round(exit_price - entry_price, 2)
+        net_pnl = round(pnl_points * qty, 2)
 
-            entry_price = float(pos["entry_price"])
-            qty = int(pos["lot_size"])
-            pnl_points = round(exit_price - entry_price, 2)
-            net_pnl = round(pnl_points * qty, 2)
+        pos["exit_time_ist"] = exit_time_str
+        pos["exit_price"] = exit_price
+        pos["exit_timestamp_ms"] = exit_ms
+        pos["exit_reason"] = reason
+        pos["pnl_points"] = pnl_points
+        pos["net_pnl"] = net_pnl
+        pos["status"] = "CLOSED"
 
-            pos["exit_time_ist"] = exit_time_str
-            pos["exit_price"] = exit_price
-            pos["exit_timestamp_ms"] = exit_ms
-            pos["exit_reason"] = reason
-            pos["pnl_points"] = pnl_points
-            pos["net_pnl"] = net_pnl
-            pos["status"] = "CLOSED"
+        if underlying_key in self.index_underlyings:
+            self.index_underlyings[underlying_key]["current_position"] = None
+            self.index_underlyings[underlying_key]["state"] = "CLOSED"
+        if underlying_key in self.stock_underlyings:
+            self.stock_underlyings[underlying_key]["current_position"] = None
+            self.stock_underlyings[underlying_key]["state"] = "CLOSED"
 
+        self.current_positions[underlying_key] = None
+        if underlying_key == NIFTY_KEY:
             self.current_position = None
-            self.current_positions[NIFTY_KEY] = None
             self.state = "CLOSED"
 
-            # Update DB
-            try:
-                self.database.update_strategy_trade_exit(
-                    trade_id=pos["trade_id"],
-                    exit_time_ist=exit_time_str,
-                    exit_price=exit_price,
-                    exit_timestamp_ms=exit_ms,
-                    exit_reason=reason,
-                    pnl_points=pnl_points,
-                    net_pnl=net_pnl,
-                )
-            except Exception as exc:
-                LOGGER.error("Failed to update exit in DB: %s", exc)
-
-            LOGGER.info(
-                "POSITION CLOSED: %s Exit @ %.2f (P&L: %s pts / ₹%s). Reason: %s",
-                pos["symbol"],
-                exit_price,
-                pnl_points,
-                net_pnl,
-                reason,
+        try:
+            self.database.update_strategy_trade_exit(
+                trade_id=pos["trade_id"],
+                exit_time_ist=exit_time_str,
+                exit_price=exit_price,
+                exit_timestamp_ms=exit_ms,
+                exit_reason=reason,
+                pnl_points=pnl_points,
+                net_pnl=net_pnl,
             )
-            return pos
+        except Exception as exc:
+            LOGGER.error("Failed to update exit in DB for %s: %s", underlying_key, exc)
+
+        LOGGER.info(
+            "POSITION CLOSED (%s): %s Exit @ %.2f (P&L: %s pts / ₹%s). Reason: %s",
+            underlying_key,
+            pos["symbol"],
+            exit_price,
+            pnl_points,
+            net_pnl,
+            reason,
+        )
+        return pos
+
+    def manual_exit(self, reason: str = "MANUAL", underlying_key: str | None = None) -> dict[str, Any] | None:
+        """Manual Exit Now button: exits specified open position or all open positions across indices and stocks."""
+        with self._lock:
+            if underlying_key and str(underlying_key).strip().upper() not in ("ALL", "", "NONE"):
+                ukey = self.resolve_underlying_key(underlying_key)
+                pos = self.current_positions.get(ukey)
+                if not pos and ukey in self.index_underlyings:
+                    pos = self.index_underlyings[ukey].get("current_position")
+                if pos and pos.get("status") == "OPEN":
+                    return self._exit_single_trade(pos, reason, ukey)
+                return None
+
+            closed_any = None
+            for ukey, idx_st in list(self.index_underlyings.items()):
+                p = idx_st.get("current_position") or self.current_positions.get(ukey)
+                if p and p.get("status") == "OPEN":
+                    res = self._exit_single_trade(p, reason, ukey)
+                    if not closed_any:
+                        closed_any = res
+
+            for sym, st in list(self.stock_underlyings.items()):
+                p = st.get("current_position")
+                if p and p.get("status") == "OPEN":
+                    res = self._exit_single_trade(p, reason, sym)
+                    if not closed_any:
+                        closed_any = res
+
+            if self.current_position and self.current_position.get("status") == "OPEN":
+                res = self._exit_single_trade(self.current_position, reason, NIFTY_KEY)
+                if not closed_any:
+                    closed_any = res
+
+            return closed_any
+
+    def squareoff_all_indices_1515(self) -> None:
+        """15:15:00 EOD clock square-off across all active index positions."""
+        with self._lock:
+            for ukey, idx_st in self.index_underlyings.items():
+                pos = idx_st.get("current_position")
+                if pos and pos.get("status") == "OPEN":
+                    self._exit_single_trade(pos, "SQUAREOFF_1515", ukey)
 
     def emergency_stop(self) -> dict[str, Any]:
         """Emergency stop: exits open position and disables further entries."""
@@ -1615,17 +1916,76 @@ class GapEntryStrategyEngine:
     # Rehearsal & Testing Utilities
     # -------------------------------------------------------------------------
 
-    def force_arm_now(self) -> dict[str, Any]:
-        """Test trigger: Forces immediate snapshot and evaluation."""
+    def resolve_underlying_key(self, key: str | None) -> str:
+        if not key:
+            return NIFTY_KEY
+        k = key.strip()
+        if k in self.index_underlyings:
+            return k
+        kl = k.lower().replace(" ", "").replace("_", "")
+        if "bank" in kl:
+            return BANKNIFTY_KEY
+        if "sensex" in kl:
+            return SENSEX_KEY
+        if "nifty" in kl:
+            return NIFTY_KEY
+        return k
+
+    def force_arm_now(self, underlying_key: str | None = None) -> dict[str, Any]:
+        """
+        Forces immediate planning, locking, fresh snapshot, and arming for a specific index.
+        - Enables 1 more trade for this index today.
+        - Only affects the targeted index (single-single isolation).
+        """
         with self._lock:
-            spot = self.spot_price or 24000.0
-            self.load_contracts_if_needed()
-            self.plan_8_itm_contracts(spot)
-            self.lock_contracts()
-            self.take_snapshot()
-            self.state = "ARMED"
-            trade = self.evaluate_oi_buildup(force=True)
-            LOGGER.info("FORCE EVALUATION COMPLETED: Trade=%s", trade)
+            ukey = self.resolve_underlying_key(underlying_key)
+            idx_st = self.index_underlyings.get(ukey)
+            if not idx_st:
+                LOGGER.warning("force_arm_now: Unknown underlying %s", ukey)
+                return self.get_status()
+
+            # Prevent double-entry if this index currently holds an active trade
+            if idx_st.get("current_position") is not None or self.current_positions.get(ukey) is not None:
+                LOGGER.warning("force_arm_now: Cannot arm %s because it already has an active open position!", ukey)
+                return self.get_status()
+
+            # Allow another trade for this index
+            idx_st["today_trades_count"] = 0
+            if ukey == NIFTY_KEY:
+                self.today_trades_count = 0
+
+            # Ensure spot price is up to date
+            spot = idx_st.get("spot_price") or (self.spot_price if ukey == NIFTY_KEY else None)
+            if not spot or spot <= 0:
+                t = self.database.get_latest_tick(ukey)
+                if t and t.get("ltp"):
+                    spot = float(t["ltp"])
+                    idx_st["spot_price"] = spot
+                    if ukey == NIFTY_KEY:
+                        self.spot_price = spot
+
+            if not spot or spot <= 0:
+                spot = 25000.0 if ukey == NIFTY_KEY else (60000.0 if ukey == BANKNIFTY_KEY else 80000.0)
+
+            self.load_contracts_if_needed(ukey)
+            self.plan_8_itm_contracts(spot, underlying_key=ukey)
+            self.lock_contracts(underlying_key=ukey)
+            self.take_snapshot(underlying_key=ukey)
+            idx_st["state"] = "ARMED"
+            if ukey == NIFTY_KEY:
+                self.state = "ARMED"
+
+            # Dynamically subscribe feed to any newly locked option keys
+            locked = idx_st.get("locked_keys") or []
+            if self.feed and locked:
+                try:
+                    self.feed.subscribe(locked)
+                except Exception as e:
+                    LOGGER.debug("Feed subscribe on arm: %s", e)
+
+            # Evaluate immediately
+            trade = self.evaluate_oi_buildup(underlying_key=ukey, force=True)
+            LOGGER.info("FORCE ARM COMPLETED for %s: State=ARMED, Trade=%s", ukey, trade)
             return self.get_status()
 
     def reset_state(self) -> dict[str, Any]:
@@ -1710,6 +2070,8 @@ class GapEntryStrategyEngine:
                     if k in self.index_lots:
                         try:
                             self.index_lots[k] = max(1, int(v))
+                            if hasattr(self, "index_underlyings") and k in self.index_underlyings:
+                                self.index_underlyings[k]["lots"] = self.index_lots[k]
                         except (ValueError, TypeError):
                             pass
                 if NIFTY_KEY in self.index_lots:
@@ -1719,6 +2081,8 @@ class GapEntryStrategyEngine:
                 for k, v in body["index_enabled"].items():
                     if k in self.index_enabled:
                         self.index_enabled[k] = bool(v)
+                        if hasattr(self, "index_underlyings") and k in self.index_underlyings:
+                            self.index_underlyings[k]["enabled"] = self.index_enabled[k]
                 self._save_index_lots()
             if "order_buffer" in body:
                 self.order_buffer = float(body["order_buffer"])
@@ -1794,7 +2158,7 @@ class GapEntryStrategyEngine:
                 "decision": eval_res.get("decision", "WAIT"),
                 "summary_line": eval_res.get("summary_line", "WAIT: Initializing"),
                 "current_position": self.current_position,
-                "current_positions": {NIFTY_KEY: self.current_position} if self.current_position else {},
+                "current_positions": {k: v for k, v in self.current_positions.items() if v is not None},
                 "locked_contracts": locked_table,
                 "last_decision": self.last_decision,
                 "today_date": today_str,
@@ -1805,6 +2169,24 @@ class GapEntryStrategyEngine:
                 "today_net_pnl_inr": round(today_pnl, 2),
                 "today_pnl_points": round(today_pnl_pts, 2),
                 "lifetime_trades": len(trades),
+                "index_underlyings": {
+                    ukey: {
+                        "key": d["key"],
+                        "name": d["name"],
+                        "step": d["step"],
+                        "lot_size": d["lot_size"],
+                        "lots": d["lots"],
+                        "enabled": d["enabled"],
+                        "state": d["state"],
+                        "spot_price": d["spot_price"],
+                        "last_evaluation": d["last_evaluation"],
+                        "has_position": d["current_position"] is not None,
+                        "position": d["current_position"],
+                        "today_trades_count": d.get("today_trades_count", 0),
+                        "locked_contracts_count": len(d.get("locked_keys") or []),
+                    }
+                    for ukey, d in self.index_underlyings.items()
+                },
                 "stock_underlyings": {
                     sym: {
                         "symbol": d["symbol"],

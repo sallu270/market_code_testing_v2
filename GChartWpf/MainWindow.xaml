@@ -54,8 +54,14 @@
         <!-- ============ 2. TICKER STRIP + EXIT POSITION ============ -->
         <Border Grid.Row="1" Background="{StaticResource Bar}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1">
             <DockPanel Margin="12,0">
-                <Button DockPanel.Dock="Right" Style="{StaticResource ExitButton}" Content="⛔  Exit Position"
-                        Command="{Binding ExitPositionCommand}" Padding="16,6" VerticalAlignment="Center"/>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Style="{StaticResource ArmButton}" Content="{Binding ArmButtonText}"
+                            Command="{Binding ArmNowCommand}" Padding="14,6" Margin="0,0,10,0"
+                            ToolTip="Arm this index now to scan 8 ITM strikes and enter when 16-condition OI rules match"/>
+                    <Button Style="{StaticResource ExitButton}" Content="⛔  Exit All Positions"
+                            Command="{Binding ExitPositionCommand}" Padding="16,6"
+                            ToolTip="Instantly square off all open positions across Nifty, Bank Nifty, Sensex, and Stocks without confirmation"/>
+                </StackPanel>
 
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
                     <TextBlock Text="{Binding Clock}" FontFamily="Consolas" FontSize="16" FontWeight="Bold" Foreground="White" Margin="0,0,16,0"/>
@@ -338,6 +344,8 @@
                                     Padding="14,4" Margin="24,0,0,0" ToolTip="Click to toggle between Active and Paused today">
                                 <TextBlock Text="{Binding NiftyStatusText}" FontWeight="Bold" Foreground="{Binding NiftyStatusBrush}"/>
                             </Button>
+                            <Button Command="{Binding ArmNiftyCommand}" Style="{StaticResource ArmButton}"
+                                    Padding="14,4" Margin="10,0,0,0" Content="🎯  Arm Nifty" ToolTip="Arm Nifty 50 immediately"/>
                         </StackPanel>
                     </Border>
 
@@ -377,6 +385,8 @@
                                     Padding="14,4" Margin="24,0,0,0" ToolTip="Click to toggle between Active and Paused today">
                                 <TextBlock Text="{Binding BankNiftyStatusText}" FontWeight="Bold" Foreground="{Binding BankNiftyStatusBrush}"/>
                             </Button>
+                            <Button Command="{Binding ArmBankNiftyCommand}" Style="{StaticResource ArmButton}"
+                                    Padding="14,4" Margin="10,0,0,0" Content="🎯  Arm Bank Nifty" ToolTip="Arm Bank Nifty immediately"/>
                         </StackPanel>
                     </Border>
 
@@ -416,6 +426,8 @@
                                     Padding="14,4" Margin="24,0,0,0" ToolTip="Click to toggle between Active and Paused today">
                                 <TextBlock Text="{Binding SensexStatusText}" FontWeight="Bold" Foreground="{Binding SensexStatusBrush}"/>
                             </Button>
+                            <Button Command="{Binding ArmSensexCommand}" Style="{StaticResource ArmButton}"
+                                    Padding="14,4" Margin="10,0,0,0" Content="🎯  Arm Sensex" ToolTip="Arm Sensex immediately"/>
                         </StackPanel>
                     </Border>
 

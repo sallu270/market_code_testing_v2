@@ -26,6 +26,10 @@ public class MainViewModel : ObservableObject
         SetRankCommand = new RelayCommand(p => { RankBy = (string)p!; ApplyStockFilter(); });
         SetStrikeTotalCommand = new RelayCommand(p => StrikeTotal = int.Parse((string)p!));
         ExitPositionCommand = new RelayCommand(_ => ExitPosition());
+        ArmNowCommand = new RelayCommand(async _ => await ArmNowAsync(CurrentIndexKey));
+        ArmNiftyCommand = new RelayCommand(async _ => await ArmNowAsync(AppSettings.NiftyKey));
+        ArmBankNiftyCommand = new RelayCommand(async _ => await ArmNowAsync(AppSettings.BankNiftyKey));
+        ArmSensexCommand = new RelayCommand(async _ => await ArmNowAsync(AppSettings.SensexKey));
         RefreshStocksCommand = new RelayCommand(async _ => await LoadStocksAsync());
         SaveSelectionsCommand = new RelayCommand(async _ => await SaveSelectionsAsync());
         SaveIndexLotsCommand = new RelayCommand(async _ => await SaveIndexConfigAsync());
@@ -72,6 +76,10 @@ public class MainViewModel : ObservableObject
     public ICommand SetRankCommand { get; }
     public ICommand SetStrikeTotalCommand { get; }
     public ICommand ExitPositionCommand { get; }
+    public ICommand ArmNowCommand { get; }
+    public ICommand ArmNiftyCommand { get; }
+    public ICommand ArmBankNiftyCommand { get; }
+    public ICommand ArmSensexCommand { get; }
     public ICommand RefreshStocksCommand { get; }
     public ICommand SaveSelectionsCommand { get; }
     public ICommand SaveIndexLotsCommand { get; }
@@ -107,6 +115,7 @@ public class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(CurrentIndexKey));
             OnPropertyChanged(nameof(CurrentIndexName));
             OnPropertyChanged(nameof(ChartTitle));
+            OnPropertyChanged(nameof(ArmButtonText));
             if (value == "Stocks" && Stocks.Count == 0) _ = LoadStocksAsync();
             Candles = null;
             _ = RefreshAsync();
@@ -144,6 +153,7 @@ public class MainViewModel : ObservableObject
     };
 
     public string ChartTitle => CurrentIndexName;
+    public string ArmButtonText => $"🎯  Arm {CurrentIndexName}";
 
     // ---------------- header strip ----------------
     string _clock = "", _spotText = "NC=—", _state = "SETUP", _expiry = "", _posText = "FLAT (NO POSITION)", _pnlText = "₹0.00", _pts = "(0.00 pts)", _status = "Starting…", _connText = "Connecting", _strategySummary = "WAIT: Pre-09:18 Data Collection";
@@ -238,14 +248,25 @@ public class MainViewModel : ObservableObject
     void ApplyStatus(StatusInfo? s)
     {
         if (s == null) return;
-        State = s.State.ToUpperInvariant();
+
+        IndexStatusInfo? curIdxInfo = null;
+        if (s.IndexUnderlyings != null && s.IndexUnderlyings.TryGetValue(CurrentIndexKey, out var found))
+            curIdxInfo = found;
+
+        State = (curIdxInfo?.State ?? s.State).ToUpperInvariant();
         if (s.Expiry != "") Expiry = "EXP: " + s.Expiry;
-        PositionText = s.HasPosition ? $"LONG {s.PositionSymbol} @ {s.EntryPrice:N2}" : "FLAT (NO POSITION)";
-        PosBrush = s.HasPosition ? Pal.Green : Pal.Grey;
+
+        var hasPos = curIdxInfo != null ? curIdxInfo.HasPosition : s.HasPosition;
+        var posSym = curIdxInfo != null ? curIdxInfo.PositionSymbol : s.PositionSymbol;
+        var entryPrice = curIdxInfo != null ? curIdxInfo.EntryPrice : s.EntryPrice;
+
+        PositionText = hasPos ? $"LONG {posSym} @ {entryPrice:N2}" : "FLAT (NO POSITION)";
+        PosBrush = hasPos ? Pal.Green : Pal.Grey;
         PnlText = (s.TodayNetPnlSigned()) ;
         PointsText = $"({s.TodayPoints:N2} pts)";
         PnlBrush = s.TodayPnl > 0 ? Pal.Green : s.TodayPnl < 0 ? Pal.Red : Pal.White;
-        if (!string.IsNullOrEmpty(s.SummaryLine)) StrategySummary = s.SummaryLine;
+        var summary = curIdxInfo != null && !string.IsNullOrEmpty(curIdxInfo.SummaryLine) ? curIdxInfo.SummaryLine : s.SummaryLine;
+        if (!string.IsNullOrEmpty(summary)) StrategySummary = summary;
         if (!_lotsInitialized)
         {
             _lotsInitialized = true;
@@ -471,14 +492,41 @@ public class MainViewModel : ObservableObject
         Trades.Clear(); foreach (var x in t) Trades.Add(x);
     }
 
-    // ===================== the single action button =====================
+    // ===================== action buttons =====================
     async void ExitPosition()
     {
-        var ok = MessageBox.Show("Exit the open position right now?", "Exit Position",
-                                 MessageBoxButton.YesNo, MessageBoxImage.Warning);
-        if (ok != MessageBoxResult.Yes) return;
-        try { await _src.ExitPositionAsync(); StatusMessage = "Exit order sent."; await RefreshAsync(); }
-        catch (Exception ex) { StatusMessage = "Exit failed: " + ex.Message; }
+        try
+        {
+            await _src.ExitPositionAsync("ALL");
+            StatusMessage = "⚡ Immediate Square-off: All open positions exited.";
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "Exit failed: " + ex.Message;
+        }
+    }
+
+    async Task ArmNowAsync(string? indexKey)
+    {
+        var key = string.IsNullOrEmpty(indexKey) ? CurrentIndexKey : indexKey;
+        var name = key switch
+        {
+            var k when k == AppSettings.BankNiftyKey => "BANK NIFTY",
+            var k when k == AppSettings.SensexKey => "SENSEX",
+            _ => "NIFTY 50"
+        };
+
+        try
+        {
+            await _src.ArmNowAsync(key);
+            StatusMessage = $"🎯 {name} ARMED immediately for trade entry.";
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Arm failed: {ex.Message}";
+        }
     }
 
     void ExportTradesCsv()

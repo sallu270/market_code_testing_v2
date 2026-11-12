@@ -66,6 +66,14 @@
         <Setter Property="FontWeight" Value="Bold"/>
     </Style>
 
+    <Style x:Key="ArmButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="#123824"/>
+        <Setter Property="BorderBrush" Value="#00C853"/>
+        <Setter Property="Foreground" Value="#69F0AE"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+
     <Style x:Key="CsvButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
         <Setter Property="Background" Value="#0F3D3D"/>
         <Setter Property="BorderBrush" Value="#009999"/>

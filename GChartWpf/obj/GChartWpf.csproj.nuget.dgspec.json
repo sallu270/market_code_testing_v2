@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "d:\\Salauddin-projects\\algo_trading\\GChartWpf\\GChartWpf.csproj": {}
+    "D:\\Salauddin-projects\\algo_trading\\GChartWpf\\GChartWpf.csproj": {}
   },
   "projects": {
-    "d:\\Salauddin-projects\\algo_trading\\GChartWpf\\GChartWpf.csproj": {
+    "D:\\Salauddin-projects\\algo_trading\\GChartWpf\\GChartWpf.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "d:\\Salauddin-projects\\algo_trading\\GChartWpf\\GChartWpf.csproj",
+        "projectUniqueName": "D:\\Salauddin-projects\\algo_trading\\GChartWpf\\GChartWpf.csproj",
         "projectName": "GChartWpf",
-        "projectPath": "d:\\Salauddin-projects\\algo_trading\\GChartWpf\\GChartWpf.csproj",
+        "projectPath": "D:\\Salauddin-projects\\algo_trading\\GChartWpf\\GChartWpf.csproj",
         "packagesPath": "C:\\Users\\Pearl Organisation\\.nuget\\packages\\",
-        "outputPath": "d:\\Salauddin-projects\\algo_trading\\GChartWpf\\obj\\",
+        "outputPath": "D:\\Salauddin-projects\\algo_trading\\GChartWpf\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\Pearl Organisation\\AppData\\Roaming\\NuGet\\NuGet.Config"

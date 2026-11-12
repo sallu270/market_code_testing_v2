@@ -44,6 +44,19 @@ public class StrikeRow
     public string PeBuildUp { get; set; } = "—";
 }
 
+public class IndexStatusInfo
+{
+    public string Key = "";
+    public string Name = "";
+    public string State = "SETUP";
+    public double SpotPrice;
+    public bool HasPosition;
+    public string PositionSymbol = "";
+    public double EntryPrice;
+    public string SummaryLine = "";
+    public int TodayTradesCount;
+}
+
 public class StatusInfo
 {
     public string State = "—";
@@ -69,6 +82,7 @@ public class StatusInfo
     public string Stars = "";
     public string Decision = "WAIT";
     public string SummaryLine = "";
+    public Dictionary<string, IndexStatusInfo> IndexUnderlyings = new();
 }
 
 public class TradeRow

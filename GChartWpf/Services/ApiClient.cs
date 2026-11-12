@@ -111,6 +111,34 @@ public class ApiClient : IDataSource
             if (idxEnabled.TryGetProperty("BSE_INDEX|SENSEX", out var sep)) sEn = sep.ValueKind == JsonValueKind.True;
         }
 
+        var idxUnderlyings = new Dictionary<string, IndexStatusInfo>();
+        if (r.TryGetProperty("index_underlyings", out var iuElem) && iuElem.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in iuElem.EnumerateObject())
+            {
+                var val = prop.Value;
+                var info = new IndexStatusInfo
+                {
+                    Key = prop.Name,
+                    Name = S(val, "name"),
+                    State = S(val, "state"),
+                    SpotPrice = D(val, "spot_price"),
+                    HasPosition = val.TryGetProperty("has_position", out var hp) && hp.ValueKind == JsonValueKind.True,
+                    TodayTradesCount = (int)D(val, "today_trades_count")
+                };
+                if (val.TryGetProperty("position", out var posElem) && posElem.ValueKind == JsonValueKind.Object)
+                {
+                    info.PositionSymbol = S(posElem, "symbol");
+                    info.EntryPrice = D(posElem, "entry_price");
+                }
+                if (val.TryGetProperty("last_evaluation", out var evalElem) && evalElem.ValueKind == JsonValueKind.Object)
+                {
+                    info.SummaryLine = S(evalElem, "summary_line");
+                }
+                idxUnderlyings[prop.Name] = info;
+            }
+        }
+
         return new StatusInfo
         {
             State = S(r, "state"), Spot = D(r, "spot_price"), Expiry = S(r, "active_expiry"),
@@ -122,6 +150,7 @@ public class ApiClient : IDataSource
             CeBuildup = S(r, "ce_buildup"), PeBuildup = S(r, "pe_buildup"),
             Stars = S(r, "stars"), Decision = S(r, "decision"),
             SummaryLine = S(r, "summary_line"),
+            IndexUnderlyings = idxUnderlyings,
             RuleNumber = r.TryGetProperty("rule_number", out var rp) && rp.ValueKind == JsonValueKind.Number ? rp.GetInt32() : null
         };
     }
@@ -238,10 +267,18 @@ public class ApiClient : IDataSource
         resp.EnsureSuccessStatusCode();
     }
 
-    // ---------- the only action button ----------
-    public async Task ExitPositionAsync()
+    // ---------- action buttons ----------
+    public async Task ExitPositionAsync(string? indexKey = null)
     {
-        using var resp = await _http.PostAsync("/api/strategy/exit", new StringContent("{}", Encoding.UTF8, "application/json"));
+        var body = JsonSerializer.Serialize(new { index = indexKey ?? "" });
+        using var resp = await _http.PostAsync("/api/strategy/exit", new StringContent(body, Encoding.UTF8, "application/json"));
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task ArmNowAsync(string? indexKey = null)
+    {
+        var body = JsonSerializer.Serialize(new { index = indexKey ?? "" });
+        using var resp = await _http.PostAsync("/api/strategy/arm-now", new StringContent(body, Encoding.UTF8, "application/json"));
         resp.EnsureSuccessStatusCode();
     }
 }

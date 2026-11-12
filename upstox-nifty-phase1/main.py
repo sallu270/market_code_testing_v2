@@ -197,38 +197,52 @@ def strategy_schedule_worker() -> None:
             now_time = now_dt.strftime("%H:%M:%S")
 
             if strategy_engine.enabled:
-                # Rule R5: Plan contracts if spot known and still in planning
-                if strategy_engine.state in ("SETUP", "PLANNING") and strategy_engine.spot_price:
-                    strategy_engine.plan_8_itm_contracts(strategy_engine.spot_price)
+                # Dynamic planning for indices
+                if hasattr(strategy_engine, "plan_all_indices"):
+                    strategy_engine.plan_all_indices()
 
                 # Lock at 09:14:55
                 if "09:14:55" <= now_time < "09:15:00":
-                    if strategy_engine.state in ("SETUP", "PLANNING"):
+                    if hasattr(strategy_engine, "lock_all_indices"):
+                        strategy_engine.lock_all_indices()
+                    elif strategy_engine.state in ("SETUP", "PLANNING"):
                         strategy_engine.lock_contracts()
                     if hasattr(strategy_engine, "lock_all_stocks"):
                         strategy_engine.lock_all_stocks()
 
                 # Snapshot at 09:15:00 (No trading, data collection only)
                 elif "09:15:00" <= now_time < "09:18:00":
-                    if not getattr(strategy_engine, "snapshot_taken", False):
+                    if hasattr(strategy_engine, "snapshot_all_indices"):
+                        strategy_engine.snapshot_all_indices()
+                    elif not getattr(strategy_engine, "snapshot_taken", False):
                         strategy_engine.take_snapshot()
                     if hasattr(strategy_engine, "snapshot_all_stocks"):
                         strategy_engine.snapshot_all_stocks()
 
                 # From 09:18:00: Evaluation window active
                 elif now_time >= "09:18:00":
-                    if not getattr(strategy_engine, "snapshot_taken", False):
+                    if hasattr(strategy_engine, "snapshot_all_indices"):
+                        strategy_engine.snapshot_all_indices()
+                    elif not getattr(strategy_engine, "snapshot_taken", False):
                         strategy_engine.take_snapshot()
-                    if strategy_engine.state in ("LOCKED", "DATA_COLLECTION"):
+                    if hasattr(strategy_engine, "arm_all_indices"):
+                        strategy_engine.arm_all_indices()
+                    elif strategy_engine.state in ("LOCKED", "DATA_COLLECTION"):
                         strategy_engine.state = "ARMED"
                     if hasattr(strategy_engine, "snapshot_all_stocks"):
                         strategy_engine.snapshot_all_stocks()
                     if hasattr(strategy_engine, "arm_all_stocks"):
                         strategy_engine.arm_all_stocks()
 
+                    # Periodic evaluation across active underlyings (indices & stocks)
+                    if now_time < "14:45:00" and hasattr(strategy_engine, "evaluate_all_active_underlyings"):
+                        strategy_engine.evaluate_all_active_underlyings()
+
                 # EOD square-off at 15:15:00 by clock
                 if now_time >= "15:15:00":
-                    if strategy_engine.state == "HOLDING":
+                    if hasattr(strategy_engine, "squareoff_all_indices_1515"):
+                        strategy_engine.squareoff_all_indices_1515()
+                    elif strategy_engine.state == "HOLDING":
                         strategy_engine.manual_exit(reason="SQUAREOFF_1515")
                     if hasattr(strategy_engine, "squareoff_all_stocks_1515"):
                         strategy_engine.squareoff_all_stocks_1515()
@@ -488,17 +502,23 @@ def api_strategy_config() -> Response:
     new_cfg = strategy_engine.update_config(body)
     return jsonify(new_cfg)
 
-@app.post("/api/strategy/exit")
+@app.route("/api/strategy/exit", methods=["GET", "POST"])
 def api_strategy_exit() -> Response:
-    """Manual exit trigger for open position (Rule R21)."""
-    pos = strategy_engine.manual_exit(reason="MANUAL")
+    """Manual exit trigger for open position (Rule R21). If key is None or 'ALL', exits all open positions."""
+    body = request.get_json(silent=True) or {}
+    key = body.get("underlying_key") or body.get("index") or request.args.get("index") or None
+    if key and str(key).strip().upper() in ("ALL", "", "NONE"):
+        key = None
+    pos = strategy_engine.manual_exit(reason="MANUAL", underlying_key=key)
     publish("strategy_update", strategy_engine.get_status())
     return jsonify({"success": True, "position": pos})
 
-@app.post("/api/strategy/arm-now")
+@app.route("/api/strategy/arm-now", methods=["GET", "POST"])
 def api_strategy_arm_now() -> Response:
-    """Test utility: forces immediate planning, locking, and arming."""
-    status = strategy_engine.force_arm_now()
+    """Manual trigger: forces immediate planning, locking, snapshot, and arming for an index."""
+    body = request.get_json(silent=True) or {}
+    key = body.get("underlying_key") or body.get("index") or request.args.get("index") or None
+    status = strategy_engine.force_arm_now(underlying_key=key)
     publish("strategy_update", status)
     return jsonify({"success": True, "status": status})
 

@@ -8,6 +8,6 @@ build_property.PlatformNeutralAssembly =
 build_property.EnforceExtendedAnalyzerRules = 
 build_property._SupportedPlatformList = Linux,macOS,Windows
 build_property.RootNamespace = GChartWpf
-build_property.ProjectDir = d:\Salauddin-projects\algo_trading\GChartWpf\
+build_property.ProjectDir = D:\Salauddin-projects\algo_trading\GChartWpf\
 build_property.EnableComHosting = 
 build_property.EnableGeneratedComInterfaceComImportInterop = 

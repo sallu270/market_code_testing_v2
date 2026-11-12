@@ -8,5 +8,8 @@
     "NSE_INDEX|Nifty 50": true,
     "NSE_INDEX|Nifty Bank": true,
     "BSE_INDEX|SENSEX": true
-  }
+  },
+  "lots_full": 3,
+  "lots_normal": 2,
+  "lots_scalp": 1
 }
