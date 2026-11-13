@@ -330,6 +330,50 @@ class TestFirstPositiveTickStrategy(unittest.TestCase):
         self.assertIsNotNone(winner)
         self.assertEqual(winner["instrument_key"], k2)
 
+    def test_index_spot_tick_post_open_has_market_open_time(self):
+        """Validates that incoming index spot ticks after 09:15 do not raise AttributeError on market_open_time."""
+        self.assertEqual(self.engine.market_open_time, "09:15:00")
+
+        idx_st = self.engine.index_underlyings[NIFTY_KEY]
+        idx_st["state"] = "LOCKED"
+        idx_st["locked_keys"] = ["NSE_FO|NIFTY26NOV24000CE"]
+
+        tick = {
+            "instrument_key": NIFTY_KEY,
+            "ltp": 24100.0,
+            "timestamp": "2026-11-13T09:40:42.509+05:30",
+        }
+        # Calling on_tick with spot tick must process cleanly without raising AttributeError
+        res = self.engine.on_tick(tick)
+        self.assertIsNone(res)
+        self.assertEqual(idx_st["state"], "ARMED")
+
+        # Bank Nifty
+        bn_st = self.engine.index_underlyings[BANKNIFTY_KEY]
+        bn_st["state"] = "LOCKED"
+        bn_st["locked_keys"] = ["NSE_FO|BANKNIFTY26NOV52000CE"]
+        bn_tick = {
+            "instrument_key": BANKNIFTY_KEY,
+            "ltp": 52100.0,
+            "timestamp": "2026-11-13T09:40:42.509+05:30",
+        }
+        res_bn = self.engine.on_tick(bn_tick)
+        self.assertIsNone(res_bn)
+        self.assertEqual(bn_st["state"], "ARMED")
+
+        # Sensex
+        sx_st = self.engine.index_underlyings[SENSEX_KEY]
+        sx_st["state"] = "LOCKED"
+        sx_st["locked_keys"] = ["BSE_FO|SENSEX26NOV78000CE"]
+        sx_tick = {
+            "instrument_key": SENSEX_KEY,
+            "ltp": 78200.0,
+            "timestamp": "2026-11-13T09:40:42.509+05:30",
+        }
+        res_sx = self.engine.on_tick(sx_tick)
+        self.assertIsNone(res_sx)
+        self.assertEqual(sx_st["state"], "ARMED")
+
 
 if __name__ == "__main__":
     unittest.main()

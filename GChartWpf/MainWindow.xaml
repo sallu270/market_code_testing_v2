@@ -46,7 +46,6 @@
                     <RadioButton Style="{StaticResource SegButton}" GroupName="tf" Content="3"  Command="{Binding SetTimeframeCommand}" CommandParameter="3m"/>
                     <RadioButton Style="{StaticResource SegButton}" GroupName="tf" Content="5"  Command="{Binding SetTimeframeCommand}" CommandParameter="5m"/>
                     <RadioButton Style="{StaticResource SegButton}" GroupName="tf" Content="15" Command="{Binding SetTimeframeCommand}" CommandParameter="15m"/>
-                    <RadioButton Style="{StaticResource SegButton}" GroupName="tf" Content="D"  Command="{Binding SetTimeframeCommand}" CommandParameter="1d"/>
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -96,7 +95,7 @@
 
                 <!-- chart -->
                 <Grid Grid.Row="0">
-                    <c:CandleChart Candles="{Binding Candles}" IsDaily="{Binding IsDaily}"/>
+                    <c:CandleChart Candles="{Binding Candles}" IsDaily="{Binding IsDaily}" Timeframe="{Binding Timeframe}"/>
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="10,6,0,0" IsHitTestVisible="False">
                         <TextBlock Text="{Binding ChartTitle}" FontWeight="Bold" FontSize="14" Foreground="White"/>
                         <TextBlock Text=" · REALTIME CANDLES" FontFamily="Consolas" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>

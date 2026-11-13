@@ -50,25 +50,47 @@ class OneMinuteCandleBuilder:
 
     def process_tick(self, tick: dict[str, Any]) -> dict[str, Any]:
         instrument_key = str(tick["instrument_key"])
-        timestamp_ms = int(tick["exchange_timestamp_ms"])
+        timestamp_ms = int(tick.get("exchange_timestamp_ms") or tick.get("received_timestamp_ms") or (time.time() * 1000))
+        now_ms = int(time.time() * 1000)
+
+        # Guard against stale / distorted exchange timestamps (e.g. pre-market lastTradeTime from previous session)
+        if abs(now_ms - timestamp_ms) > 10 * 60 * 1000:
+            timestamp_ms = int(tick.get("received_timestamp_ms") or now_ms)
+
         minute_start = self._minute_start(timestamp_ms)
         price = float(tick["ltp"])
         volume_increment = self._volume_increment(instrument_key, tick)
         open_interest = self._safe_float(tick.get("open_interest"))
-        now_ms = int(time.time() * 1000)
 
         with self._lock:
             current = self._active.get(instrument_key)
 
             if current is None:
-                current = self._new_candle(
-                    instrument_key,
-                    minute_start,
-                    price,
-                    volume_increment,
-                    open_interest,
-                    now_ms,
-                )
+                # Bot Restart / Startup: Check if an active open candle already exists in database for this minute
+                existing = self.database.get_candle(instrument_key, minute_start)
+                if existing and not existing.get("is_closed"):
+                    current = {
+                        "instrument_key": instrument_key,
+                        "candle_start_ms": minute_start,
+                        "open": float(existing["open"]),
+                        "high": max(float(existing["high"]), price),
+                        "low": min(float(existing["low"]), price),
+                        "close": price,
+                        "volume": float(existing.get("volume", 0)) + volume_increment,
+                        "open_interest": open_interest if open_interest is not None else existing.get("open_interest"),
+                        "tick_count": int(existing.get("tick_count", 0)) + 1,
+                        "is_closed": False,
+                        "updated_at_ms": now_ms,
+                    }
+                else:
+                    current = self._new_candle(
+                        instrument_key,
+                        minute_start,
+                        price,
+                        volume_increment,
+                        open_interest,
+                        now_ms,
+                    )
                 self._active[instrument_key] = current
 
             elif minute_start > current["candle_start_ms"]:
@@ -88,6 +110,10 @@ class OneMinuteCandleBuilder:
                 self._active[instrument_key] = current
 
             elif minute_start < current["candle_start_ms"]:
+                existing = self.database.get_candle(instrument_key, minute_start)
+                if existing and existing.get("is_closed"):
+                    # Historical closed candle is finalized; never overwrite with late tick
+                    return dict(current)
                 late_candle = self._new_candle(
                     instrument_key,
                     minute_start,

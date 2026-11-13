@@ -164,6 +164,7 @@ class GapEntryStrategyEngine:
         self.settings_freeze_time: str = "09:00:00"
         self.planning_start_time: str = "09:00:00"
         self.lock_time: str = "09:14:55"
+        self.market_open_time: str = "09:15:00"
         self.snapshot_time: str = "09:15:00"
         self.entry_start_time: str = "09:18:00"
         self.entry_end_time: str = "14:45:00"
@@ -1994,15 +1995,16 @@ class GapEntryStrategyEngine:
             if inst_key == NIFTY_KEY:
                 self.spot_price = ltp
             with self._lock:
+                market_open_hms = getattr(self, "market_open_time", getattr(self, "snapshot_time", "09:15:00"))
                 # 09:00 to 09:14:55: Dynamic planning around spot
                 if idx_st.get("state") in ("SETUP", "PLANNING"):
                     if now_time_hms < self.lock_time:
                         idx_st["state"] = "PLANNING"
                         self.plan_8_itm_contracts(ltp, underlying_key=inst_key)
-                    elif self.lock_time <= now_time_hms < self.market_open_time:
+                    elif self.lock_time <= now_time_hms < market_open_hms:
                         if idx_st.get("state") != "LOCKED":
                             self.lock_contracts(underlying_key=inst_key)
-                    elif now_time_hms >= self.market_open_time:
+                    elif now_time_hms >= market_open_hms:
                         if idx_st.get("state") not in ("ARMED", "ORDER_SENT", "HOLDING", "CLOSED"):
                             if not idx_st.get("locked_keys"):
                                 self.lock_contracts(underlying_key=inst_key)
@@ -2013,7 +2015,7 @@ class GapEntryStrategyEngine:
                             LOGGER.info("09:15:00 MARKET OPEN for %s: State -> ARMED (Watching for first positive tick).", inst_key)
 
                 # Schedule checks
-                if now_time_hms >= self.market_open_time and idx_st.get("state") in ("LOCKED", "PLANNING", "SETUP", "DATA_COLLECTION"):
+                if now_time_hms >= market_open_hms and idx_st.get("state") in ("LOCKED", "PLANNING", "SETUP", "DATA_COLLECTION"):
                     if not idx_st.get("locked_keys"):
                         self.lock_contracts(underlying_key=inst_key)
                     self.take_snapshot(underlying_key=inst_key)
@@ -3220,6 +3222,7 @@ class GapEntryStrategyEngine:
             "max_spread_pct": self.max_spread_pct,
             "settings_freeze_time": self.settings_freeze_time,
             "lock_time": self.lock_time,
+            "market_open_time": getattr(self, "market_open_time", "09:15:00"),
             "snapshot_time": self.snapshot_time,
             "entry_start_time": self.entry_start_time,
             "entry_end_time": self.entry_end_time,

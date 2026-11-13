@@ -373,7 +373,7 @@ def api_ticks() -> Response:
 
 def _aggregate_candles(candles_1m: list[dict[str, Any]], timeframe: str) -> list[dict[str, Any]]:
     if timeframe == "1m":
-        return candles_1m
+        return sorted(candles_1m, key=lambda x: int(x["candle_start_ms"]))
 
     bucket_ms_map = {
         "3m": 3 * 60 * 1000,
@@ -382,8 +382,9 @@ def _aggregate_candles(candles_1m: list[dict[str, Any]], timeframe: str) -> list
     }
     is_daily = timeframe in ("d", "1d", "day")
 
+    candles_sorted = sorted(candles_1m, key=lambda x: int(x["candle_start_ms"]))
     grouped: dict[Any, dict[str, Any]] = {}
-    for c in candles_1m:
+    for c in candles_sorted:
         start_ms = int(c["candle_start_ms"])
         if is_daily:
             dt = datetime.fromtimestamp(start_ms / 1000, tz=IST)
@@ -429,7 +430,7 @@ def api_candles() -> Response:
         default=settings.ui_candle_limit,
         type=int,
     )
-    limit = max(1, min(limit or settings.ui_candle_limit, 1000))
+    limit = max(1, min(limit or settings.ui_candle_limit, 2000))
 
     multipliers = {
         "1m": 1,
@@ -442,7 +443,7 @@ def api_candles() -> Response:
     multiplier = multipliers.get(timeframe, 1)
     values = database.latest_candles(
         instrument_key=instrument_key,
-        limit=min(limit * multiplier, 2000),
+        limit=min(limit * multiplier, 3000),
     )
 
     if timeframe in ("3m", "5m", "15m", "d", "1d"):

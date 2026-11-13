@@ -1,5 +1,5 @@
 {
-  "top_n": 3,
+  "top_n": 10,
   "stocks": [
     {
       "symbol": "RELIANCE",
@@ -25,6 +25,69 @@
       "key": "NSE_EQ|INE090A01021",
       "lot_size": 700,
       "strike_step": 10.0,
+      "lots": 1,
+      "enabled": true
+    },
+    {
+      "symbol": "INFY",
+      "name": "Infosys Ltd.",
+      "key": "NSE_EQ|INE009A01021",
+      "lot_size": 400,
+      "strike_step": 20.0,
+      "lots": 1,
+      "enabled": true
+    },
+    {
+      "symbol": "TCS",
+      "name": "Tata Consultancy Services Ltd.",
+      "key": "NSE_EQ|INE467B01029",
+      "lot_size": 175,
+      "strike_step": 20.0,
+      "lots": 1,
+      "enabled": true
+    },
+    {
+      "symbol": "BHARTIARTL",
+      "name": "Bharti Airtel Ltd.",
+      "key": "NSE_EQ|INE397D01024",
+      "lot_size": 475,
+      "strike_step": 10.0,
+      "lots": 1,
+      "enabled": true
+    },
+    {
+      "symbol": "ITC",
+      "name": "ITC Ltd.",
+      "key": "NSE_EQ|INE154A01025",
+      "lot_size": 1600,
+      "strike_step": 5.0,
+      "lots": 1,
+      "enabled": true
+    },
+    {
+      "symbol": "SBIN",
+      "name": "State Bank of India",
+      "key": "NSE_EQ|INE062A01020",
+      "lot_size": 750,
+      "strike_step": 5.0,
+      "lots": 1,
+      "enabled": true
+    },
+    {
+      "symbol": "LT",
+      "name": "Larsen & Toubro Ltd.",
+      "key": "NSE_EQ|INE018A01030",
+      "lot_size": 150,
+      "strike_step": 20.0,
+      "lots": 1,
+      "enabled": true
+    },
+    {
+      "symbol": "BAJFINANCE",
+      "name": "Bajaj Finance Ltd.",
+      "key": "NSE_EQ|INE296A01024",
+      "lot_size": 125,
+      "strike_step": 50.0,
       "lots": 1,
       "enabled": true
     }

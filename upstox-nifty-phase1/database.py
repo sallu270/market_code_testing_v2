@@ -257,7 +257,10 @@ class MarketDatabase:
                     END,
                     high = MAX(candles_1m.high, excluded.high),
                     low = MIN(candles_1m.low, excluded.low),
-                    close = excluded.close,
+                    close = CASE 
+                        WHEN candles_1m.is_closed = 1 AND excluded.is_closed = 0 THEN candles_1m.close 
+                        ELSE excluded.close 
+                    END,
                     volume = MAX(candles_1m.volume, excluded.volume),
                     open_interest = COALESCE(excluded.open_interest, candles_1m.open_interest),
                     tick_count = CASE 
@@ -282,6 +285,18 @@ class MarketDatabase:
                 ),
             )
             self._connection.commit()
+
+    def get_candle(self, instrument_key: str, candle_start_ms: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT *
+                FROM candles_1m
+                WHERE instrument_key = ? AND candle_start_ms = ?
+                """,
+                (instrument_key, candle_start_ms),
+            ).fetchone()
+            return dict(row) if row else None
 
     def mark_candle_closed(
         self,

@@ -51,7 +51,7 @@ public class ApiClient : IDataSource
     public async Task<List<Candle>> GetCandlesAsync(string key, string tf)
     {
         if (tf == "tick") tf = "1m";
-        using var doc = await GetJson($"/api/candles?instrument_key={Uri.EscapeDataString(key)}&timeframe={tf}&limit=300");
+        using var doc = await GetJson($"/api/candles?instrument_key={Uri.EscapeDataString(key)}&timeframe={tf}&limit=600");
         var list = new List<Candle>();
         foreach (var c in Arr(doc.RootElement, "candles"))
             list.Add(new Candle((long)D(c, "candle_start_ms"), D(c, "open"), D(c, "high"), D(c, "low"), D(c, "close"), D(c, "volume")));
