@@ -18,9 +18,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import os
+from pathlib import Path
+
 from candle_builder import OneMinuteCandleBuilder
 from config import IST, load_settings
 from database import MarketDatabase
+from flow_engine import FLOW_ENGINE
 from stock_screener import StockScreener
 from strategy_engine import GapEntryStrategyEngine, PressureStrategyEngine
 from upstox_feed import UpstoxFeed
@@ -108,6 +112,17 @@ def handle_tick(tick: dict[str, Any]) -> None:
         publish("tick", tick)
         candle_builder.process_tick(tick)
 
+        # Feed tick to PCR Flow Engine (v0.0.5 Section 6A)
+        inst_k = str(tick.get("instrument_key") or "")
+        FLOW_ENGINE.on_tick(
+            inst_k,
+            ltp=float(tick.get("ltp") or 0.0),
+            oi=float(tick["open_interest"]) if tick.get("open_interest") is not None else None,
+            vol=float(tick["volume"]) if tick.get("volume") is not None else None,
+            bid=float(tick.get("bid_price") or 0.0),
+            ask=float(tick.get("ask_price") or 0.0),
+        )
+
         trade = strategy_engine.on_tick(tick)
         if trade:
             publish("strategy_trade", trade)
@@ -194,10 +209,42 @@ def strategy_schedule_worker() -> None:
         LOGGER.info("Gap Entry Strategy contracts preloaded across indices.")
 
     last_broadcast_ms = 0
+    _last_flow_bar_min = -1
     while True:
         try:
             now_dt = datetime.now(IST)
             now_time = now_dt.strftime("%H:%M:%S")
+
+            # Sync basket contracts to FLOW_ENGINE (v0.0.5 Section 6A)
+            for ukey, idx_st in strategy_engine.index_underlyings.items():
+                if ukey in FLOW_ENGINE.trackers:
+                    trk = FLOW_ENGINE.trackers[ukey]
+                    if not trk.basket_contracts and idx_st.get("locked_keys"):
+                        b_contracts = [
+                            strategy_engine.hot_cache[k] for k in idx_st["locked_keys"]
+                            if k in strategy_engine.hot_cache
+                        ]
+                        if b_contracts:
+                            spot_p = idx_st.get("spot_price") or 0.0
+                            trk.set_basket(b_contracts, atm_strike=spot_p)
+                            if not trk.baseline_taken:
+                                trk.take_0915_baseline()
+                            if feed and hasattr(feed, "subscribe"):
+                                b_keys = [c["instrument_key"] for c in b_contracts if c.get("instrument_key")]
+                                if b_keys:
+                                    feed.subscribe(b_keys)
+
+            # Trigger 1-minute bar evaluation for Flow Engine
+            cur_minute = now_dt.minute
+            if cur_minute != _last_flow_bar_min:
+                _last_flow_bar_min = cur_minute
+                cur_bar_ms = int(time.time() * 1000)
+                for ukey, trk in FLOW_ENGINE.trackers.items():
+                    if trk.is_index and ukey in strategy_engine.index_underlyings:
+                        st_item = strategy_engine.index_underlyings[ukey]
+                        s_p = float(st_item.get("spot_price") or 0.0)
+                        if s_p > 0:
+                            trk.on_minute_bar_closed(cur_bar_ms, s_p, s_p)
 
             if strategy_engine.enabled:
                 # Dynamic planning for indices
@@ -512,8 +559,14 @@ def api_option_chain() -> Response:
 
     if data and hasattr(feed, "subscribe"):
         try:
+            # Center on ATM strikes rather than lowest strikes in the chain
+            ref_spot = float(spot_price or 25000.0)
+            sorted_strikes = sorted(
+                data,
+                key=lambda item: abs(float(item.get("strike_price") or 0.0) - ref_spot)
+            )
             keys_to_sub = []
-            for item in data[:40]:
+            for item in sorted_strikes[:30]:
                 call_k = item.get("call_options", {}).get("instrument_key")
                 put_k = item.get("put_options", {}).get("instrument_key")
                 if call_k:
@@ -531,6 +584,14 @@ def api_option_chain() -> Response:
         "spot_price": spot_price,
         "strikes": data,
     })
+
+@app.post("/api/feed/subscribe")
+def api_feed_subscribe() -> Response:
+    body = request.get_json(silent=True) or {}
+    keys = body.get("keys", [])
+    if feed and hasattr(feed, "subscribe") and keys:
+        feed.subscribe(keys)
+    return jsonify({"status": "subscribed", "keys": keys})
 
 @app.get("/api/strategy/status")
 def api_strategy_status() -> Response:
@@ -602,6 +663,24 @@ def api_strategy_trades() -> Response:
         target_date = date_param.strip()
 
     trades = database.get_strategy_trades(limit=limit, trade_date=target_date)
+
+    # Merge live MTM P&L for open positions so UI Journal displays ticking live P&L on every tick
+    if hasattr(strategy_engine, "get_live_open_positions"):
+        try:
+            live_map = strategy_engine.get_live_open_positions()
+            trade_id_map = {p.get("trade_id"): p for p in live_map.values() if p.get("trade_id")}
+            for t in trades:
+                if t.get("status") == "OPEN":
+                    tid = t.get("trade_id")
+                    if tid in trade_id_map:
+                        live = trade_id_map[tid]
+                        t["net_pnl"] = live.get("net_pnl", 0.0)
+                        t["pnl_points"] = live.get("pnl_points", 0.0)
+                        t["current_price"] = live.get("current_price", 0.0)
+                        t["exit_price"] = live.get("bid_price", 0.0)
+        except Exception as ex:
+            LOGGER.debug("Could not merge live trades PnL: %s", ex)
+
     return jsonify({
         "trades": trades,
         "date": target_date or "all",
@@ -628,6 +707,15 @@ def api_strategy_alerts() -> Response:
     limit = request.args.get("limit", default=50, type=int)
     alerts = strategy_engine.get_alerts(limit=limit) if hasattr(strategy_engine, "get_alerts") else []
     return jsonify({"alerts": alerts})
+
+@app.get("/api/strategy/flow")
+def api_strategy_flow() -> Response:
+    """Section 6B Phase 1 Simple PCR Flow Monitor endpoint."""
+    try:
+        return jsonify(FLOW_ENGINE.get_phase1_dashboard())
+    except Exception as exc:
+        LOGGER.error("Failed to generate flow dashboard: %s", exc)
+        return jsonify({"status": "LIVE", "timestamp": "", "rows": [], "alerts": []})
 
 # -------------------------------------------------------------------------
 # Release 2: NIFTY 50 Stock Screener & Selection Endpoints
@@ -884,6 +972,18 @@ if hasattr(signal, "SIGTERM"):
     signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
 if __name__ == "__main__":
+    import sys
+    import socket
+
+    # Test if port is already in use by another instance
+    _test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _test_sock.bind(("127.0.0.1", settings.port))
+        _test_sock.close()
+    except OSError:
+        print(f"ERROR: Port {settings.port} is already in use by another running engine instance. Exiting to prevent port/feed collision.")
+        sys.exit(1)
+
     print("=" * 68)
     print("Upstox NIFTY Phase 1 — live data collector")
     print(f"Dashboard: http://{settings.host}:{settings.port}")

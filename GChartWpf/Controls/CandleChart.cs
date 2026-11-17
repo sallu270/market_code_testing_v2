@@ -625,7 +625,7 @@ public class CandleChart : FrameworkElement
             }
         }
 
-        // 6. Top Status & OHLC Information Strip
+        // 6. Top Status & OHLC Information Strip (placed at Y=32 to prevent colliding with ChartTitle at Y=8)
         if (hoveredSlot != null)
         {
             if (hoveredSlot.Candle != null)
@@ -636,20 +636,20 @@ public class CandleChart : FrameworkElement
                 var chgBrush = hChg >= 0 ? TvUp : TvDown;
                 var infoStr = $"O: {hc.Open:N2}  H: {hc.High:N2}  L: {hc.Low:N2}  C: {hc.Close:N2}  Vol: {hc.Volume:N0}  ({hChg:+0.00;-0.00;0.00} / {hPct:+0.00;-0.00;0.00}%)";
                 var infoTxt = Txt(infoStr, chgBrush, 10, bold: true);
-                dc.DrawRoundedRectangle(DarkGrey, null, new Rect(10, 8, infoTxt.Width + 14, 18), 2, 2);
-                dc.DrawText(infoTxt, new Point(17, 10));
+                dc.DrawRoundedRectangle(DarkGrey, null, new Rect(10, 32, infoTxt.Width + 14, 20), 2, 2);
+                dc.DrawText(infoTxt, new Point(17, 34));
             }
             else
             {
                 var hts = DateTimeOffset.FromUnixTimeMilliseconds(hoveredSlot.TimeMs).ToOffset(TimeSpan.FromHours(5.5));
                 var emptyTxt = Txt($"[EMPTY INTERVAL · BOT OFFLINE · {hts:HH:mm} IST]", Amber, 9.5, bold: true);
-                dc.DrawRoundedRectangle(DarkGrey, null, new Rect(10, 8, emptyTxt.Width + 14, 18), 2, 2);
-                dc.DrawText(emptyTxt, new Point(17, 10));
+                dc.DrawRoundedRectangle(DarkGrey, null, new Rect(10, 32, emptyTxt.Width + 14, 20), 2, 2);
+                dc.DrawText(emptyTxt, new Point(17, 34));
             }
         }
         else
         {
-            // Navigation pills
+            // Navigation pills (placed at Y=32 below ChartTitle)
             int defaultCenterPan = -(count / 2);
             bool isHistorical = _panOffset > 0;
             bool isCustomPan = Math.Abs(_panOffset - defaultCenterPan) > 4 || Math.Abs(_verticalPriceOffset) > 1.0 || Math.Abs(_priceScaleFactor - 1.0) > 0.1;
@@ -657,14 +657,14 @@ public class CandleChart : FrameworkElement
             if (isHistorical)
             {
                 var histPill = Txt($"◀ PAUSED ({_panOffset} slots back) · Double-click to LIVE CENTER", Frozen(255, 179, 0), 10);
-                dc.DrawRoundedRectangle(DarkGrey, null, new Rect(10, 8, histPill.Width + 12, 18), 2, 2);
-                dc.DrawText(histPill, new Point(16, 10));
+                dc.DrawRoundedRectangle(DarkGrey, null, new Rect(10, 32, histPill.Width + 12, 20), 2, 2);
+                dc.DrawText(histPill, new Point(16, 34));
             }
             else if (isCustomPan)
             {
                 var customPill = Txt("↔ Custom View · Double-click to LIVE CENTER", Frozen(100, 180, 255), 9.5);
-                dc.DrawRoundedRectangle(DarkGrey, null, new Rect(10, 8, customPill.Width + 10, 16), 2, 2);
-                dc.DrawText(customPill, new Point(15, 9));
+                dc.DrawRoundedRectangle(DarkGrey, null, new Rect(10, 32, customPill.Width + 10, 18), 2, 2);
+                dc.DrawText(customPill, new Point(15, 33));
             }
         }
     }

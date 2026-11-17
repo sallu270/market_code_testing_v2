@@ -110,10 +110,12 @@ public class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(IsChartMode));
             OnPropertyChanged(nameof(IsJournalMode));
             OnPropertyChanged(nameof(IsSettingsMode));
+            OnPropertyChanged(nameof(IsFlowMode));
             OnPropertyChanged(nameof(CurrentIndexKey));
             OnPropertyChanged(nameof(CurrentIndexName));
             OnPropertyChanged(nameof(ChartTitle));
             if (value == "Stocks" && Stocks.Count == 0) _ = LoadStocksAsync();
+            if (value == "Flow") _ = LoadFlowAsync();
             Candles = null;
             _ = RefreshAsync();
         }
@@ -127,6 +129,7 @@ public class MainViewModel : ObservableObject
     public bool IsChartMode => IsIndexMode;
     public bool IsJournalMode => Mode == "Journal";
     public bool IsSettingsMode => Mode == "Settings";
+    public bool IsFlowMode => Mode == "Flow";
 
     string _selectedStockSymbol = "RELIANCE";
     string _selectedStockKey = "NSE_EQ|INE002A01018";
@@ -219,6 +222,28 @@ public class MainViewModel : ObservableObject
     public ObservableCollection<TradeRow> Trades { get; } = new();
     public ObservableCollection<string> AvailableTradeDates { get; } = new();
 
+    // ---------------- PCR Flow Monitor (v0.0.5) ----------------
+    DateTime _lastFlow = DateTime.MinValue;
+    public ObservableCollection<FlowRow> FlowRows { get; } = new();
+    public ObservableCollection<FlowAlert> FlowAlerts { get; } = new();
+
+    async Task LoadFlowAsync()
+    {
+        _lastFlow = DateTime.Now;
+        try
+        {
+            var (rows, alerts) = await _src.GetFlowDashboardAsync();
+            FlowRows.Clear();
+            foreach (var r in rows) FlowRows.Add(r);
+            FlowAlerts.Clear();
+            foreach (var a in alerts) FlowAlerts.Add(a);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "Flow monitor: " + ex.Message;
+        }
+    }
+
     private string _selectedTradeDate = "Today";
     public string SelectedTradeDate
     {
@@ -263,6 +288,7 @@ public class MainViewModel : ObservableObject
 
             if (IsStocksMode && (DateTime.Now - _lastStocks).TotalSeconds > 5) await LoadStocksAsync();
             if (IsJournalMode && (DateTime.Now - _lastTrades).TotalSeconds > 5) await LoadTradesAsync();
+            if (IsFlowMode && (DateTime.Now - _lastFlow).TotalSeconds > 2) await LoadFlowAsync();
 
             ConnBrush = Pal.Green; ConnText = AppSettings.Demo ? "DEMO DATA" : "Connected";
         }
@@ -291,9 +317,18 @@ public class MainViewModel : ObservableObject
 
         PositionText = hasPos ? $"LONG {posSym} @ {entryPrice:N2}" : "FLAT (NO POSITION)";
         PosBrush = hasPos ? Pal.Green : Pal.Grey;
-        PnlText = (s.TodayNetPnlSigned()) ;
+        PnlText = $"DAY: {s.TodayNetPnlSigned()}";
         PointsText = $"({s.TodayPoints:N2} pts)";
         PnlBrush = s.TodayPnl > 0 ? Pal.Green : s.TodayPnl < 0 ? Pal.Red : Pal.White;
+
+        if (IsStocksMode)
+        {
+            SpotText = $"NIFTY={s.Spot:N2}";
+        }
+        else if (curIdxInfo != null && curIdxInfo.SpotPrice > 0)
+        {
+            SpotText = $"NC={curIdxInfo.SpotPrice:N2}";
+        }
 
         var futLtp = curIdxInfo != null && curIdxInfo.FuturesLtp > 0 ? curIdxInfo.FuturesLtp : s.FuturesLtp;
         var futOi = curIdxInfo != null && curIdxInfo.FuturesOi > 0 ? curIdxInfo.FuturesOi : s.FuturesOi;

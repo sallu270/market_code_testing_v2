@@ -206,7 +206,9 @@ public class ApiClient : IDataSource
             Price = D(s, "price"), ChangePct = D(s, "change_pct"), Volume = D(s, "volume"),
             BuildUp = S(s, "build_up") is { Length: > 0 } b ? b : "Neutral",
             Selected = s.TryGetProperty("selected", out var sel) && sel.ValueKind == JsonValueKind.True,
-            Lots = Math.Max(1, (int)D(s, "lots"))
+            Lots = Math.Max(1, (int)D(s, "lots")),
+            WatchlistRank = S(s, "rank") is { Length: > 0 } r ? r : (S(s, "watchlist_rank") is { Length: > 0 } wr ? wr : "★★★"),
+            PlannedDirection = S(s, "direction") is { Length: > 0 } d ? d : (S(s, "watchlist_direction") is { Length: > 0 } wd ? wd : "BULL")
         }).ToList();
     }
 
@@ -317,5 +319,48 @@ public class ApiClient : IDataSource
         var body = JsonSerializer.Serialize(new { index = indexKey ?? "" });
         using var resp = await _http.PostAsync("/api/strategy/arm-now", new StringContent(body, Encoding.UTF8, "application/json"));
         resp.EnsureSuccessStatusCode();
+    }
+
+    public async Task<(List<FlowRow> Rows, List<FlowAlert> Alerts)> GetFlowDashboardAsync()
+    {
+        try
+        {
+            using var doc = await GetJson("/api/strategy/flow");
+            var root = doc.RootElement;
+            var rows = new List<FlowRow>();
+            foreach (var r in Arr(root, "rows"))
+            {
+                rows.Add(new FlowRow
+                {
+                    Instrument = S(r, "instrument"),
+                    Key = S(r, "key"),
+                    VolPcr5m = D(r, "vol_pcr_5m"),
+                    VolPcrShift = D(r, "vol_pcr_shift"),
+                    DoiPcr = S(r, "doi_pcr"),
+                    NetOiBias = D(r, "net_oi_bias"),
+                    CeVsr = S(r, "ce_vsr"),
+                    PeVsr = S(r, "pe_vsr"),
+                    FlowState = S(r, "flow_state"),
+                    BotAction = S(r, "bot_action"),
+                    StraddleDecay = D(r, "straddle_decay")
+                });
+            }
+            var alerts = new List<FlowAlert>();
+            foreach (var a in Arr(root, "alerts"))
+            {
+                alerts.Add(new FlowAlert
+                {
+                    Time = S(a, "time"),
+                    Instrument = S(a, "instrument"),
+                    Event = S(a, "event"),
+                    Detail = S(a, "detail")
+                });
+            }
+            return (rows, alerts);
+        }
+        catch
+        {
+            return (new List<FlowRow>(), new List<FlowAlert>());
+        }
     }
 }

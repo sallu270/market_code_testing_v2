@@ -148,4 +148,14 @@ public class DemoSource : IDataSource
     public Task ExitIndicesAsync() { _hasPos = false; return Task.CompletedTask; }
     public Task ExitStocksAsync() { _hasPos = false; return Task.CompletedTask; }
     public Task ArmNowAsync(string? indexKey = null) => Task.CompletedTask;
+    public Task<(List<FlowRow> Rows, List<FlowAlert> Alerts)> GetFlowDashboardAsync() =>
+        Task.FromResult((new List<FlowRow>
+        {
+            new FlowRow { Instrument = "NIFTY 50", Key = "NSE_INDEX|Nifty 50", VolPcr5m = 0.58, VolPcrShift = 0.62, DoiPcr = "+0.45", NetOiBias = 0.32, CeVsr = "3.1x", PeVsr = "0.8x", FlowState = "CONFIRMED_BULL", BotAction = "CONFIRMED: Institutional Call Flow Active", StraddleDecay = 0.45 },
+            new FlowRow { Instrument = "BANK NIFTY", Key = "NSE_INDEX|Nifty Bank", VolPcr5m = 1.62, VolPcrShift = 1.68, DoiPcr = "-0.38", NetOiBias = -0.28, CeVsr = "0.7x", PeVsr = "2.9x", FlowState = "CONFIRMED_BEAR", BotAction = "CONFIRMED: Institutional Put Flow Active", StraddleDecay = 0.52 },
+            new FlowRow { Instrument = "SENSEX", Key = "BSE_INDEX|SENSEX", VolPcr5m = 0.95, VolPcrShift = 1.02, DoiPcr = "N/A", NetOiBias = 0.04, CeVsr = "1.0x", PeVsr = "1.0x", FlowState = "NEUTRAL", BotAction = "Monitoring flow", StraddleDecay = 0.88 },
+        }, new List<FlowAlert>
+        {
+            new FlowAlert { Time = "09:24:00", Instrument = "NIFTY 50", Event = "CONFIRMED_BULL", Detail = "Institutional Call Flow Active (Eligible Path 2/3)" }
+        }));
 }

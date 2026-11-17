@@ -19,4 +19,5 @@ public interface IDataSource
     Task ExitIndicesAsync();
     Task ExitStocksAsync();
     Task ArmNowAsync(string? indexKey = null);
+    Task<(List<FlowRow> Rows, List<FlowAlert> Alerts)> GetFlowDashboardAsync();
 }

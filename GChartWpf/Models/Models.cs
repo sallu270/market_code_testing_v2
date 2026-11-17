@@ -1,4 +1,6 @@
+using System.Windows.Media;
 using GChartWpf.ViewModels;
+using GChartWpf.Services;
 
 namespace GChartWpf.Models;
 
@@ -33,6 +35,8 @@ public class StrikeRow
 
     public string CeBuildUp { get; set; } = "—";
     public double CeOi { get; set; }
+    public double CeOiChange { get; set; }
+    public string CeOiChangeText { get; set; } = "—";
     public double CeVolume { get; set; }
     public double CeBid { get; set; }
     public double CeAsk { get; set; }
@@ -42,6 +46,8 @@ public class StrikeRow
     public double PeBid { get; set; }
     public double PeAsk { get; set; }
     public double PeVolume { get; set; }
+    public double PeOiChange { get; set; }
+    public string PeOiChangeText { get; set; } = "—";
     public double PeOi { get; set; }
     public string PeBuildUp { get; set; } = "—";
 }
@@ -126,6 +132,10 @@ public class StockRow : ObservableObject
 
     /// <summary>BUY for Long Build-up, SELL for Short Build-up, otherwise —</summary>
     public string Signal => BuildUp == "Long Build-up" ? "BUY" : BuildUp == "Short Build-up" ? "SELL" : "—";
+
+    public string WatchlistRank { get; set; } = "★★★";
+    public string PlannedDirection { get; set; } = "BULL";
+    public Brush DirectionBrush => PlannedDirection == "BULL" || PlannedDirection == "BULLISH" ? Pal.Green : Pal.Red;
 }
 
 public class TopStocksConfigResponse
@@ -141,6 +151,8 @@ public class StockConfigRow : ObservableObject
     public string Key { get; set; } = "";
     public int LotSize { get; set; } = 100;
     public double StrikeStep { get; set; } = 10.0;
+    public string WatchlistRank { get; set; } = "★★★";
+    public string PlannedDirection { get; set; } = "BULL";
 
     int _lots = 1;
     public int Lots
@@ -170,4 +182,33 @@ public class StockConfigRow : ObservableObject
 
     public string StatusText => Enabled ? "ACTIVE" : "PAUSED TODAY";
     public string QuantityPreview => $"{Lots} lot{(Lots > 1 ? "s" : "")} = {Lots * LotSize} qty";
+}
+
+public class FlowRow : ObservableObject
+{
+    public string Instrument { get; set; } = "";
+    public string Key { get; set; } = "";
+    public double VolPcr5m { get; set; }
+    public double VolPcrShift { get; set; }
+    public string DoiPcr { get; set; } = "N/A";
+    public double NetOiBias { get; set; }
+    public string CeVsr { get; set; } = "1.0x";
+    public string PeVsr { get; set; } = "1.0x";
+    public string FlowState { get; set; } = "NEUTRAL";
+    public string BotAction { get; set; } = "Monitoring flow";
+    public double StraddleDecay { get; set; } = 1.0;
+
+    public Brush VolPcrBrush => VolPcrShift <= 0.65 ? Pal.Green : VolPcrShift >= 1.55 ? Pal.Red : Pal.White;
+    public Brush NetOiBrush => NetOiBias >= 0.15 ? Pal.Green : NetOiBias <= -0.15 ? Pal.Red : Pal.White;
+    public Brush FlowStateBrush => FlowState.Contains("BULL") ? Pal.Green :
+                                   FlowState.Contains("BEAR") ? Pal.Red :
+                                   FlowState == "COIL" || FlowState == "DIVERGENCE_TRAP" ? Pal.Amber : Pal.Grey;
+}
+
+public class FlowAlert
+{
+    public string Time { get; set; } = "";
+    public string Instrument { get; set; } = "";
+    public string Event { get; set; } = "";
+    public string Detail { get; set; } = "";
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,8 @@ class MarketDatabase:
             timeout=30,
         )
         self._connection.row_factory = sqlite3.Row
+        self._tick_count: int = 0
+        self._last_commit_time: float = time.time()
         self._configure()
         self._create_schema()
 
@@ -229,7 +232,18 @@ class MarketDatabase:
                     json.dumps(tick.get("raw", {}), separators=(",", ":")),
                 ),
             )
+            self._tick_count += 1
+            if self._tick_count >= 50 or (time.time() - self._last_commit_time) > 2.0:
+                self._connection.commit()
+                self._tick_count = 0
+                self._last_commit_time = time.time()
+
+    def flush(self) -> None:
+        """Commit any pending tick writes to disk."""
+        with self._lock:
             self._connection.commit()
+            self._tick_count = 0
+            self._last_commit_time = time.time()
 
     def upsert_candle(self, candle: dict[str, Any]) -> None:
         with self._lock:
@@ -668,4 +682,5 @@ class MarketDatabase:
 
     def close(self) -> None:
         with self._lock:
+            self._connection.commit()
             self._connection.close()

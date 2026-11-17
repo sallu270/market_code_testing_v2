@@ -32,12 +32,41 @@ public static class ChainWindow
         var chosen = below.Concat(above).OrderBy(s => s.Strike).ToList();
 
         double atm = all.OrderBy(s => Math.Abs(s.Strike - snap.Spot)).First().Strike;
-        return chosen.Select(s => new StrikeRow
+        return chosen.Select(s =>
         {
-            Strike = s.Strike,
-            IsAtm = s.Strike == atm,
-            CeBuildUp = s.Ce.BuildUp, CeOi = s.Ce.Oi, CeVolume = s.Ce.Volume, CeBid = s.Ce.Bid, CeAsk = s.Ce.Ask, CeLtp = s.Ce.Ltp,
-            PeLtp = s.Pe.Ltp, PeBid = s.Pe.Bid, PeAsk = s.Pe.Ask, PeVolume = s.Pe.Volume, PeOi = s.Pe.Oi, PeBuildUp = s.Pe.BuildUp
+            double ceDiff = s.Ce.Oi - s.Ce.PrevOi;
+            double cePct = s.Ce.PrevOi > 0 ? (ceDiff / s.Ce.PrevOi) * 100.0 : 0.0;
+            string ceText = ceDiff != 0
+                ? (s.Ce.PrevOi > 0 ? $"{ceDiff:+#,##0;-#,##0;0} ({cePct:+0.0;-0.0;0.0}%)" : $"{ceDiff:+#,##0;-#,##0;0}")
+                : "0";
+
+            double peDiff = s.Pe.Oi - s.Pe.PrevOi;
+            double pePct = s.Pe.PrevOi > 0 ? (peDiff / s.Pe.PrevOi) * 100.0 : 0.0;
+            string peText = peDiff != 0
+                ? (s.Pe.PrevOi > 0 ? $"{peDiff:+#,##0;-#,##0;0} ({pePct:+0.0;-0.0;0.0}%)" : $"{peDiff:+#,##0;-#,##0;0}")
+                : "0";
+
+            return new StrikeRow
+            {
+                Strike = s.Strike,
+                IsAtm = s.Strike == atm,
+                CeBuildUp = s.Ce.BuildUp,
+                CeOi = s.Ce.Oi,
+                CeOiChange = ceDiff,
+                CeOiChangeText = ceText,
+                CeVolume = s.Ce.Volume,
+                CeBid = s.Ce.Bid,
+                CeAsk = s.Ce.Ask,
+                CeLtp = s.Ce.Ltp,
+                PeLtp = s.Pe.Ltp,
+                PeBid = s.Pe.Bid,
+                PeAsk = s.Pe.Ask,
+                PeVolume = s.Pe.Volume,
+                PeOiChange = peDiff,
+                PeOiChangeText = peText,
+                PeOi = s.Pe.Oi,
+                PeBuildUp = s.Pe.BuildUp
+            };
         }).ToList();
     }
 }
