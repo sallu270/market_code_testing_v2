@@ -71,6 +71,7 @@ class StockScreener:
         self.access_token = access_token
         self.selection_file = base_dir / "selected_stocks.json"
         self.watchlist_file = base_dir / "tomorrow_watchlist.json"
+        self.max_trade_stocks: int = 5
         self._cached_screener: list[dict[str, Any]] = []
         self._futures_map: dict[str, dict[str, Any]] = {}
 
@@ -267,13 +268,17 @@ class StockScreener:
         top_bullish = bullish_candidates[:5]
         top_bearish = bearish_candidates[:5]
 
-        # Fallback if fewer than 5 met strict threshold
+        # If fewer than 5 candidates met strict threshold, take best relative movers with REAL data
         if len(top_bullish) < 5:
             remaining = [q for q in quotes if q["symbol"] not in {x["symbol"] for x in top_bullish} and float(q.get("change_pct", 0)) >= 0]
-            remaining.sort(key=lambda x: -float(x.get("change_pct", 0)))
+            remaining.sort(key=lambda x: (-float(x.get("change_pct", 0)), -float(x.get("clv", 0.5))))
             for q in remaining[: 5 - len(top_bullish)]:
                 sym = q["symbol"]
                 fut_meta = futs.get(sym, {})
+                ltp_val = float(q.get("price") or 0.0)
+                prev_c = float(q.get("prev_close") or ltp_val)
+                chg_val = float(q.get("change_pct") or 0.0)
+                clv_val = float(q.get("clv") or 0.50)
                 top_bullish.append({
                     "symbol": sym,
                     "name": q.get("name", sym),
@@ -281,14 +286,14 @@ class StockScreener:
                     "lot_size": q.get("lot_size", 100),
                     "strike_step": q.get("strike_step", 10),
                     "direction": "BULLISH",
-                    "rank": "★★★",
-                    "price": float(q.get("price") or 0.0),
-                    "prev_close": float(q.get("prev_close") or 0.0),
-                    "change_pct": float(q.get("change_pct") or 0.0),
-                    "clv": 0.88,
-                    "rvol": 1.6,
-                    "fut_buildup": "LB",
-                    "fut_oi_change_pct": 3.8,
+                    "rank": "★★",
+                    "price": ltp_val,
+                    "prev_close": prev_c,
+                    "change_pct": chg_val,
+                    "clv": clv_val,
+                    "rvol": float(q.get("rvol", 1.0)),
+                    "fut_buildup": q.get("build_up", "Neutral"),
+                    "fut_oi_change_pct": 0.0,
                     "futures_key": fut_meta.get("instrument_key", ""),
                     "futures_symbol": fut_meta.get("trading_symbol", ""),
                     "lots": q.get("lots", 1),
@@ -297,10 +302,14 @@ class StockScreener:
 
         if len(top_bearish) < 5:
             remaining = [q for q in quotes if q["symbol"] not in {x["symbol"] for x in top_bearish} and float(q.get("change_pct", 0)) <= 0]
-            remaining.sort(key=lambda x: float(x.get("change_pct", 0)))
+            remaining.sort(key=lambda x: (float(x.get("change_pct", 0)), float(x.get("clv", 0.5))))
             for q in remaining[: 5 - len(top_bearish)]:
                 sym = q["symbol"]
                 fut_meta = futs.get(sym, {})
+                ltp_val = float(q.get("price") or 0.0)
+                prev_c = float(q.get("prev_close") or ltp_val)
+                chg_val = float(q.get("change_pct") or 0.0)
+                clv_val = float(q.get("clv") or 0.50)
                 top_bearish.append({
                     "symbol": sym,
                     "name": q.get("name", sym),
@@ -308,14 +317,14 @@ class StockScreener:
                     "lot_size": q.get("lot_size", 100),
                     "strike_step": q.get("strike_step", 10),
                     "direction": "BEARISH",
-                    "rank": "★★★",
-                    "price": float(q.get("price") or 0.0),
-                    "prev_close": float(q.get("prev_close") or 0.0),
-                    "change_pct": float(q.get("change_pct") or 0.0),
-                    "clv": 0.12,
-                    "rvol": 1.55,
-                    "fut_buildup": "SB",
-                    "fut_oi_change_pct": 4.1,
+                    "rank": "★★",
+                    "price": ltp_val,
+                    "prev_close": prev_c,
+                    "change_pct": chg_val,
+                    "clv": clv_val,
+                    "rvol": float(q.get("rvol", 1.0)),
+                    "fut_buildup": q.get("build_up", "Neutral"),
+                    "fut_oi_change_pct": 0.0,
                     "futures_key": fut_meta.get("instrument_key", ""),
                     "futures_symbol": fut_meta.get("trading_symbol", ""),
                     "lots": q.get("lots", 1),
@@ -338,6 +347,37 @@ class StockScreener:
         except Exception as exc:
             LOGGER.error("Failed to save tomorrow_watchlist.json: %s", exc)
 
+        # Synchronize dynamic top 10 into selected_stocks.json
+        try:
+            merged = top_bullish + top_bearish
+            max_trade = getattr(self, "max_trade_stocks", 5)
+            payload = {
+                "top_n": len(merged),
+                "max_trade_stocks": max_trade,
+                "stocks": [
+                    {
+                        "symbol": s["symbol"],
+                        "name": s["name"],
+                        "key": s["key"],
+                        "lot_size": s["lot_size"],
+                        "strike_step": s["strike_step"],
+                        "lots": s.get("lots", 1),
+                        "enabled": (i < max_trade),
+                        "rank": s.get("rank", "★★★"),
+                        "direction": s.get("direction", "BULLISH"),
+                        "clv": s.get("clv", 0.5),
+                        "change_pct": s.get("change_pct", 0.0),
+                        "price": s.get("price", 0.0),
+                    }
+                    for i, s in enumerate(merged)
+                ]
+            }
+            with open(self.selection_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            LOGGER.info("Synchronized dynamic Top 10 stocks into %s (max_trade_stocks=%d)", self.selection_file, max_trade)
+        except Exception as exc:
+            LOGGER.error("Failed to sync selected_stocks.json: %s", exc)
+
         return watchlist
 
     def get_tomorrow_watchlist(self) -> dict[str, Any]:
@@ -352,91 +392,101 @@ class StockScreener:
 
     def get_top_stocks_config(self, top_n: int | None = None) -> dict[str, Any]:
         """
-        Returns {
+        Returns dynamic Top Stocks configuration:
+        {
             "top_n": N,
-            "stocks": [
-                {"symbol": s, "name": ..., "key": ..., "lot_size": ..., "strike_step": ..., "lots": ..., "enabled": ...}
-            ]
+            "max_trade_stocks": M,
+            "stocks": [ ... Top 10 Dynamic Stocks ... ]
         }
         """
-        saved_top_n = 5
-        saved_stocks_dict: dict[str, dict[str, Any]] = {}
+        saved_top_n = 10
+        max_trade_stocks = 5
+        stocks_list = []
 
         if self.selection_file.exists():
             try:
                 with open(self.selection_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if isinstance(data, dict):
-                        if "top_n" in data and "stocks" in data:
-                            saved_top_n = int(data.get("top_n", 5))
-                            raw_stocks = data.get("stocks")
-                            if isinstance(raw_stocks, list):
-                                for s in raw_stocks:
-                                    if isinstance(s, dict) and "symbol" in s:
-                                        saved_stocks_dict[s["symbol"].upper()] = s
-                            elif isinstance(raw_stocks, dict):
-                                saved_stocks_dict = {k.upper(): v for k, v in raw_stocks.items()}
-                        else:
-                            # Legacy format: {"RELIANCE": 2, "INFY": 3}
-                            for sym, lots in data.items():
-                                saved_stocks_dict[sym.upper()] = {"lots": int(lots), "enabled": True}
-                            saved_top_n = len(saved_stocks_dict) if saved_stocks_dict else 5
+                        saved_top_n = int(data.get("top_n", 10))
+                        max_trade_stocks = int(data.get("max_trade_stocks", 5))
+                        raw_stocks = data.get("stocks")
+                        if isinstance(raw_stocks, list) and raw_stocks:
+                            stocks_list = list(raw_stocks)
             except Exception as e:
                 LOGGER.warning("Could not read selection file: %s", e)
 
-        target_n = top_n if (top_n is not None and top_n > 0) else saved_top_n
-        target_n = max(1, min(target_n, len(NIFTY_50_STOCKS)))
+        # If no stocks yet, seed default list from all 50 constituent stocks
+        if not stocks_list:
+            stocks_list = [
+                {
+                    "symbol": s["symbol"],
+                    "name": s["name"],
+                    "key": s["key"],
+                    "lot_size": s["lot_size"],
+                    "strike_step": s["strike_step"],
+                    "lots": 1,
+                    "enabled": True,
+                    "rank": "★★★",
+                    "direction": "BULLISH",
+                    "clv": 0.5,
+                    "change_pct": 0.0,
+                    "price": 0.0,
+                }
+                for s in NIFTY_50_STOCKS
+            ]
 
-        stocks_list = []
-        for meta in NIFTY_50_STOCKS[:target_n]:
-            sym = meta["symbol"].upper()
-            saved = saved_stocks_dict.get(sym, {})
-            lots = int(saved.get("lots", 1)) if isinstance(saved, dict) else 1
-            enabled = bool(saved.get("enabled", True)) if isinstance(saved, dict) else True
-            stocks_list.append({
-                "symbol": sym,
-                "name": meta["name"],
-                "key": meta["key"],
-                "lot_size": meta["lot_size"],
-                "strike_step": meta["strike_step"],
-                "lots": max(1, lots),
-                "enabled": enabled,
-            })
+        target_n = top_n if (top_n is not None and top_n > 0) else len(stocks_list)
+        target_n = max(1, min(target_n, len(stocks_list)))
 
         return {
             "top_n": target_n,
-            "stocks": stocks_list,
+            "max_trade_stocks": max_trade_stocks,
+            "stocks": stocks_list[:target_n],
         }
 
     def save_top_stocks_config(self, config: dict[str, Any]) -> dict[str, Any]:
-        """Save top N stocks configuration."""
-        top_n = int(config.get("top_n", 5))
+        """Save top N stocks configuration and max_trade_stocks limit."""
+        top_n = int(config.get("top_n", 10))
+        max_trade_stocks = int(config.get("max_trade_stocks", 5))
+        max_trade_stocks = max(1, min(max_trade_stocks, 10))
+        self.max_trade_stocks = max_trade_stocks
+
         raw_stocks = config.get("stocks") or []
         stocks_list = []
 
         if isinstance(raw_stocks, list):
-            for s in raw_stocks:
+            for i, s in enumerate(raw_stocks):
                 if isinstance(s, dict) and "symbol" in s:
                     sym = s["symbol"].upper()
                     meta = next((m for m in NIFTY_50_STOCKS if m["symbol"] == sym), None)
+                    user_enabled = s.get("enabled")
+                    is_enabled = bool(user_enabled) if user_enabled is not None else (i < max_trade_stocks)
+
                     stocks_list.append({
                         "symbol": sym,
                         "name": s.get("name") or (meta["name"] if meta else sym),
                         "key": s.get("key") or (meta["key"] if meta else ""),
-                        "lot_size": int(s.get("lot_size") or (meta["lot_size"] if meta else 1)),
+                        "lot_size": int(s.get("lot_size") or (meta["lot_size"] if meta else 100)),
                         "strike_step": float(s.get("strike_step") or (meta["strike_step"] if meta else 10)),
                         "lots": max(1, int(s.get("lots", 1))),
-                        "enabled": bool(s.get("enabled", True)),
+                        "enabled": is_enabled,
+                        "rank": s.get("rank") or "★★★",
+                        "direction": s.get("direction") or "BULLISH",
+                        "clv": float(s.get("clv") or 0.5),
+                        "change_pct": float(s.get("change_pct") or 0.0),
+                        "price": float(s.get("price") or 0.0),
                     })
 
         payload = {
             "top_n": top_n,
+            "max_trade_stocks": max_trade_stocks,
             "stocks": stocks_list,
         }
         try:
             with open(self.selection_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
-            LOGGER.info("Saved top stocks config: top_n=%d, count=%d", top_n, len(stocks_list))
+            LOGGER.info("Saved top stocks config: top_n=%d, max_trade_stocks=%d, count=%d", top_n, max_trade_stocks, len(stocks_list))
         except Exception as exc:
             LOGGER.error("Failed to save top stocks config: %s", exc)
 
@@ -508,6 +558,28 @@ class StockScreener:
 
                 high_p = float(ohlc.get("high") or ltp)
                 low_p = float(ohlc.get("low") or ltp)
+                clv = round((ltp - low_p) / (high_p - low_p), 3) if high_p > low_p else 0.50
+
+                # Dynamic Star Ranking based on Dr. Vijay Bhilwade Specification (Section 10 & 11)
+                if change_pct >= 0.5:
+                    dir_label = "BULLISH"
+                    if change_pct >= 1.0 and clv >= 0.85:
+                        rank_str = "★★★★"
+                    elif clv >= 0.70:
+                        rank_str = "★★★"
+                    else:
+                        rank_str = "★★"
+                elif change_pct <= -0.5:
+                    dir_label = "BEARISH"
+                    if change_pct <= -1.0 and clv <= 0.15:
+                        rank_str = "★★★★"
+                    elif clv <= 0.30:
+                        rank_str = "★★★"
+                    else:
+                        rank_str = "★★"
+                else:
+                    dir_label = "FLAT"
+                    rank_str = "★"
 
                 results.append({
                     "symbol": sym,
@@ -526,12 +598,17 @@ class StockScreener:
                     "prev_oi": float(q.get("prev_oi") or oi),
                     "build_up": bu_label,
                     "build_up_class": bu_class,
+                    "clv": clv,
+                    "rank": rank_str,
+                    "watchlist_rank": rank_str,
+                    "direction": dir_label,
+                    "watchlist_direction": dir_label,
                     "selected": sym in selected_map,
                     "lots": selected_map.get(sym, 1),
                 })
 
-            # Sort descending by volume by default
-            results.sort(key=lambda x: (not x["selected"], -x["volume"]))
+            # Sort descending by change % and CLV strength to prioritize top momentum
+            results.sort(key=lambda x: (not x["selected"], x["rank"] not in ("★★★★", "★★★"), -abs(x["change_pct"]), -x.get("clv", 0.5)))
             self._cached_screener = results
             return results
 

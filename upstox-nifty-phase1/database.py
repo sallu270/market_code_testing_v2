@@ -428,14 +428,19 @@ class MarketDatabase:
 
     def counts(self) -> dict[str, int]:
         with self._lock:
-            ticks = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM ticks"
-            ).fetchone()["count"]
-            candles = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM candles_1m"
-            ).fetchone()["count"]
+            # Instant indexed rowid lookup instead of multi-gigabyte full-table scan
+            try:
+                row_t = self._connection.execute("SELECT rowid FROM ticks ORDER BY rowid DESC LIMIT 1").fetchone()
+                ticks_cnt = int(row_t["rowid"]) if row_t and row_t["rowid"] else 0
+            except Exception:
+                ticks_cnt = 0
+            try:
+                row_c = self._connection.execute("SELECT rowid FROM candles_1m ORDER BY rowid DESC LIMIT 1").fetchone()
+                candles_cnt = int(row_c["rowid"]) if row_c and row_c["rowid"] else 0
+            except Exception:
+                candles_cnt = 0
 
-        return {"ticks": int(ticks), "candles": int(candles)}
+        return {"ticks": ticks_cnt, "candles": candles_cnt}
 
     def insert_strategy_trade(self, trade: dict[str, Any]) -> None:
         with self._lock:

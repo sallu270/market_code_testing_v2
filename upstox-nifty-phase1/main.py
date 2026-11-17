@@ -25,9 +25,9 @@ from candle_builder import OneMinuteCandleBuilder
 from config import IST, load_settings
 from database import MarketDatabase
 from flow_engine import FLOW_ENGINE
-from stock_screener import StockScreener
+from stock_screener import NIFTY_50_STOCKS, StockScreener
 from strategy_engine import GapEntryStrategyEngine, PressureStrategyEngine
-from upstox_feed import UpstoxFeed
+from upstox_feed import DualUpstoxFeed, UpstoxFeed
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,7 +93,7 @@ def handle_status(status: dict[str, Any]) -> None:
     latest_status = status
     LOGGER.info("%s: %s", status["state"], status["message"])
     publish("status", status)
-    if not status.get("connected") and hasattr(strategy_engine, "add_alert"):
+    if status.get("state") in ("disconnected", "error") and not status.get("connected") and hasattr(strategy_engine, "add_alert"):
         alert = strategy_engine.add_alert("FEED_LOST", f"Feed disconnected: {status.get('message', 'WebSocket offline')}", level="ERROR")
         publish("alert", alert)
 
@@ -129,10 +129,19 @@ def handle_tick(tick: dict[str, Any]) -> None:
     except Exception:
         LOGGER.exception("Failed to store or aggregate a market tick.")
 
-feed = UpstoxFeed(
+# Socket 1 (Indices): 3 Major Indices + Index Futures from settings.instrument_keys
+initial_index_keys = list(settings.instrument_keys)
+
+# Socket 2 (Stocks): All 50 Nifty constituent cash stock keys
+initial_stock_keys = [s["key"] for s in NIFTY_50_STOCKS if s.get("key")]
+
+feed = DualUpstoxFeed(
     settings=settings,
     on_tick=handle_tick,
     on_status=handle_status,
+    index_keys=initial_index_keys,
+    stock_keys=initial_stock_keys,
+    classifier=lambda k: strategy_engine.classify_instrument(k),
 )
 strategy_engine.set_feed(feed)
 
@@ -379,26 +388,36 @@ def index() -> Response:
 
 @app.get("/api/health")
 def api_health() -> Response:
-    return jsonify(
-        {
-            "application": "upstox-nifty-phase1",
-            "configured": settings.configured,
-            "feed_running": feed.running,
-            "feed_connected": feed.connected,
-            "feed_mode": settings.feed_mode,
-            "instrument_keys": list(settings.instrument_keys),
-            "database": str(settings.db_path),
-            "counts": database.counts(),
-            "status": latest_status,
-            "server_time_ist": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-    )
+    health_data: dict[str, Any] = {
+        "application": "upstox-nifty-phase1",
+        "configured": settings.configured,
+        "feed_running": feed.running,
+        "feed_connected": feed.connected,
+        "feed_mode": settings.feed_mode,
+        "instrument_keys": list(settings.instrument_keys),
+        "database": str(settings.db_path),
+        "counts": database.counts(),
+        "status": latest_status,
+        "server_time_ist": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if hasattr(feed, "indices_feed") and hasattr(feed, "stocks_feed"):
+        health_data.update({
+            "dual_feed": True,
+            "both_connected": getattr(feed, "both_connected", False),
+            "indices_connected": feed.indices_feed.connected,
+            "stocks_connected": feed.stocks_feed.connected,
+            "indices_subscribed_count": len(feed.indices_feed.subscribed_keys),
+            "stocks_subscribed_count": len(feed.stocks_feed.subscribed_keys),
+            "total_subscribed_count": len(feed.subscribed_keys),
+        })
+    return jsonify(health_data)
 
 @app.get("/api/instruments")
 def api_instruments() -> Response:
-    values = sorted(
-        set(database.instruments()).union(settings.instrument_keys)
-    )
+    insts = set(database.instruments()).union(settings.instrument_keys)
+    if hasattr(feed, "subscribed_keys"):
+        insts = insts.union(feed.subscribed_keys)
+    values = sorted(insts)
     return jsonify({"instruments": values})
 
 @app.get("/api/ticks")
@@ -566,7 +585,7 @@ def api_option_chain() -> Response:
                 key=lambda item: abs(float(item.get("strike_price") or 0.0) - ref_spot)
             )
             keys_to_sub = []
-            for item in sorted_strikes[:30]:
+            for item in sorted_strikes[:5]:
                 call_k = item.get("call_options", {}).get("instrument_key")
                 put_k = item.get("put_options", {}).get("instrument_key")
                 if call_k:
@@ -574,7 +593,8 @@ def api_option_chain() -> Response:
                 if put_k:
                     keys_to_sub.append(put_k)
             if keys_to_sub:
-                feed.subscribe(keys_to_sub)
+                target = "indices" if ("INDEX" in str(instrument_key).upper()) else "stocks"
+                feed.subscribe(keys_to_sub, target=target)
         except Exception as ex:
             LOGGER.warning("Could not auto-subscribe option chain keys: %s", ex)
 
