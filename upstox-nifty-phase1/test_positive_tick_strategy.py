@@ -23,9 +23,12 @@ class TestFirstPositiveTickStrategy(unittest.TestCase):
         self.db = MagicMock()
         self.base_dir = Path("upstox-nifty-phase1")
         self.engine = GapEntryStrategyEngine(database=self.db, base_dir=self.base_dir)
-        self.engine.entry_start_time = "00:00:00"
+        self.engine.entry_start_time = "23:59:59"
         self.engine.entry_end_time = "23:59:59"
         self.engine.re_eval_min_interval_sec = 0.0
+        for ukey, st in self.engine.index_underlyings.items():
+            st["path1_done"] = False
+        self.engine.path1_done = False
 
     def test_nifty_first_positive_tick_ce(self):
         """Rule R8: Positive tick (LTP > ref_ltp) on CE contract enters BUY_CE."""
@@ -211,6 +214,7 @@ class TestFirstPositiveTickStrategy(unittest.TestCase):
         # Mock ATM +-1 contracts
         keys = [f"NIFTY_ATM_{i}" for i in range(4)]
         idx_st["atm_plus_minus_keys"] = keys
+        idx_st["locked_keys"] = keys
         snap = {}
         for i, k in enumerate(keys):
             side = "CE" if i < 2 else "PE"
@@ -242,6 +246,7 @@ class TestFirstPositiveTickStrategy(unittest.TestCase):
 
         keys = [f"SENSEX_ATM_{i}" for i in range(4)]
         idx_st["atm_plus_minus_keys"] = keys
+        idx_st["locked_keys"] = keys
         snap = {}
         for i, k in enumerate(keys):
             side = "CE" if i < 2 else "PE"

@@ -130,6 +130,12 @@ class GapEntryStrategyEngine:
         self._alert_flags: set[str] = set()
         self.last_tick_time: float = time.time()
 
+        # Priority 1: Stock order pacing (50ms interval = max 20 orders/sec to prevent broker HTTP 429)
+        # Priority 0: Indices bypass pacing completely with zero delay
+        self._stock_pace_lock = threading.Lock()
+        self._last_stock_order_time: float = 0.0
+        self.stock_order_interval_sec: float = 0.05
+
         self.lots_file = base_dir / "index_lots.json"
         self.index_lots: dict[str, int] = {
             "NSE_INDEX|Nifty 50": 1,
@@ -887,6 +893,21 @@ class GapEntryStrategyEngine:
             st.get("gap_against", False),
         )
 
+    def _pace_stock_order_dispatch(self) -> float:
+        """
+        Enforces micro-pacing (50ms spacing / max 20 orders/sec) for Priority 1 stock orders.
+        Indices are Priority 0 and bypass this completely with zero delay.
+        Thread-safe: Uses _stock_pace_lock so index order processing is never blocked.
+        """
+        with self._stock_pace_lock:
+            now = time.time()
+            elapsed = now - self._last_stock_order_time
+            if elapsed < self.stock_order_interval_sec:
+                sleep_needed = self.stock_order_interval_sec - elapsed
+                time.sleep(sleep_needed)
+            self._last_stock_order_time = time.time()
+            return self._last_stock_order_time
+
     def _execute_stock_path1_entry(
         self,
         stock_sym: str,
@@ -898,6 +919,9 @@ class GapEntryStrategyEngine:
         - Skip if opened > 0.3% against yesterday's direction.
         - Buy ATM CE on first tick above open (Bullish).
         - Buy ATM PE on first tick below open (Bearish).
+        - Rule 9 Futures Gate: Re-confirm futures direction (CE requires not SB/LU; PE requires not LB/SC).
+        - Difference 4 Spread Guard: Reject if bid-ask spread > 3.0%.
+        - Priority 1 Micro-Pacing: 50ms spacing (max 20 orders/sec) to prevent Upstox HTTP 429.
         - Fill at live ask. Stop-loss 25%, target 40%, cutoff 09:45. Max 1 09:15 entry per stock.
         """
         stock_sym = stock_sym.upper()
@@ -909,16 +933,34 @@ class GapEntryStrategyEngine:
         now_time_hms = now_dt.strftime("%H:%M:%S")
         if self.re_eval_min_interval_sec > 0 and now_time_hms >= self.entry_start_time:
             st["path1_done"] = True
+            st["path1_evaluating"] = False
             return None
 
-        if st.get("path1_done"):
-            return None
         if st.get("gap_against"):
+            st["path1_done"] = True
+            st["path1_evaluating"] = False
             return None
         rank = st.get("watchlist_rank", "★★★")
         if rank not in ("★★★", "★★★★"):
+            st["path1_done"] = True
+            st["path1_evaluating"] = False
             return None
         if st.get("current_position") is not None:
+            st["path1_done"] = True
+            st["path1_evaluating"] = False
+            return None
+
+        # Rule 9: Re-confirm futures direction check (Futures Gate)
+        fut_bu = st.get("futures_buildup", "Neutral")
+        if side == "CE" and fut_bu in ("SB", "LU"):
+            LOGGER.info("Stock Path 1 BLOCKED for %s (CE): Futures buildup is %s (must not be SB/LU)", stock_sym, fut_bu)
+            st["path1_done"] = True
+            st["path1_evaluating"] = False
+            return None
+        elif side == "PE" and fut_bu in ("LB", "SC"):
+            LOGGER.info("Stock Path 1 BLOCKED for %s (PE): Futures buildup is %s (must not be LB/SC)", stock_sym, fut_bu)
+            st["path1_done"] = True
+            st["path1_evaluating"] = False
             return None
 
         # JIT Strike Planning & Locking
@@ -930,6 +972,8 @@ class GapEntryStrategyEngine:
         winner = self._select_best_strike(side, locked_keys=st.get("locked_keys"))
         if not winner:
             LOGGER.warning("Path 1 for %s (%s): No valid strike found.", stock_sym, side)
+            st["path1_done"] = True
+            st["path1_evaluating"] = False
             return None
 
         # JIT: Subscribes ONLY this specific winning contract to WebSocket 2
@@ -938,30 +982,34 @@ class GapEntryStrategyEngine:
             self.feed.subscribe([w_key], target="stocks")
 
         ask = float(winner.get("ask_price") or winner.get("ltp") or 0.0)
+        bid = float(winner.get("bid_price") or 0.0)
         if ask <= 0.0 and w_key in self.hot_cache:
             ask = float(self.hot_cache[w_key].get("ask_price") or self.hot_cache[w_key].get("ltp") or 0.0)
+            if bid <= 0.0:
+                bid = float(self.hot_cache[w_key].get("bid_price") or 0.0)
 
-        # Quick REST fallback if quote hasn't arrived in this exact millisecond
-        if ask <= 0.0 and self.access_token and w_key and (w_key.startswith("NSE_") or w_key.startswith("BSE_")):
-            try:
-                q_url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={urllib.parse.quote(w_key, safe='|')}"
-                q_req = urllib.request.Request(q_url, headers={"Accept": "application/json", "Authorization": f"Bearer {self.access_token}"})
-                with urllib.request.urlopen(q_req, timeout=1.5) as resp:
-                    q_data = json.loads(resp.read().decode("utf-8")).get("data", {})
-                    q_val = next(iter(q_data.values()), {}) if q_data else {}
-                    ask_d = float(q_val.get("depth", {}).get("buy", [{}])[0].get("price") or q_val.get("last_price") or 0.0)
-                    if ask_d > 0.0:
-                        ask = ask_d
-                        winner["ask_price"] = ask
-                        winner["ltp"] = float(q_val.get("last_price") or ask)
-            except Exception as e:
-                LOGGER.debug("Quick quote fetch for %s failed: %s", w_key, e)
-
+        # Removed REST API fallback (prevents HTTP 429 during 09:15 burst)
         if ask <= 0.0:
             LOGGER.warning("Path 1 for %s (%s): Strike %s has no live quote (ask/ltp=0). Order rejected.", stock_sym, side, winner.get("trading_symbol"))
+            st["path1_done"] = True
+            st["path1_evaluating"] = False
             return None
 
+        # Difference 4: Stock Safety Guard - Bid-Ask spread > 3.0% rejection
+        if bid > 0.0 and ask > 0.0:
+            spread_pct = ((ask - bid) / ask) * 100.0
+            if spread_pct > self.max_spread_pct:
+                LOGGER.warning("Path 1 for %s (%s): Strike %s spread %.2f%% exceeds %.1f%% guard. Order rejected.",
+                               stock_sym, side, winner.get("trading_symbol"), spread_pct, self.max_spread_pct)
+                st["path1_done"] = True
+                st["path1_evaluating"] = False
+                return None
+
+        # Priority 1: Enforce micro-pacing for stock order (50ms rate limit buffer)
+        self._pace_stock_order_dispatch()
+
         st["path1_done"] = True
+        st["path1_evaluating"] = False
         base_lots = max(1, int(st.get("lots", 1)))
         lots = max(1, base_lots * 2) if "★★★★" in rank else base_lots
         lot_sz = int(st.get("lot_size", self.lot_size))
@@ -1209,6 +1257,19 @@ class GapEntryStrategyEngine:
             if self.feed and hasattr(self.feed, "subscribe") and w_key:
                 self.feed.subscribe([w_key], target="stocks")
 
+            # Difference 4: Stock Safety Guard - Bid-Ask spread > 3.0% rejection
+            w_bid = float(winner.get("bid_price") or 0.0)
+            w_ask = float(winner.get("ask_price") or winner.get("ltp") or 0.0)
+            if w_bid > 0.0 and w_ask > 0.0:
+                w_spread = ((w_ask - w_bid) / w_ask) * 100.0
+                if w_spread > self.max_spread_pct:
+                    LOGGER.warning("Stock %s %s trigger: Winner %s spread %.2f%% exceeds max %.1f%% guard. Order rejected.",
+                                   stock_sym, side, winner.get("trading_symbol"), w_spread, self.max_spread_pct)
+                    return None
+
+            # Priority 1: Enforce micro-pacing for stock order (50ms rate limit buffer)
+            self._pace_stock_order_dispatch()
+
             # 4. Sizing Matrix (Rule 10)
             size_cat = size or "normal"
             wl_rank = st.get("watchlist_rank") or stars
@@ -1387,13 +1448,114 @@ class GapEntryStrategyEngine:
                 self.manual_exit(reason="SQUAREOFF_1515")
 
     # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # Strike Loading & Planning (09:00 to 09:14:55)
     # -------------------------------------------------------------------------
+
+    def _load_index_contracts_from_master(self, underlying_key: str) -> bool:
+        """Loads index option contracts directly from local NSE.json master file."""
+        sym_map = {
+            NIFTY_KEY: "NIFTY",
+            BANKNIFTY_KEY: "BANKNIFTY",
+            "NSE_INDEX|Nifty 50": "NIFTY",
+            "NSE_INDEX|Nifty Bank": "BANKNIFTY",
+        }
+        target_sym = sym_map.get(underlying_key)
+        if not target_sym:
+            return False
+
+        search_paths = [
+            Path("NSE.json"),
+            Path(__file__).parent / "NSE.json",
+            Path(__file__).parent.parent / "NSE.json",
+        ]
+        nse_file = next((p for p in search_paths if p.is_file()), None)
+        if not nse_file:
+            return False
+
+        try:
+            if not hasattr(self, "_master_instruments") or not self._master_instruments:
+                with open(nse_file, "r", encoding="utf-8") as f:
+                    self._master_instruments = json.load(f)
+
+            opts = [
+                x for x in self._master_instruments
+                if x.get("instrument_type") in ("CE", "PE")
+                and (x.get("underlying_symbol") == target_sym or x.get("asset_symbol") == target_sym)
+            ]
+            if not opts:
+                return False
+
+            # Find active expiry >= today in IST
+            today_str = datetime.now(IST).strftime("%Y-%m-%d")
+            from datetime import timezone
+            exp_dict: dict[str, list[dict[str, Any]]] = {}
+            for x in opts:
+                exp_ts = int(x.get("expiry") or 0)
+                if exp_ts > 0:
+                    d_str = datetime.fromtimestamp(exp_ts / 1000.0, timezone.utc).strftime("%Y-%m-%d")
+                    if d_str >= today_str:
+                        exp_dict.setdefault(d_str, []).append(x)
+
+            if not exp_dict:
+                return False
+
+            act_exp = sorted(exp_dict.keys())[0]
+            matched = exp_dict[act_exp]
+
+            self.contracts_by_underlying[underlying_key] = matched
+            self.expiries_by_underlying[underlying_key] = act_exp
+
+            if underlying_key == NIFTY_KEY:
+                self.active_expiry = act_exp
+                self.all_contracts = matched
+                self.contracts_by_key.clear()
+                self.ce_by_strike.clear()
+                self.pe_by_strike.clear()
+
+            ce_map: dict[float, dict[str, Any]] = {}
+            pe_map: dict[float, dict[str, Any]] = {}
+            for c in matched:
+                c["underlying_key"] = underlying_key
+                k = c.get("instrument_key")
+                strike = float(c.get("strike_price") or 0.0)
+                itype = str(c.get("instrument_type") or "").upper()
+                if k:
+                    self.contracts_by_key[k] = c
+                if itype == "CE":
+                    ce_map[strike] = c
+                    if underlying_key == NIFTY_KEY:
+                        self.ce_by_strike[strike] = c
+                elif itype == "PE":
+                    pe_map[strike] = c
+                    if underlying_key == NIFTY_KEY:
+                        self.pe_by_strike[strike] = c
+
+            self.ce_by_underlying[underlying_key] = ce_map
+            self.pe_by_underlying[underlying_key] = pe_map
+
+            LOGGER.info(
+                "Loaded %s contracts for %s expiry %s from NSE.json (%s CE, %s PE).",
+                len(matched),
+                underlying_key,
+                act_exp,
+                len(ce_map),
+                len(pe_map),
+            )
+            return True
+        except Exception as exc:
+            LOGGER.error("Failed to load option contracts from NSE.json for %s: %s", underlying_key, exc)
+            return False
 
     def load_contracts_if_needed(self, underlying_key: str = NIFTY_KEY) -> bool:
         """Fetch option contracts for index and isolate nearest expiry."""
         if underlying_key in self.contracts_by_underlying and self.contracts_by_underlying[underlying_key]:
             return True
+
+        # 1. Prefer fast local master file (NSE.json) for NSE indices to eliminate 429 rate limits
+        if self._load_index_contracts_from_master(underlying_key):
+            return True
+
         if not self.access_token:
             return False
 
@@ -1462,13 +1624,14 @@ class GapEntryStrategyEngine:
                 return True
         except Exception as exc:
             LOGGER.error("Failed to load option contracts for %s: %s", underlying_key, exc)
-            return False
+            return self._load_index_contracts_from_master(underlying_key)
 
     def plan_8_itm_contracts(self, spot: float, underlying_key: str = NIFTY_KEY) -> list[str]:
         """
         Section 3:
-        CE ITM = the 4 largest strikes below spot.
-        PE ITM = the 4 smallest strikes above spot.
+        ATM +- 3 Strikes (6 Contracts Total):
+        CE ITM = the 3 largest strikes below spot.
+        PE ITM = the 3 smallest strikes above spot.
         A strike equal to spot is excluded.
         """
         if underlying_key not in self.ce_by_underlying or not self.ce_by_underlying[underlying_key]:
@@ -1477,8 +1640,9 @@ class GapEntryStrategyEngine:
         ce_dict = self.ce_by_underlying.get(underlying_key) or (self.ce_by_strike if underlying_key == NIFTY_KEY else {})
         pe_dict = self.pe_by_underlying.get(underlying_key) or (self.pe_by_strike if underlying_key == NIFTY_KEY else {})
 
-        ce_strikes = sorted([s for s in ce_dict.keys() if s < spot], reverse=True)[:4]
-        pe_strikes = sorted([s for s in pe_dict.keys() if s > spot])[:4]
+        # ATM +- 3: 3 CE ITM strikes below spot and 3 PE ITM strikes above spot
+        ce_strikes = sorted([s for s in ce_dict.keys() if s < spot], reverse=True)[:3]
+        pe_strikes = sorted([s for s in pe_dict.keys() if s > spot])[:3]
 
         keys: list[str] = []
         for s in ce_strikes:
@@ -1495,22 +1659,9 @@ class GapEntryStrategyEngine:
             if self.index_underlyings[underlying_key]["state"] == "SETUP":
                 self.index_underlyings[underlying_key]["state"] = "PLANNING"
 
-            # Phase 2: ATM ±1 strikes calculation (price, OI, volume snapshot at 09:15)
-            step = self.index_underlyings[underlying_key].get("step", 50.0)
-            atm_strike = round(spot / step) * step
-            atm_pm_strikes = [atm_strike - step, atm_strike, atm_strike + step]
-            atm_pm_keys: list[str] = []
-            for s in atm_pm_strikes:
-                c_ce = ce_dict.get(s)
-                if c_ce and c_ce.get("instrument_key"):
-                    atm_pm_keys.append(c_ce["instrument_key"])
-                c_pe = pe_dict.get(s)
-                if c_pe and c_pe.get("instrument_key"):
-                    atm_pm_keys.append(c_pe["instrument_key"])
-            self.index_underlyings[underlying_key]["atm_plus_minus_keys"] = atm_pm_keys
-            for ak in atm_pm_keys:
-                if ak not in keys:
-                    keys.append(ak)
+            # Point atm_plus_minus_keys strictly to these 6 locked keys (eliminates subscribing to distant extra strikes)
+            self.index_underlyings[underlying_key]["atm_plus_minus_keys"] = list(keys)
+
             fut_k = self.index_underlyings[underlying_key].get("futures_key")
             if fut_k and fut_k not in keys:
                 keys.append(fut_k)
@@ -1575,7 +1726,7 @@ class GapEntryStrategyEngine:
                 idx_state = self.index_underlyings.get(ukey)
                 if not idx_state or not idx_state.get("enabled", True):
                     continue
-                if idx_state.get("snapshot_taken"):
+                if idx_state.get("snapshot_taken") and idx_state.get("locked_keys"):
                     continue
 
                 if not idx_state.get("planned_keys") and idx_state.get("spot_price"):
@@ -1614,7 +1765,7 @@ class GapEntryStrategyEngine:
                         self.feed.subscribe(idx_state["locked_keys"], target="indices")
                     except Exception as exc:
                         LOGGER.debug("Could not subscribe locked keys for %s: %s", ukey, exc)
-                LOGGER.info("LOCKED 8 contracts for %s at 09:14:55: %s", ukey, idx_state["locked_keys"])
+                LOGGER.info("LOCKED 6 contracts (ATM +-3) for %s at 09:14:55: %s", ukey, idx_state["locked_keys"])
 
     def lock_all_indices(self) -> None:
         self.lock_contracts()
@@ -1625,7 +1776,7 @@ class GapEntryStrategyEngine:
 
     def take_snapshot(self, underlying_key: str | None = None) -> None:
         """
-        At 09:15:00, take the snapshot of the 8 contracts: LTP, OI, bid, ask.
+        At 09:15:00, take the snapshot of the 6 contracts (ATM +-3): LTP, OI, bid, ask.
         NO TRADING IS ALLOWED AT 09:15:00.
         """
         with self._lock:
@@ -1634,7 +1785,7 @@ class GapEntryStrategyEngine:
                 idx_state = self.index_underlyings.get(ukey)
                 if not idx_state or not idx_state.get("enabled", True):
                     continue
-                if idx_state.get("snapshot_taken"):
+                if idx_state.get("snapshot_taken") and idx_state.get("locked_keys"):
                     continue
 
                 if not idx_state.get("locked_keys"):
@@ -1782,9 +1933,9 @@ class GapEntryStrategyEngine:
 
             # 3. Snapshot validation for this index
             if underlying_key == NIFTY_KEY:
-                if self.snapshot:
+                if not idx_state.get("snapshot") and self.snapshot:
                     idx_state["snapshot"] = dict(self.snapshot)
-                if self.locked_keys:
+                if not idx_state.get("locked_keys") and self.locked_keys:
                     idx_state["locked_keys"] = list(self.locked_keys)
 
             snap = idx_state.get("snapshot") or (self.snapshot if underlying_key == NIFTY_KEY else {})
@@ -1936,6 +2087,42 @@ class GapEntryStrategyEngine:
             size = table_entry.get("size", "")
             rule_num = table_entry.get("rule")
 
+            # --- Dynamic Upgrade Rule for Conditions 2 & 6 (Client Spec & PDF Guide) ---
+            # Condition 2 (LB, SB -> CE Buy): Upgrades to ⭐⭐⭐ Full Lots if PE added OI >= 2x CE added OI at ATM,
+            # and spot >= VWAP.
+            # Condition 6 (SB, LB -> PE Buy): Upgrades to ⭐⭐⭐ Full Lots if CE added OI >= 2x PE added OI at ATM,
+            # and spot <= VWAP.
+            step = float(idx_state.get("step") or 50.0)
+            spot = float(idx_state.get("spot_price") or self.spot_price or 0.0)
+            vwap = float(idx_state.get("futures_vwap") or idx_state.get("vwap") or idx_state.get("open_price") or spot)
+            atm_strike = round(spot / step) * step if step > 0 and spot > 0 else 0.0
+
+            if rule_num in (2, 6) and atm_strike > 0:
+                atm_ce = next((self.hot_cache[k] for k in ce_keys if abs(float(self.hot_cache.get(k, {}).get("strike") or 0.0) - atm_strike) < 0.1), None)
+                atm_pe = next((self.hot_cache[k] for k in pe_keys if abs(float(self.hot_cache.get(k, {}).get("strike") or 0.0) - atm_strike) < 0.1), None)
+
+                atm_ce_oi_curr = float(atm_ce.get("oi") or 0.0) if atm_ce else 0.0
+                atm_ce_oi_snap = float(snap.get(atm_ce.get("instrument_key"), {}).get("oi") or 0.0) if atm_ce else 0.0
+                atm_ce_added_oi = max(0.0, atm_ce_oi_curr - atm_ce_oi_snap)
+
+                atm_pe_oi_curr = float(atm_pe.get("oi") or 0.0) if atm_pe else 0.0
+                atm_pe_oi_snap = float(snap.get(atm_pe.get("instrument_key"), {}).get("oi") or 0.0) if atm_pe else 0.0
+                atm_pe_added_oi = max(0.0, atm_pe_oi_curr - atm_pe_oi_snap)
+
+                if rule_num == 2 and decision == "CE Buy":
+                    if atm_pe_added_oi >= 2.0 * max(100.0, atm_ce_added_oi) and spot >= vwap:
+                        stars = "⭐⭐⭐"
+                        size = "full"
+                        LOGGER.info("DYNAMIC UPGRADE on %s: Rule #2 CE Buy upgraded to ⭐⭐⭐ Full Lots (ATM PE ΔOI: %.0f >= 2x CE ΔOI: %.0f, Spot: %.2f >= VWAP: %.2f)",
+                                    idx_state["name"], atm_pe_added_oi, atm_ce_added_oi, spot, vwap)
+
+                elif rule_num == 6 and decision == "PE Buy":
+                    if atm_ce_added_oi >= 2.0 * max(100.0, atm_pe_added_oi) and spot <= vwap:
+                        stars = "⭐⭐⭐"
+                        size = "full"
+                        LOGGER.info("DYNAMIC UPGRADE on %s: Rule #6 PE Buy upgraded to ⭐⭐⭐ Full Lots (ATM CE ΔOI: %.0f >= 2x PE ΔOI: %.0f, Spot: %.2f <= VWAP: %.2f)",
+                                    idx_state["name"], atm_ce_added_oi, atm_pe_added_oi, spot, vwap)
+
             summary_line = f"{idx_state['name']} ΔCE: {delta_ce:+,.0f} | ΔPE: {delta_pe:+,.0f} | CE: {ce_type} | PE: {pe_type} | Rule #{rule_num} {stars} -> {decision}"
 
             eval_res = {
@@ -1993,7 +2180,7 @@ class GapEntryStrategyEngine:
                 # Gate 1: Require signal to hold for 2 consecutive OI updates (distinct exchange broadcasts)
                 current_oi_fp = (round(ce_oi_curr_sum, 1), round(pe_oi_curr_sum, 1))
                 last_oi_fp = idx_state.get("last_oi_fingerprint")
-                if current_oi_fp == last_oi_fp and idx_state.get("consecutive_signal") == decision:
+                if not force and current_oi_fp == last_oi_fp and idx_state.get("consecutive_signal") == decision:
                     return None  # Same exchange OI update, await fresh broadcast
 
                 idx_state["last_oi_fingerprint"] = current_oi_fp
@@ -2031,6 +2218,8 @@ class GapEntryStrategyEngine:
                             action_taken="BLOCKED_SENSEX_NOT_3_STAR",
                         )
                         LOGGER.info("SENSEX blocked signal %s Rule #%s because only ★★★ signals are allowed.", decision, rule_num)
+                        idx_state["consecutive_signal"] = None
+                        idx_state["consecutive_count"] = 0
                         return None
                 else:
                     # NIFTY and BANK NIFTY: CE Buy needs LB or SC (blocked on SB/LU or non-confirming in live); PE Buy needs SB or LU (blocked on LB/SC or non-confirming in live)
@@ -2047,6 +2236,8 @@ class GapEntryStrategyEngine:
                                 action_taken="BLOCKED_FUTURES_MISMATCH",
                             )
                             LOGGER.info("%s blocked CE Buy: Futures buildup is %s (must be LB or SC).", idx_state["name"], fut_bu)
+                            idx_state["consecutive_signal"] = None
+                            idx_state["consecutive_count"] = 0
                             return None
                     elif decision == "PE Buy":
                         if fut_bu in ("LB", "SC") or (require_consecutive and fut_bu not in ("SB", "LU")):
@@ -2060,6 +2251,8 @@ class GapEntryStrategyEngine:
                                 action_taken="BLOCKED_FUTURES_MISMATCH",
                             )
                             LOGGER.info("%s blocked PE Buy: Futures buildup is %s (must be SB or LU).", idx_state["name"], fut_bu)
+                            idx_state["consecutive_signal"] = None
+                            idx_state["consecutive_count"] = 0
                             return None
 
                 winner = self._select_best_strike(side, locked_keys=locked_keys) or self._select_atm_strike(side, underlying_key=underlying_key)
@@ -2159,6 +2352,8 @@ class GapEntryStrategyEngine:
                 idx_st["prev_close"] = float(tick["prev_close"])
             if tick.get("open") is not None and not idx_st.get("open_price"):
                 idx_st["open_price"] = float(tick["open"])
+            if tick.get("average_price"):
+                idx_st["vwap"] = float(tick["average_price"])
 
             # Phase 1: Pre-open previous-close check before 09:15:00
             if self.re_eval_min_interval_sec > 0 and now_time_hms < "09:15:00":
@@ -2214,8 +2409,12 @@ class GapEntryStrategyEngine:
             with self._lock:
                 if st.get("state") in ("SETUP", "PLANNING"):
                     if now_time_hms < self.lock_time:
-                        st["state"] = "PLANNING"
-                        self.plan_stock_contracts(stock_sym_for_spot, ltp)
+                        last_p = float(st.get("_last_planned_spot") or 0.0)
+                        step = float(st.get("strike_step") or 10.0)
+                        if not st.get("planned_keys") or abs(ltp - last_p) >= step:
+                            st["_last_planned_spot"] = ltp
+                            st["state"] = "PLANNING"
+                            self.plan_stock_contracts(stock_sym_for_spot, ltp)
                     elif self.lock_time <= now_time_hms < self.snapshot_time:
                         if st.get("state") != "LOCKED":
                             self.lock_stock_contracts(stock_sym_for_spot)
@@ -2227,9 +2426,11 @@ class GapEntryStrategyEngine:
                     self.take_stock_snapshot(stock_sym_for_spot)
 
                 # Path 1 check: First tick above/below 09:15 open price for ★★★+ stocks
+                trigger_stock_side = None
                 if (
                     st.get("state") == "ARMED"
                     and not st.get("path1_done")
+                    and not st.get("path1_evaluating")
                     and not st.get("gap_against")
                     and st.get("current_position") is None
                     and st.get("today_trades_count", 0) < self.stock_max_trades_per_day
@@ -2239,9 +2440,15 @@ class GapEntryStrategyEngine:
                     dir_pref = str(st.get("watchlist_direction") or "BULLISH").upper()
                     if open_p > 0 and ltp > 0:
                         if dir_pref == "BULLISH" and ltp > open_p:
-                            return self._execute_stock_path1_entry(stock_sym_for_spot, "CE", trigger_ms=ts_ms)
+                            trigger_stock_side = "CE"
+                            st["path1_evaluating"] = True
                         elif dir_pref == "BEARISH" and ltp < open_p:
-                            return self._execute_stock_path1_entry(stock_sym_for_spot, "PE", trigger_ms=ts_ms)
+                            trigger_stock_side = "PE"
+                            st["path1_evaluating"] = True
+
+            if trigger_stock_side:
+                # Dispatched outside self._lock so Priority 0 index ticks experience ZERO lock contention!
+                return self._execute_stock_path1_entry(stock_sym_for_spot, trigger_stock_side, trigger_ms=ts_ms)
             return None
 
         # --- 1c. STOCK FUTURES TICK ---
@@ -2295,6 +2502,8 @@ class GapEntryStrategyEngine:
                 idx_st["futures_oi"] = float(tick["open_interest"])
             if tick.get("prev_close") is not None and not idx_st.get("futures_prev_close"):
                 idx_st["futures_prev_close"] = float(tick["prev_close"])
+            if tick.get("average_price"):
+                idx_st["futures_vwap"] = float(tick["average_price"])
 
             # Live futures buildup classification
             pc = idx_st.get("futures_prev_close") or idx_st.get("futures_snap_ltp")
@@ -2678,10 +2887,18 @@ class GapEntryStrategyEngine:
             # Phase 1 & 2: Paper entry fills at live ask!
             ask = float(winner.get("ask_price") or 0.0)
             ltp = float(winner.get("ltp") or 0.0)
+            bid = float(winner.get("bid_price") or 0.0)
             ref_price = ask if ask > 0 else (ltp if ltp > 0 else 0.0)
             if ref_price <= 0.0:
                 LOGGER.warning("ORDER REJECTED: No live quotes (ask=%.2f, ltp=%.2f) for %s (%s)", ask, ltp, winner.get("trading_symbol"), winner.get("instrument_key"))
                 return None
+
+            # Difference 4: Guard for stocks - Reject if bid-ask spread exceeds max_spread_pct (3.0%)
+            if underlying_key in self.stock_underlyings and bid > 0 and ask > 0:
+                spread = ((ask - bid) / ask) * 100.0
+                if spread > self.max_spread_pct:
+                    LOGGER.warning("STOCK ORDER REJECTED: Spread %.2f%% exceeds max %.1f%% guard for %s", spread, self.max_spread_pct, winner.get("trading_symbol"))
+                    return None
             limit_price = round(round((ref_price + self.order_buffer) / 0.05) * 0.05, 2)
             entry_price = ref_price if self.mode == "paper" else limit_price
             sl_price = round(entry_price * 0.75, 2)
@@ -3305,6 +3522,9 @@ class GapEntryStrategyEngine:
         if not spot or spot <= 0:
             spot = 25000.0 if ukey == NIFTY_KEY else (60000.0 if ukey == BANKNIFTY_KEY else 80000.0)
 
+        idx_st["snapshot_taken"] = False
+        idx_st["locked_keys"] = []
+        idx_st["planned_keys"] = []
         self.load_contracts_if_needed(ukey)
         self.plan_8_itm_contracts(spot, underlying_key=ukey)
         self.lock_contracts(underlying_key=ukey)

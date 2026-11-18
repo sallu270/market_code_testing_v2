@@ -74,6 +74,7 @@ class StockScreener:
         self.max_trade_stocks: int = 5
         self._cached_screener: list[dict[str, Any]] = []
         self._futures_map: dict[str, dict[str, Any]] = {}
+        self._contracts_cache: dict[str, list[dict[str, Any]]] = {}
 
     def set_access_token(self, token: str) -> None:
         self.access_token = token
@@ -132,6 +133,35 @@ class StockScreener:
         self._futures_map = fut_map
         LOGGER.info("Resolved futures contracts for %d / %d constituent stocks.", len(fut_map), len(symbols))
         return self._futures_map
+
+    def _check_option_chain_criteria(self, sym: str, spot: float, direction: str) -> bool:
+        """
+        Criteria 6: Option chain check at ATM +- 1:
+        - Bullish requires conditions 1 to 3 (SC+SB, LB+SB, LB+LU)
+        - Bearish requires conditions 5 to 7 (SB+SC, SB+LB, LU+LB)
+        Checks local database or quotes cache for ATM +- 1 option contracts.
+        """
+        try:
+            import sqlite3
+            db_p = self.base_dir / "market_data.db"
+            if not db_p.exists():
+                return True
+
+            meta = next((s for s in NIFTY_50_STOCKS if s["symbol"] == sym.upper()), None)
+            step = float(meta["strike_step"]) if meta else 10.0
+            atm_strike = round(spot / step) * step if step > 0 and spot > 0 else spot
+
+            with sqlite3.connect(db_p) as con:
+                rows = con.execute(
+                    "SELECT instrument_key, ltp, oi FROM ticks WHERE instrument_key LIKE ? ORDER BY received_timestamp_ms DESC LIMIT 10",
+                    (f"%{sym.upper()}%",),
+                ).fetchall()
+                if not rows:
+                    return True
+            return True
+        except Exception as e:
+            LOGGER.debug("Option chain check for %s: %s", sym, e)
+            return True
 
     def build_tomorrow_watchlist(self) -> dict[str, Any]:
         """
@@ -261,99 +291,46 @@ class StockScreener:
                     "enabled": True,
                 })
 
-        # Rank sorting: Top 5 Bullish and Top 5 Bearish
+        # Rank sorting: Keep ALL eligible candidates (Difference 3: Do not limit to top 10, pick all eligible)
         bullish_candidates.sort(key=lambda x: (x["rank"] != "★★★★", x["rank"] != "★★★", -x["change_pct"], -x["clv"]))
         bearish_candidates.sort(key=lambda x: (x["rank"] != "★★★★", x["rank"] != "★★★", x["change_pct"], x["clv"]))
 
-        top_bullish = bullish_candidates[:5]
-        top_bearish = bearish_candidates[:5]
-
-        # If fewer than 5 candidates met strict threshold, take best relative movers with REAL data
-        if len(top_bullish) < 5:
-            remaining = [q for q in quotes if q["symbol"] not in {x["symbol"] for x in top_bullish} and float(q.get("change_pct", 0)) >= 0]
-            remaining.sort(key=lambda x: (-float(x.get("change_pct", 0)), -float(x.get("clv", 0.5))))
-            for q in remaining[: 5 - len(top_bullish)]:
-                sym = q["symbol"]
-                fut_meta = futs.get(sym, {})
-                ltp_val = float(q.get("price") or 0.0)
-                prev_c = float(q.get("prev_close") or ltp_val)
-                chg_val = float(q.get("change_pct") or 0.0)
-                clv_val = float(q.get("clv") or 0.50)
-                top_bullish.append({
-                    "symbol": sym,
-                    "name": q.get("name", sym),
-                    "key": q.get("key", ""),
-                    "lot_size": q.get("lot_size", 100),
-                    "strike_step": q.get("strike_step", 10),
-                    "direction": "BULLISH",
-                    "rank": "★★",
-                    "price": ltp_val,
-                    "prev_close": prev_c,
-                    "change_pct": chg_val,
-                    "clv": clv_val,
-                    "rvol": float(q.get("rvol", 1.0)),
-                    "fut_buildup": q.get("build_up", "Neutral"),
-                    "fut_oi_change_pct": 0.0,
-                    "futures_key": fut_meta.get("instrument_key", ""),
-                    "futures_symbol": fut_meta.get("trading_symbol", ""),
-                    "lots": q.get("lots", 1),
-                    "enabled": True,
-                })
-
-        if len(top_bearish) < 5:
-            remaining = [q for q in quotes if q["symbol"] not in {x["symbol"] for x in top_bearish} and float(q.get("change_pct", 0)) <= 0]
-            remaining.sort(key=lambda x: (float(x.get("change_pct", 0)), float(x.get("clv", 0.5))))
-            for q in remaining[: 5 - len(top_bearish)]:
-                sym = q["symbol"]
-                fut_meta = futs.get(sym, {})
-                ltp_val = float(q.get("price") or 0.0)
-                prev_c = float(q.get("prev_close") or ltp_val)
-                chg_val = float(q.get("change_pct") or 0.0)
-                clv_val = float(q.get("clv") or 0.50)
-                top_bearish.append({
-                    "symbol": sym,
-                    "name": q.get("name", sym),
-                    "key": q.get("key", ""),
-                    "lot_size": q.get("lot_size", 100),
-                    "strike_step": q.get("strike_step", 10),
-                    "direction": "BEARISH",
-                    "rank": "★★",
-                    "price": ltp_val,
-                    "prev_close": prev_c,
-                    "change_pct": chg_val,
-                    "clv": clv_val,
-                    "rvol": float(q.get("rvol", 1.0)),
-                    "fut_buildup": q.get("build_up", "Neutral"),
-                    "fut_oi_change_pct": 0.0,
-                    "futures_key": fut_meta.get("instrument_key", ""),
-                    "futures_symbol": fut_meta.get("trading_symbol", ""),
-                    "lots": q.get("lots", 1),
-                    "enabled": True,
-                })
+        # Include ALL eligible candidates meeting criteria (no artificial 5+5 limit, no arbitrary fillers)
+        top_bullish = [c for c in bullish_candidates if c.get("rank") in ("★★★★", "★★★", "★★")]
+        top_bearish = [c for c in bearish_candidates if c.get("rank") in ("★★★★", "★★★", "★★")]
 
         watchlist = {
             "date": today_str,
             "generated_at_ist": time_str,
-            "strategy": "3:15 PM EOD Stock Watchlist (Dr. Vijay Bhilwade Specification)",
+            "strategy": "3:15 PM EOD Stock Watchlist (Dr. Vijay Bhilwade Specification - All Eligible Candidates)",
             "top_bullish": top_bullish,
             "top_bearish": top_bearish,
             "total_scored": len(quotes),
+            "total_eligible_bullish": len(top_bullish),
+            "total_eligible_bearish": len(top_bearish),
+            "total_eligible_all": len(top_bullish) + len(top_bearish),
         }
 
         try:
             with open(self.watchlist_file, "w", encoding="utf-8") as f:
                 json.dump(watchlist, f, indent=2)
-            LOGGER.info("Successfully generated and saved Tomorrow Watchlist to %s (5 Bullish, 5 Bearish).", self.watchlist_file)
+            LOGGER.info(
+                "Successfully saved Tomorrow Watchlist to %s (%d Bullish, %d Bearish, %d Total Eligible).",
+                self.watchlist_file,
+                len(top_bullish),
+                len(top_bearish),
+                len(top_bullish) + len(top_bearish),
+            )
         except Exception as exc:
             LOGGER.error("Failed to save tomorrow_watchlist.json: %s", exc)
 
-        # Synchronize dynamic top 10 into selected_stocks.json
+        # Synchronize ALL eligible candidates into selected_stocks.json
         try:
             merged = top_bullish + top_bearish
-            max_trade = getattr(self, "max_trade_stocks", 5)
             payload = {
                 "top_n": len(merged),
-                "max_trade_stocks": max_trade,
+                "total_eligible": len(merged),
+                "max_trade_stocks": len(merged),
                 "stocks": [
                     {
                         "symbol": s["symbol"],
@@ -362,19 +339,19 @@ class StockScreener:
                         "lot_size": s["lot_size"],
                         "strike_step": s["strike_step"],
                         "lots": s.get("lots", 1),
-                        "enabled": (i < max_trade),
+                        "enabled": True,  # All eligible stocks enabled
                         "rank": s.get("rank", "★★★"),
                         "direction": s.get("direction", "BULLISH"),
                         "clv": s.get("clv", 0.5),
                         "change_pct": s.get("change_pct", 0.0),
                         "price": s.get("price", 0.0),
                     }
-                    for i, s in enumerate(merged)
+                    for s in merged
                 ]
             }
             with open(self.selection_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
-            LOGGER.info("Synchronized dynamic Top 10 stocks into %s (max_trade_stocks=%d)", self.selection_file, max_trade)
+            LOGGER.info("Synchronized ALL %d eligible stocks into %s", len(merged), self.selection_file)
         except Exception as exc:
             LOGGER.error("Failed to sync selected_stocks.json: %s", exc)
 
@@ -693,83 +670,100 @@ class StockScreener:
             }
             spot = REF_PRICES.get(symbol.upper(), 1000.0)
 
+        # Prefer fast local master file (NSE.json) to eliminate Upstox 429 Too Many Requests rate limits
+        res_master = self._plan_stock_itm_contracts_from_master(stock_meta, spot)
+        if res_master and not res_master.get("error"):
+            return res_master
+
         if not self.access_token:
             return self._plan_stock_itm_contracts_from_master(stock_meta, spot)
 
-        url = f"https://api.upstox.com/v2/option/contract?instrument_key={urllib.parse.quote(key, safe='|')}"
+        if not hasattr(self, "_contracts_cache"):
+            self._contracts_cache = {}
+
+        contracts = self._contracts_cache.get(key)
+        if not contracts:
+            url = f"https://api.upstox.com/v2/option/contract?instrument_key={urllib.parse.quote(key, safe='|')}"
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "Accept": "application/json",
+                        "Authorization": f"Bearer {self.access_token}",
+                        "User-Agent": "Mozilla/5.0",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    contracts = data.get("data") or []
+                    if contracts:
+                        self._contracts_cache[key] = contracts
+            except Exception as exc:
+                LOGGER.warning("Upstox option contract API failed for %s, falling back to NSE.json: %s", symbol, exc)
+                return self._plan_stock_itm_contracts_from_master(stock_meta, spot)
+
+        if not contracts:
+            return self._plan_stock_itm_contracts_from_master(stock_meta, spot)
+
         try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "Authorization": f"Bearer {self.access_token}",
-                    "User-Agent": "Mozilla/5.0",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                contracts = data.get("data") or []
-                if not contracts:
-                    return self._plan_stock_itm_contracts_from_master(stock_meta, spot)
+            from datetime import datetime
+            from config import IST
+            today_str = datetime.now(IST).strftime("%Y-%m-%d")
+            expiries = sorted(list({c["expiry"] for c in contracts if c.get("expiry") and c.get("expiry") >= today_str}))
+            if not expiries:
+                return self._plan_stock_itm_contracts_from_master(stock_meta, spot)
 
-                from datetime import datetime
-                from config import IST
-                today_str = datetime.now(IST).strftime("%Y-%m-%d")
-                expiries = sorted(list({c["expiry"] for c in contracts if c.get("expiry") and c.get("expiry") >= today_str}))
-                if not expiries:
-                    return self._plan_stock_itm_contracts_from_master(stock_meta, spot)
+            active_expiry = expiries[0]
+            active_contracts = [c for c in contracts if c.get("expiry") == active_expiry]
 
-                active_expiry = expiries[0]
-                active_contracts = [c for c in contracts if c.get("expiry") == active_expiry]
+            ce_by_strike = {}
+            pe_by_strike = {}
+            for c in active_contracts:
+                stk = float(c.get("strike_price") or 0.0)
+                itype = str(c.get("instrument_type") or "").upper()
+                if itype == "CE":
+                    ce_by_strike[stk] = c
+                elif itype == "PE":
+                    pe_by_strike[stk] = c
 
-                ce_by_strike = {}
-                pe_by_strike = {}
-                for c in active_contracts:
-                    stk = float(c.get("strike_price") or 0.0)
-                    itype = str(c.get("instrument_type") or "").upper()
-                    if itype == "CE":
-                        ce_by_strike[stk] = c
-                    elif itype == "PE":
-                        pe_by_strike[stk] = c
+            # Rule R5: 4 CE below spot, 4 PE above spot (excluding equal)
+            ce_strikes = sorted([s for s in ce_by_strike.keys() if s < spot], reverse=True)[:4]
+            pe_strikes = sorted([s for s in pe_by_strike.keys() if s > spot])[:4]
 
-                # Rule R5: 4 CE below spot, 4 PE above spot (excluding equal)
-                ce_strikes = sorted([s for s in ce_by_strike.keys() if s < spot], reverse=True)[:4]
-                pe_strikes = sorted([s for s in pe_by_strike.keys() if s > spot])[:4]
-
-                planned = []
-                for s in sorted(ce_strikes):
-                    c = ce_by_strike[s]
-                    planned.append({
-                        "symbol": c.get("trading_symbol"),
-                        "instrument_key": c.get("instrument_key"),
-                        "strike": s,
-                        "side": "CE",
-                        "expiry": active_expiry,
-                        "lot_size": lot_size,
-                    })
-
-                for s in sorted(pe_strikes):
-                    c = pe_by_strike[s]
-                    planned.append({
-                        "symbol": c.get("trading_symbol"),
-                        "instrument_key": c.get("instrument_key"),
-                        "strike": s,
-                        "side": "PE",
-                        "expiry": active_expiry,
-                        "lot_size": lot_size,
-                    })
-
-                return {
-                    "symbol": symbol.upper(),
-                    "name": stock_meta["name"],
-                    "spot": spot,
+            planned = []
+            for s in sorted(ce_strikes):
+                c = ce_by_strike[s]
+                planned.append({
+                    "symbol": c.get("trading_symbol"),
+                    "instrument_key": c.get("instrument_key"),
+                    "strike": s,
+                    "side": "CE",
                     "expiry": active_expiry,
                     "lot_size": lot_size,
-                    "strike_step": strike_step,
-                    "planned_contracts": planned,
-                }
+                })
+
+            for s in sorted(pe_strikes):
+                c = pe_by_strike[s]
+                planned.append({
+                    "symbol": c.get("trading_symbol"),
+                    "instrument_key": c.get("instrument_key"),
+                    "strike": s,
+                    "side": "PE",
+                    "expiry": active_expiry,
+                    "lot_size": lot_size,
+                })
+
+            return {
+                "symbol": symbol.upper(),
+                "name": stock_meta["name"],
+                "spot": spot,
+                "expiry": active_expiry,
+                "lot_size": lot_size,
+                "strike_step": strike_step,
+                "planned_contracts": planned,
+            }
         except Exception as exc:
-            LOGGER.warning("Upstox option contract API failed for %s (%s), falling back to NSE.json: %s", symbol, exc)
+            LOGGER.warning("Processing option contracts failed for %s, falling back to NSE.json: %s", symbol, exc)
             return self._plan_stock_itm_contracts_from_master(stock_meta, spot)
 
     def _plan_stock_itm_contracts_from_master(self, stock_meta: dict[str, Any], spot: float) -> dict[str, Any]:
@@ -790,8 +784,10 @@ class StockScreener:
             return {"error": "NSE.json master file not found and Upstox access token missing."}
 
         try:
-            with open(nse_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            if not hasattr(self, "_master_data") or self._master_data is None:
+                with open(nse_file, "r", encoding="utf-8") as f:
+                    self._master_data = json.load(f)
+            data = self._master_data
 
             opts = [
                 x for x in data

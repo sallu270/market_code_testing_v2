@@ -78,7 +78,7 @@ class TestStockOptionsStrategy(unittest.TestCase):
             "futures_oi": 50000.0,
             "futures_prev_close": 1300.0,
             "futures_prev_oi": 48000.0,
-            "futures_buildup": "LB",
+            "futures_buildup": "SB" if direction == "BEARISH" else "LB",
             "path1_done": False,
             "consecutive_signal": None,
             "consecutive_count": 0,
@@ -138,12 +138,18 @@ class TestStockOptionsStrategy(unittest.TestCase):
     # =========================================================================
 
     def test_watchlist_scoring_and_generation(self):
-        """Validates 3:15 PM EOD scoring: CLV, RVOL, Futures delta, and Top 5 Bullish/Bearish output."""
+        """Validates 3:15 PM EOD scoring: CLV, RVOL, Futures delta, and all eligible Bullish/Bearish output (Difference 3)."""
+        mock_quotes = [
+            {"symbol": "RELIANCE", "price": 1300.0, "prev_close": 1285.0, "change_pct": 1.17, "high": 1305.0, "low": 1285.0, "volume": 500000, "lot_size": 250, "oi": 50000, "prev_oi": 48000, "key": "NSE_EQ|RELIANCE"},
+            {"symbol": "TCS", "price": 3500.0, "prev_close": 3465.0, "change_pct": 1.01, "high": 3510.0, "low": 3460.0, "volume": 200000, "lot_size": 175, "oi": 30000, "prev_oi": 28000, "key": "NSE_EQ|TCS"},
+            {"symbol": "INFY", "price": 1500.0, "prev_close": 1520.0, "change_pct": -1.32, "high": 1522.0, "low": 1498.0, "volume": 400000, "lot_size": 400, "oi": 45000, "prev_oi": 42000, "key": "NSE_EQ|INFY"},
+        ]
+        self.screener.fetch_quotes = lambda: mock_quotes
         wl = self.screener.build_tomorrow_watchlist()
         self.assertIn("top_bullish", wl)
         self.assertIn("top_bearish", wl)
-        self.assertEqual(len(wl["top_bullish"]), 5)
-        self.assertEqual(len(wl["top_bearish"]), 5)
+        self.assertEqual(len(wl["top_bullish"]), 2)
+        self.assertEqual(len(wl["top_bearish"]), 1)
 
         for b in wl["top_bullish"]:
             self.assertEqual(b["direction"], "BULLISH")
@@ -222,6 +228,49 @@ class TestStockOptionsStrategy(unittest.TestCase):
         self.assertEqual(trade["entry_path"], "PATH_1_0915")
         self.assertEqual(trade["lots"], 2)  # ★★★★ gives 2x base lots = 2
         self.assertEqual(st["state"], "HOLDING")
+
+    def test_path1_spread_guard_rejection(self):
+        """Difference 4: Stock option with bid-ask spread > 3.0% is rejected to protect capital."""
+        st = self._setup_mock_stock("RELIANCE", base_lots=1, rank="★★★", direction="BULLISH")
+        st["prev_close"] = 1000.0
+        st["spot_price"] = 1000.0
+        self.engine.take_stock_snapshot("RELIANCE")
+
+        # Widen spread of winning CE contract (bid 40.0, ask 50.0 -> spread = 20% > 3.0%)
+        for k in st["locked_keys"]:
+            if "_CE_" in k:
+                self.engine.hot_cache[k]["bid_price"] = 40.0
+                self.engine.hot_cache[k]["ask_price"] = 50.0
+
+        tick = {"instrument_key": st["key"], "ltp": 1001.0}
+        trade = self.engine.on_tick(tick)
+        self.assertIsNone(trade)
+        self.assertIsNone(st["current_position"])
+        self.assertTrue(st["path1_done"])
+
+    def test_path1_futures_gate_blocking(self):
+        """Rule 9: Path 1 CE Buy is blocked if stock futures shows Short Build-up (SB) or Long Unwinding (LU)."""
+        st = self._setup_mock_stock("RELIANCE", base_lots=1, rank="★★★", direction="BULLISH")
+        st["prev_close"] = 1000.0
+        st["spot_price"] = 1000.0
+        st["futures_buildup"] = "SB"  # Opposing futures direction
+        self.engine.take_stock_snapshot("RELIANCE")
+
+        tick = {"instrument_key": st["key"], "ltp": 1001.0}
+        trade = self.engine.on_tick(tick)
+        self.assertIsNone(trade)
+        self.assertIsNone(st["current_position"])
+        self.assertTrue(st["path1_done"])
+
+    def test_stock_order_micro_pacing(self):
+        """Rate Pacing: Priority 1 stock orders are micro-paced with 50ms interval (max 20 orders/sec)."""
+        import time
+        self.engine.stock_order_interval_sec = 0.05
+        t0 = time.time()
+        self.engine._pace_stock_order_dispatch()
+        t1 = self.engine._pace_stock_order_dispatch()
+        elapsed = t1 - t0
+        self.assertGreaterEqual(elapsed, 0.045)  # Enforces ~50ms spacing between stock orders
 
     # =========================================================================
     # 3. PATH 2 (ALL-DAY OI ENTRY & FUTURES GATE) TESTS

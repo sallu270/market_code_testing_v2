@@ -30,6 +30,20 @@ class TestOIBuildupStrategy(unittest.TestCase):
         self.db = MagicMock()
         self.base_dir = Path("upstox-nifty-phase1")
         self.engine = GapEntryStrategyEngine(database=self.db, base_dir=self.base_dir)
+        self.engine.re_eval_min_interval_sec = 0.0
+        self.engine.entry_start_time = "00:00:00"
+        self.engine.entry_end_time = "23:59:59"
+        for ukey, st in self.engine.index_underlyings.items():
+            st["snapshot"].clear()
+            st["snapshot_taken"] = False
+            st["planned_keys"].clear()
+            st["locked_keys"].clear()
+            st["atm_plus_minus_keys"].clear()
+            st["path1_done"] = False
+        self.engine.snapshot.clear()
+        self.engine.planned_keys.clear()
+        self.engine.locked_keys.clear()
+        self.engine.path1_done = False
 
     def test_all_16_table_combinations(self):
         """Acceptance test 1: All 16 combinations give exactly the table decision, stars, size."""
