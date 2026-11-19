@@ -13,7 +13,7 @@ from collections import deque
 from datetime import datetime
 from typing import Any
 
-from flask import Flask, Response, jsonify, request, send_file, stream_with_context
+from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -129,19 +129,24 @@ def handle_tick(tick: dict[str, Any]) -> None:
     except Exception:
         LOGGER.exception("Failed to store or aggregate a market tick.")
 
-# Socket 1 (Indices): 3 Major Indices + Index Futures from settings.instrument_keys
-initial_index_keys = list(settings.instrument_keys)
+# SINGLE WebSocket: Upstox standard accounts only allow 1 concurrent WebSocket connection per token.
+# We combine all index + stock keys into one UpstoxFeed, wrapped in DualUpstoxFeed for routing compatibility.
+# DualUpstoxFeed is kept intact but forced into single-feed mode by passing empty stock_keys and
+# a combined index_keys list that includes all 50 equity keys + index/futures keys.
 
-# Socket 2 (Stocks): All 50 Nifty constituent cash stock keys
+initial_index_keys = list(settings.instrument_keys)
 initial_stock_keys = [s["key"] for s in NIFTY_50_STOCKS if s.get("key")]
 
-feed = DualUpstoxFeed(
+# Combine all keys into one list (indices first, then stocks) for single WebSocket
+all_initial_keys = initial_index_keys + [k for k in initial_stock_keys if k not in initial_index_keys]
+
+# Use a single UpstoxFeed instead of DualUpstoxFeed to avoid 403 from second connection
+feed = UpstoxFeed(
     settings=settings,
     on_tick=handle_tick,
     on_status=handle_status,
-    index_keys=initial_index_keys,
-    stock_keys=initial_stock_keys,
-    classifier=lambda k: strategy_engine.classify_instrument(k),
+    name="main-feed",
+    initial_keys=all_initial_keys,
 )
 strategy_engine.set_feed(feed)
 
@@ -324,6 +329,10 @@ def strategy_schedule_worker() -> None:
                         if "STALE_DATA" in getattr(strategy_engine, "_alert_flags", set()):
                             strategy_engine._alert_flags.discard("STALE_DATA")
 
+                # Reset daily flags before 09:14:00
+                if now_time < "09:14:00":
+                    strategy_engine._watchlist_built_today = False
+
                 # EOD square-off at 15:15:00 by clock (strictly at live bid)
                 if now_time >= "15:15:00":
                     if hasattr(strategy_engine, "squareoff_all_indices_1515"):
@@ -334,11 +343,18 @@ def strategy_schedule_worker() -> None:
                         strategy_engine.squareoff_all_stocks_1515()
 
                     # 3:15 PM EOD Watchlist Build (Dr. Vijay Bhilwade Specification)
-                    if "15:15:00" <= now_time <= "15:20:00" and not getattr(strategy_engine, "_watchlist_built_today", False):
+                    # Evaluates all 50 constituent stocks and records next day's top 10 stocks
+                    if "15:15:00" <= now_time <= "15:30:00" and not getattr(strategy_engine, "_watchlist_built_today", False):
                         try:
-                            stock_screener.build_tomorrow_watchlist()
+                            LOGGER.info("15:15:00 EOD: Scanning all 50 constituent stocks to record tomorrow's Top Watchlist...")
+                            wl = stock_screener.build_tomorrow_watchlist()
                             strategy_engine._watchlist_built_today = True
-                            LOGGER.info("15:15:00 EOD Tomorrow Watchlist automatically generated.")
+                            if hasattr(strategy_engine, "load_stock_configs"):
+                                strategy_engine.load_stock_configs()
+                            LOGGER.info(
+                                "15:15:00 EOD Tomorrow Watchlist recorded: %d Bullish, %d Bearish",
+                                len(wl.get("top_bullish", [])), len(wl.get("top_bearish", []))
+                            )
                         except Exception as e:
                             LOGGER.warning("Could not auto-generate watchlist: %s", e)
 
@@ -375,15 +391,277 @@ else:
     )
 
 @app.get("/")
-def index() -> Response:
+def index() -> Any:
+    """Renders the high-performance OI Conditions Dashboard."""
+    return render_template("index.html")
+
+@app.get("/api/dashboard-data")
+def api_dashboard_data() -> Response:
+    """Aggregates all live data required for the OI Conditions Dashboard."""
+    st = strategy_engine.get_status()
+
+    # 1. Indices summary
+    indices_out = []
+    for ukey in ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank", "BSE_INDEX|SENSEX"]:
+        idx_st = strategy_engine.index_underlyings.get(ukey, {})
+        if not idx_st:
+            continue
+        spot = float(idx_st.get("spot_price") or idx_st.get("open_price") or 0.0)
+        prev_c = float(idx_st.get("prev_close") or spot or 1.0)
+        net_chg_pct = round(((spot - prev_c) / prev_c) * 100.0, 2) if prev_c > 0 else 0.0
+
+        last_eval = idx_st.get("last_evaluation") or {}
+        decision = last_eval.get("decision") or "No trade"
+        rule_num = last_eval.get("rule")
+        stars = last_eval.get("stars", "")
+        size = last_eval.get("size", "")
+        ce_type = last_eval.get("ce_type") or "Neutral"
+        pe_type = last_eval.get("pe_type") or "Neutral"
+        delta_ce = float(last_eval.get("delta_ce") or 0.0)
+        delta_pe = float(last_eval.get("delta_pe") or 0.0)
+        ce_price_pct = float(last_eval.get("ce_price_pct") or 0.0)
+        pe_price_pct = float(last_eval.get("pe_price_pct") or 0.0)
+
+        # OI Balance ratio I = (delta_pe - delta_ce) / (|delta_pe| + |delta_ce|)
+        tot_oi_abs = abs(delta_pe) + abs(delta_ce)
+        oi_i = round((delta_pe - delta_ce) / tot_oi_abs, 2) if tot_oi_abs > 0 else 0.0
+
+        # Futures
+        fut_snap_ltp = float(idx_st.get("futures_snap_ltp") or idx_st.get("prev_close") or 1.0)
+        fut_ltp = float(idx_st.get("futures_ltp") or fut_snap_ltp)
+        fut_price_pct = round(((fut_ltp - fut_snap_ltp) / fut_snap_ltp) * 100.0, 2) if fut_snap_ltp > 0 else 0.0
+
+        fut_snap_oi = float(idx_st.get("futures_snap_oi") or 0.0)
+        fut_oi = float(idx_st.get("futures_oi") or 0.0)
+        fut_oi_pct = round(((fut_oi - fut_snap_oi) / fut_snap_oi) * 100.0, 2) if (fut_snap_oi > 100 and fut_oi > 0) else 0.0
+        fut_bu = idx_st.get("futures_buildup", "Neutral")
+
+        # Gate status
+        if ukey == "BSE_INDEX|SENSEX":
+            gate_status = "OFF"
+        else:
+            if decision == "CE Buy":
+                gate_status = "Pass" if fut_bu in ("LB", "SC") else "Block"
+            elif decision == "PE Buy":
+                gate_status = "Pass" if fut_bu in ("SB", "LU") else "Block"
+            else:
+                gate_status = "Pass"
+
+        # Action status
+        if decision == "CE Buy":
+            action = "ENTER CE"
+        elif decision == "PE Buy":
+            action = "ENTER PE"
+        elif idx_st.get("has_position"):
+            action = "EXIT 1/2"
+        else:
+            action = "NO_TRADE"
+
+        atm_strike = idx_st.get("atm_strike")
+        if not atm_strike and spot > 0:
+            step = float(idx_st.get("step") or 50.0)
+            atm_strike = round(spot / step) * step
+
+        # Strikes detail
+        strikes_data = []
+        l_keys = idx_st.get("locked_keys") or []
+        hot_cache = strategy_engine.hot_cache
+        snap = idx_st.get("snapshot") or {}
+
+        by_strike: dict[float, dict[str, Any]] = {}
+        for k in l_keys:
+            c = hot_cache.get(k, {})
+            stk = float(c.get("strike") or 0.0)
+            side = c.get("side")
+            if not stk or not side:
+                continue
+            if stk not in by_strike:
+                by_strike[stk] = {"strike": stk}
+            ltp = float(c.get("ltp") or 0.0)
+            oi = float(c.get("oi") or 0.0)
+            c_snap = snap.get(k, {})
+            snap_ltp = float(c_snap.get("ltp") or c.get("ref_ltp") or ltp or 1.0)
+            snap_oi = float(c_snap.get("oi") or c.get("prev_oi") or oi or 1.0)
+
+            d_oi = oi - snap_oi if snap_oi > 0 else 0.0
+            d_oi_pct = round((d_oi / snap_oi) * 100.0, 2) if snap_oi > 0 else 0.0
+            p_pct = round(((ltp - snap_ltp) / snap_ltp) * 100.0, 2) if snap_ltp > 0 else 0.0
+
+            p_dir = "UP" if p_pct >= 0.5 else ("DOWN" if p_pct <= -0.5 else "FLAT")
+            oi_dir = "UP" if d_oi_pct >= 1.0 else ("DOWN" if d_oi_pct <= -1.0 else "FLAT")
+            if p_dir == "UP" and oi_dir == "UP":
+                bu = "LB"
+            elif p_dir == "DOWN" and oi_dir == "UP":
+                bu = "SB"
+            elif p_dir == "UP" and oi_dir == "DOWN":
+                bu = "SC"
+            elif p_dir == "DOWN" and oi_dir == "DOWN":
+                bu = "LU"
+            else:
+                bu = "NEU"
+
+            if side == "CE":
+                by_strike[stk]["ce_oi"] = oi
+                by_strike[stk]["ce_delta_oi"] = d_oi
+                by_strike[stk]["ce_delta_oi_pct"] = d_oi_pct
+                by_strike[stk]["ce_price_pct"] = p_pct
+                by_strike[stk]["ce_buildup"] = bu
+            else:
+                by_strike[stk]["pe_oi"] = oi
+                by_strike[stk]["pe_delta_oi"] = d_oi
+                by_strike[stk]["pe_delta_oi_pct"] = d_oi_pct
+                by_strike[stk]["pe_price_pct"] = p_pct
+                by_strike[stk]["pe_buildup"] = bu
+
+        sorted_stks = sorted(by_strike.values(), key=lambda x: x["strike"])
+
+        # Aggregate live sum across ATM ±1 strikes if last_eval delta is 0
+        sum_delta_ce = sum(stk_val.get("ce_delta_oi", 0.0) for stk_val in by_strike.values())
+        sum_delta_pe = sum(stk_val.get("pe_delta_oi", 0.0) for stk_val in by_strike.values())
+        if delta_ce == 0.0 and sum_delta_ce != 0.0:
+            delta_ce = sum_delta_ce
+        if delta_pe == 0.0 and sum_delta_pe != 0.0:
+            delta_pe = sum_delta_pe
+
+        # Re-derive OI Balance ratio I with live delta
+        tot_oi_abs = abs(delta_pe) + abs(delta_ce)
+        oi_i = round((delta_pe - delta_ce) / tot_oi_abs, 2) if tot_oi_abs > 0 else 0.0
+
+        # Real consecutive hold status from engine state
+        c_count = int(idx_st.get("consecutive_count", 0))
+        c_sig = idx_st.get("consecutive_signal")
+        if decision in ("CE Buy", "PE Buy") or c_sig:
+            hold_status = f"{c_count}/2"
+        else:
+            hold_status = "-"
+
+        indices_out.append({
+            "key": ukey,
+            "name": idx_st.get("name", ukey),
+            "spot_price": spot,
+            "atm_strike": atm_strike,
+            "net_change_pct": net_chg_pct,
+            "delta_ce": delta_ce,
+            "delta_ce_pct": round(delta_ce / 100000.0, 2) if delta_ce else 0.0,
+            "ce_price_pct": ce_price_pct,
+            "ce_buildup": ce_type,
+            "delta_pe": delta_pe,
+            "delta_pe_pct": round(delta_pe / 100000.0, 2) if delta_pe else 0.0,
+            "pe_price_pct": pe_price_pct,
+            "pe_buildup": pe_type,
+            "oi_balance_i": oi_i,
+            "rule_number": rule_num,
+            "decision": decision,
+            "futures_price_pct": fut_price_pct,
+            "futures_oi_pct": fut_oi_pct,
+            "futures_buildup": fut_bu,
+            "futures_gate": gate_status,
+            "stars": stars,
+            "size": size,
+            "hold": hold_status,
+            "action": action,
+            "strikes": sorted_stks,
+        })
+
+    # 2. Top stocks enriched with live engine evaluation and database state
+    wl = stock_screener.get_tomorrow_watchlist()
+    raw_bullish = wl.get("top_bullish", [])
+    raw_bearish = wl.get("top_bearish", [])
+
+    def _enrich_stock(s: dict[str, Any], direction_hint: str) -> dict[str, Any]:
+        sym = s.get("symbol", "")
+        stk_st = strategy_engine.stock_underlyings.get(sym, {})
+        last_eval = stk_st.get("last_evaluation") or {}
+
+        delta_ce = float(last_eval.get("delta_ce") or 0.0)
+        delta_pe = float(last_eval.get("delta_pe") or 0.0)
+        ce_price_pct = float(last_eval.get("ce_price_pct") or 0.0)
+        pe_price_pct = float(last_eval.get("pe_price_pct") or 0.0)
+        ce_bu = last_eval.get("ce_type")
+        pe_bu = last_eval.get("pe_type")
+        rule_num = last_eval.get("rule")
+        decision = last_eval.get("decision") or "No trade"
+
+        tot_oi_abs = abs(delta_pe) + abs(delta_ce)
+        oi_i = round((delta_pe - delta_ce) / tot_oi_abs, 2) if tot_oi_abs > 0 else (0.0 if (delta_ce or delta_pe) else None)
+
+        fut_ltp = float(stk_st.get("futures_ltp") or 0.0)
+        fut_prev = float(stk_st.get("futures_prev_close") or fut_ltp or 1.0)
+        fut_price_pct = round(((fut_ltp - fut_prev) / fut_prev) * 100.0, 2) if (fut_prev > 0 and fut_ltp > 0) else float(s.get("change_pct") or 0.0)
+
+        fut_oi = float(stk_st.get("futures_oi") or 0.0)
+        fut_prev_oi = float(stk_st.get("futures_prev_oi") or fut_oi or 1.0)
+        fut_oi_pct = round(((fut_oi - fut_prev_oi) / fut_prev_oi) * 100.0, 2) if (fut_prev_oi > 0 and fut_oi > 0) else float(s.get("fut_oi_change_pct") or 0.0)
+        fut_bu = stk_st.get("futures_buildup") or s.get("fut_buildup") or "NEU"
+
+        if decision == "CE Buy":
+            action = "ENTER CE"
+        elif decision == "PE Buy":
+            action = "ENTER PE"
+        elif stk_st.get("current_position"):
+            action = "EXIT 1/2"
+        else:
+            action = "NO_TRADE"
+
+        clv = float(s.get("clv") if s.get("clv") is not None else 0.5)
+        score = round(clv * 100) if direction_hint == "BULLISH" else round((clv - 1.0) * 100)
+
+        return {
+            "symbol": sym,
+            "name": s.get("name", sym),
+            "score": score,
+            "rank": s.get("rank") or stk_st.get("watchlist_rank") or "★★",
+            "size": last_eval.get("size") or "Normal",
+            "delta_ce": delta_ce,
+            "ce_oi_pct": round(delta_ce / 100000.0, 2) if delta_ce else None,
+            "ce_price_pct": ce_price_pct if ce_price_pct != 0.0 else None,
+            "ce_buildup": ce_bu,
+            "delta_pe": delta_pe,
+            "pe_oi_pct": round(delta_pe / 100000.0, 2) if delta_pe else None,
+            "pe_price_pct": pe_price_pct if pe_price_pct != 0.0 else None,
+            "pe_buildup": pe_bu,
+            "oi_balance_i": oi_i,
+            "rule_number": rule_num,
+            "futures_price_pct": fut_price_pct,
+            "futures_oi_pct": fut_oi_pct,
+            "fut_buildup": fut_bu,
+            "decision": decision,
+            "action": action,
+        }
+
+    max_bull = getattr(strategy_engine, "max_bullish_stocks", 5)
+    max_bear = getattr(strategy_engine, "max_bearish_stocks", 5)
+    top_bullish = [_enrich_stock(s, "BULLISH") for s in raw_bullish[:max_bull]]
+    top_bearish = [_enrich_stock(s, "BEARISH") for s in raw_bearish[:max_bear]]
+
+    # 3. Alerts
+    recent_alerts = strategy_engine.get_alerts(limit=50)
+
+    last_tick_ts = getattr(strategy_engine, "last_tick_time", 0.0)
+    last_update_str = datetime.fromtimestamp(last_tick_ts, tz=IST).strftime("%H:%M:%S") if last_tick_ts > 0 else "09:15:00"
+
     return jsonify({
         "status": "online",
-        "service": "GChart Trading Backend Engine",
-        "version": "2.0.0",
-        "client": "GChartWpf (.NET 8 WPF Desktop Terminal)",
-        "configured": settings.configured,
-        "feed_running": feed.running,
-        "timestamp_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+        "feed_connected": feed.connected if feed else False,
+        "feed_instruments": len(feed.subscribed_keys) if feed else 0,
+        "mode": getattr(strategy_engine, "mode", "paper"),
+        "baseline_time": "09:15:00",
+        "last_market_update": last_update_str,
+        "today_trades": st.get("today_trades", 0),
+        "today_net_pnl": st.get("today_net_pnl_inr", 0.0),
+        "indices": indices_out,
+        "top_bullish": top_bullish,
+        "top_bearish": top_bearish,
+        "recent_alerts": recent_alerts,
+        "config": {
+            "max_bullish_stocks": max_bull,
+            "max_bearish_stocks": max_bear,
+            "lots_full": getattr(strategy_engine, "lots_full", 1),
+            "lots_normal": getattr(strategy_engine, "lots_normal", 1),
+            "lots_scalp": getattr(strategy_engine, "lots_scalp", 1),
+            "index_lots": getattr(strategy_engine, "index_lots", {}),
+        },
+        "timestamp_ist": datetime.now(IST).strftime("%H:%M:%S"),
     })
 
 @app.get("/api/health")
@@ -408,6 +686,13 @@ def api_health() -> Response:
             "stocks_connected": feed.stocks_feed.connected,
             "indices_subscribed_count": len(feed.indices_feed.subscribed_keys),
             "stocks_subscribed_count": len(feed.stocks_feed.subscribed_keys),
+            "total_subscribed_count": len(feed.subscribed_keys),
+        })
+    else:
+        # Single UpstoxFeed mode (combined)
+        health_data.update({
+            "dual_feed": False,
+            "both_connected": feed.connected,
             "total_subscribed_count": len(feed.subscribed_keys),
         })
     return jsonify(health_data)
@@ -576,27 +861,6 @@ def api_option_chain() -> Response:
         if sig:
             publish("strategy_signal", sig)
 
-    if data and hasattr(feed, "subscribe"):
-        try:
-            # Center on ATM strikes rather than lowest strikes in the chain
-            ref_spot = float(spot_price or 25000.0)
-            sorted_strikes = sorted(
-                data,
-                key=lambda item: abs(float(item.get("strike_price") or 0.0) - ref_spot)
-            )
-            keys_to_sub = []
-            for item in sorted_strikes[:5]:
-                call_k = item.get("call_options", {}).get("instrument_key")
-                put_k = item.get("put_options", {}).get("instrument_key")
-                if call_k:
-                    keys_to_sub.append(call_k)
-                if put_k:
-                    keys_to_sub.append(put_k)
-            if keys_to_sub:
-                target = "indices" if ("INDEX" in str(instrument_key).upper()) else "stocks"
-                feed.subscribe(keys_to_sub, target=target)
-        except Exception as ex:
-            LOGGER.warning("Could not auto-subscribe option chain keys: %s", ex)
 
     return jsonify({
         "status": "success",
@@ -661,6 +925,16 @@ def api_strategy_arm_now() -> Response:
     status = strategy_engine.force_arm_now(underlying_key=key)
     publish("strategy_update", status)
     return jsonify({"success": True, "status": status})
+
+@app.route("/api/strategy/manual-enter", methods=["GET", "POST"])
+def api_strategy_manual_enter() -> Response:
+    """Manual enter trigger: enters a CE or PE trade on demand based on strategy rules."""
+    body = request.get_json(silent=True) or {}
+    key = body.get("underlying_key") or body.get("index") or body.get("symbol") or request.args.get("index") or request.args.get("symbol") or None
+    side = body.get("side") or request.args.get("side") or "CE"
+    trade = strategy_engine.manual_enter(underlying_key=key, side=side)
+    publish("strategy_update", strategy_engine.get_status())
+    return jsonify({"success": bool(trade), "trade": trade})
 
 @app.post("/api/strategy/reset")
 def api_strategy_reset() -> Response:

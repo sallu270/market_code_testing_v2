@@ -1,6 +1,6 @@
 {
   "index_lots": {
-    "NSE_INDEX|Nifty 50": 2,
+    "NSE_INDEX|Nifty 50": 1,
     "NSE_INDEX|Nifty Bank": 3,
     "BSE_INDEX|SENSEX": 1
   },
@@ -9,7 +9,9 @@
     "NSE_INDEX|Nifty Bank": true,
     "BSE_INDEX|SENSEX": true
   },
-  "lots_full": 3,
+  "lots_full": 1,
   "lots_normal": 2,
-  "lots_scalp": 1
+  "lots_scalp": 1,
+  "max_bullish_stocks": 5,
+  "max_bearish_stocks": 5
 }

@@ -443,6 +443,72 @@ class TestStockOptionsStrategy(unittest.TestCase):
         self.assertEqual(t_enter["lot_size"], 65)
         self.assertEqual(nifty_st["state"], "HOLDING")
 
+    def test_path1_quote_race_condition_retries_and_executes(self):
+        """Validates that a 0.0 initial quote does NOT kill Path 1, and subsequent quote allows clean entry."""
+        st = self._setup_mock_stock("RELIANCE", base_lots=1, rank="★★★", direction="BULLISH")
+        st["prev_close"] = 1300.0
+        st["spot_price"] = 1300.0
+        st["open_price"] = 1300.0
+        st["path1_done"] = False
+        st["path1_evaluating"] = False
+        self.engine.take_stock_snapshot("RELIANCE")
+
+        # Zero out quotes initially (simulating WebSocket delay on contract subscription)
+        for k in st["locked_keys"]:
+            self.engine.hot_cache[k]["bid_price"] = 0.0
+            self.engine.hot_cache[k]["ask_price"] = 0.0
+            self.engine.hot_cache[k]["ltp"] = 0.0
+
+        # Tick 1: Above open, but quote is 0.0
+        tick1 = {"instrument_key": st["key"], "ltp": 1301.0}
+        trade1 = self.engine.on_tick(tick1)
+        self.assertIsNone(trade1)
+        # CRITICAL: path1_done must remain False so stock isn't killed for the day!
+        self.assertFalse(st["path1_done"])
+        self.assertFalse(st["path1_evaluating"])
+
+        # WebSocket delivers quote for winning strike
+        for k in st["locked_keys"]:
+            if "_CE_" in k:
+                self.engine.hot_cache[k]["bid_price"] = 49.5
+                self.engine.hot_cache[k]["ask_price"] = 50.0
+                self.engine.hot_cache[k]["ltp"] = 50.0
+
+        # Tick 2: Second spot tick arrives with quote resident in hot_cache -> Enters trade!
+        tick2 = {"instrument_key": st["key"], "ltp": 1301.5}
+        trade2 = self.engine.on_tick(tick2)
+        self.assertIsNotNone(trade2)
+        self.assertEqual(trade2["side"], "BUY_CE")
+        self.assertTrue(st["path1_done"])
+        self.assertEqual(st["state"], "HOLDING")
+
+    def test_log_signal_audit_handles_delta_kwargs(self):
+        """Verifies that _log_signal_audit accepts delta_ce and delta_pe without TypeError."""
+        try:
+            self.engine._log_signal_audit(
+                underlying_key=NIFTY_KEY,
+                side="NONE",
+                strike=24500.0,
+                contract_key="",
+                ltp=0.0,
+                confidence="Rule #1",
+                action_taken="NO_TRADE_RULE_1",
+                delta_ce=15.5,
+                delta_pe=-10.2,
+                custom_extra="safe",
+            )
+        except TypeError as exc:
+            self.fail(f"_log_signal_audit raised unexpected TypeError: {exc}")
+
+    def test_atm_strike_selection_proximity_to_spot(self):
+        """Verifies that _select_best_strike prioritizes ATM strikes closest to spot."""
+        st = self._setup_mock_stock("RELIANCE", base_lots=1, rank="★★★", direction="BULLISH")
+        # Spot is 1300. CE strikes are 1220, 1240, 1260, 1280.
+        winner = self.engine._select_best_strike("CE", locked_keys=st["locked_keys"], spot=1300.0)
+        self.assertIsNotNone(winner)
+        # The winner must be the strike closest to 1300 (1280 CE), NOT the lowest strike (1220 CE)
+        self.assertEqual(winner.get("strike"), 1280.0)
+
 
 if __name__ == "__main__":
     unittest.main()

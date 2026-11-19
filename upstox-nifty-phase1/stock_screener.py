@@ -803,16 +803,17 @@ class StockScreener:
             ce_by_strike = {float(x.get("strike_price") or 0): x for x in active_contracts if x.get("instrument_type") == "CE"}
             pe_by_strike = {float(x.get("strike_price") or 0): x for x in active_contracts if x.get("instrument_type") == "PE"}
 
-            ce_strikes = sorted([s for s in ce_by_strike.keys() if s < spot], reverse=True)[:4]
-            pe_strikes = sorted([s for s in pe_by_strike.keys() if s > spot])[:4]
+            ce_strikes = sorted([s for s in ce_by_strike.keys() if s <= spot], reverse=True)[:4]
+            pe_strikes = sorted([s for s in pe_by_strike.keys() if s >= spot])[:4]
 
             if len(ce_strikes) < 4:
-                ce_strikes = sorted(ce_by_strike.keys())[:4]
+                ce_strikes = sorted(ce_by_strike.keys(), key=lambda s: abs(s - spot))[:4]
             if len(pe_strikes) < 4:
-                pe_strikes = sorted(pe_by_strike.keys(), reverse=True)[:4]
+                pe_strikes = sorted(pe_by_strike.keys(), key=lambda s: abs(s - spot))[:4]
 
             planned = []
-            for s in sorted(ce_strikes):
+            # Order CE strikes so ATM (nearest to spot) is first!
+            for s in sorted(ce_strikes, reverse=True):
                 c = ce_by_strike[s]
                 planned.append({
                     "symbol": c.get("trading_symbol"),
@@ -823,6 +824,7 @@ class StockScreener:
                     "lot_size": int(c.get("lot_size") or lot_size),
                 })
 
+            # Order PE strikes so ATM (nearest to spot) is first!
             for s in sorted(pe_strikes):
                 c = pe_by_strike[s]
                 planned.append({

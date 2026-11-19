@@ -100,7 +100,11 @@ class UpstoxFeed:
 
             except Exception as exc:
                 self._connected = False
+                err_str = str(exc)
                 self._emit_status("error", f"[{self.name}] {type(exc).__name__}: {exc}")
+                if "403" in err_str or "Forbidden" in err_str:
+                    delay = max(delay, 10.0)
+                    LOGGER.warning("[%s] 403 Forbidden detected. Applying 10s cooldown backoff before reconnect.", self.name)
 
             if self._stop_event.is_set():
                 break
@@ -125,13 +129,23 @@ class UpstoxFeed:
             self._stop_event.wait(2.0)
             return
 
+        # Upstox strictly limits WebSocket V3 to 100 instruments per connection.
+        # With combined indices + stocks feed, we allow up to 115 keys safely.
+        # Enforce hard safety cap to prevent connection drops.
+        if len(self._subscribed_keys) > 115:
+            LOGGER.warning("[%s] Instrument count %d exceeds safety cap (115). Pruning non-essential keys.", self.name, len(self._subscribed_keys))
+            keys_list = list(self._subscribed_keys)[:115]
+            self._subscribed_keys = set(keys_list)
+        else:
+            keys_list = list(self._subscribed_keys)
+
         configuration = upstox_client.Configuration()
         configuration.access_token = self.settings.access_token
         api_client = upstox_client.ApiClient(configuration)
 
         self._streamer = upstox_client.MarketDataStreamerV3(
             api_client,
-            list(self._subscribed_keys),
+            keys_list,
             self.settings.feed_mode,
         )
 
@@ -140,7 +154,7 @@ class UpstoxFeed:
         self._streamer.on("error", self._on_error)
         self._streamer.on("close", self._on_close)
 
-        self._emit_status("connecting", f"[{self.name}] Connecting to Upstox Market Data Feed V3 ({len(self._subscribed_keys)} keys).")
+        self._emit_status("connecting", f"[{self.name}] Connecting to Upstox Market Data Feed V3 ({len(keys_list)} keys).")
         self._streamer.connect()
 
     def subscribe(
@@ -155,6 +169,23 @@ class UpstoxFeed:
         to_add = [k for k in instrument_keys if k not in self._subscribed_keys]
         if not to_add:
             return
+
+        # Enforce 115 instrument hard ceiling on active keys for combined single-feed mode
+        max_allowed = 115
+        if len(self._subscribed_keys) + len(to_add) > max_allowed:
+            protected = set(getattr(self.settings, "instrument_keys", []))
+            prunable = [k for k in self._subscribed_keys if k not in protected]
+            slots_needed = (len(self._subscribed_keys) + len(to_add)) - max_allowed
+            for pk in prunable[:slots_needed]:
+                self._subscribed_keys.discard(pk)
+            available_slots = max(0, max_allowed - len(self._subscribed_keys))
+            if len(to_add) > available_slots:
+                LOGGER.warning("[%s] Requested %d keys exceeds remaining WebSocket capacity (%d). Truncating batch.", self.name, len(to_add), available_slots)
+                to_add = to_add[:available_slots]
+
+        if not to_add:
+            return
+
         self._subscribed_keys.update(to_add)
         if self._streamer and self._connected:
             try:

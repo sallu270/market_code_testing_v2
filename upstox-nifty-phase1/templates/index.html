@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OI Conditions Dashboard | NIFTY · BANK NIFTY · SENSEX · Stocks</title>
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body class="theme-dark">
+  <div class="dashboard-container">
+
+    <!-- Top Header -->
+    <header class="dashboard-header">
+      <div class="header-left">
+        <h1 class="dashboard-title">OI Conditions Dashboard</h1>
+        <p class="dashboard-subtitle">CE/PE change in OI &middot; option premium change &middot; futures price and OI change &middot; 16 conditions + futures gate</p>
+      </div>
+      <div class="header-right">
+        <div class="status-pill status-feed" id="feed-status-pill">
+          <span class="status-dot dot-live" id="feed-status-dot"></span>
+          <span id="feed-status-text">Feed live</span>
+        </div>
+        <div class="status-pill status-time" id="clock-display">--:--:-- IST</div>
+        <div class="status-pill status-baseline" id="baseline-display">Baseline: 09:15 snapshot</div>
+        <div class="status-pill status-update" id="oi-update-display">OI update: #1 &middot; next ~ 3m</div>
+        <div class="status-pill status-mode" id="mode-display">PAPER MODE</div>
+        
+        <div class="header-actions">
+          <button class="btn btn-sm btn-outline btn-arm-idx" data-key="NSE_INDEX|Nifty 50" id="btn-arm-nifty" title="Force lock & arm Nifty 50">Arm Nifty</button>
+          <button class="btn btn-sm btn-outline btn-arm-idx" data-key="NSE_INDEX|Nifty Bank" id="btn-arm-banknifty" title="Force lock & arm Bank Nifty">Arm BankNifty</button>
+          <button class="btn btn-sm btn-outline btn-arm-idx" data-key="BSE_INDEX|SENSEX" id="btn-arm-sensex" title="Force lock & arm Sensex">Arm Sensex</button>
+          <button class="btn btn-sm btn-outline" id="btn-arm-all" title="Force lock & arm all indices">Arm All</button>
+          <button class="btn btn-sm btn-outline" id="btn-re-eval" title="Trigger instant evaluation">Evaluate</button>
+          <button class="btn btn-sm btn-danger" id="btn-emergency-exit" title="Emergency squareoff all positions">Exit All</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Sub-header Notice / Reference Info -->
+    <div class="system-bar">
+      <span>Layout reference for the developer. All live values, buildup, condition, gate, rank, and action are calculated dynamically from Upstox feed ticks.</span>
+      <div class="system-bar-right">
+        <span id="trades-counter-text">Today's Trades: 0 | P&L: ₹0.00</span>
+      </div>
+    </div>
+
+    <!-- Main App Navigation Tabs (Clean Navigation) -->
+    <nav class="app-nav-bar">
+      <div class="nav-tabs-group">
+        <button class="nav-tab active" data-tab="tab-dashboard" id="nav-btn-dashboard">
+          <span class="nav-tab-icon">📊</span>
+          <span class="nav-tab-title">Live Dashboard</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-settings" id="nav-btn-settings">
+          <span class="nav-tab-icon">⚙️</span>
+          <span class="nav-tab-title">Bot Settings</span>
+          <span class="nav-tab-badge">CONTROLS</span>
+        </button>
+      </div>
+      <div class="nav-meta-info">
+        <span class="text-dim">Active View:</span>
+        <strong class="text-bright font-mono" id="nav-current-tab-text">LIVE DASHBOARD</strong>
+      </div>
+    </nav>
+
+    <!-- ====================================================================
+         TAB 1: MAIN LIVE DASHBOARD (Clean Tables Only - No Controls Bar)
+         ==================================================================== -->
+    <div class="tab-pane active" id="tab-dashboard">
+
+      <!-- Section 1: Indices · ATM ±1 summed -->
+      <section class="dash-section">
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <h2 class="section-title">Indices &middot; ATM &plusmn;1 summed</h2>
+            <span class="section-meta">OI in lakh &middot; 09:15 baseline &middot; Futures = current month</span>
+          </div>
+        </div>
+        <div class="table-card">
+          <table class="data-table" id="table-indices">
+            <thead>
+              <tr>
+                <th class="col-inst text-left">INSTRUMENT<br><span class="th-sub">NAME &middot; SPOT &middot; ATM</span></th>
+                <th colspan="4" class="col-grp-ce text-center">CALLS (CE)</th>
+                <th colspan="4" class="col-grp-pe text-center">PUTS (PE)</th>
+                <th colspan="3" class="col-grp-sig text-center">OPTION SIGNAL</th>
+                <th colspan="4" class="col-grp-fut text-center">FUTURES</th>
+                <th colspan="3" class="col-grp-dec text-center">DECISION</th>
+              </tr>
+              <tr class="sub-headers">
+                <th class="text-left"></th>
+                <!-- CE -->
+                <th class="text-right">&Delta;OI</th>
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- PE -->
+                <th class="text-right">&Delta;OI</th>
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- OPTION SIGNAL -->
+                <th class="text-right">I</th>
+                <th class="text-center">COND</th>
+                <th class="text-center">SIGNAL</th>
+                <!-- FUTURES -->
+                <th class="text-right">PRICE %</th>
+                <th class="text-right">OI %</th>
+                <th class="text-center">BUILD-UP</th>
+                <th class="text-center">GATE</th>
+                <!-- DECISION -->
+                <th class="text-center">RANK &middot; LOTS</th>
+                <th class="text-center">HOLD</th>
+                <th class="text-center">ACTION</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-indices">
+              <!-- Dynamically populated via JS -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Section 2: NIFTY 50 stocks · Top Bullish -->
+      <section class="dash-section">
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <h2 class="section-title">NIFTY 50 stocks &middot; Top <span id="heading-count-bullish">5</span> Bullish</h2>
+            <span class="section-meta">Sorted by Power Score / CLV (highest score first) &middot; only tradeable rows (gate passed)</span>
+          </div>
+        </div>
+        <div class="table-card">
+          <table class="data-table" id="table-stocks-bullish">
+            <thead>
+              <tr>
+                <th class="col-idx text-center">#</th>
+                <th class="col-sym text-left">SYMBOL</th>
+                <th class="col-score text-right">SCORE</th>
+                <th colspan="3" class="col-grp-ce text-center">CALLS (CE)</th>
+                <th colspan="3" class="col-grp-pe text-center">PUTS (PE)</th>
+                <th colspan="2" class="col-grp-sig text-center">OPTION</th>
+                <th colspan="3" class="col-grp-fut text-center">FUTURES</th>
+                <th colspan="2" class="col-grp-dec text-center">DECISION</th>
+              </tr>
+              <tr class="sub-headers">
+                <th></th>
+                <th></th>
+                <th></th>
+                <!-- CE -->
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- PE -->
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- OPTION -->
+                <th class="text-right">I</th>
+                <th class="text-center">COND</th>
+                <!-- FUTURES -->
+                <th class="text-right">PRICE %</th>
+                <th class="text-right">OI %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- DECISION -->
+                <th class="text-center">RANK &middot; LOTS</th>
+                <th class="text-center">ACTION</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-stocks-bullish">
+              <!-- Dynamically populated via JS -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Section 3: NIFTY 50 stocks · Top Bearish -->
+      <section class="dash-section">
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <h2 class="section-title">NIFTY 50 stocks &middot; Top <span id="heading-count-bearish">5</span> Bearish</h2>
+            <span class="section-meta">Sorted by Power Score (most negative first)</span>
+          </div>
+        </div>
+        <div class="table-card">
+          <table class="data-table" id="table-stocks-bearish">
+            <thead>
+              <tr>
+                <th class="col-idx text-center">#</th>
+                <th class="col-sym text-left">SYMBOL</th>
+                <th class="col-score text-right">SCORE</th>
+                <th colspan="3" class="col-grp-ce text-center">CALLS (CE)</th>
+                <th colspan="3" class="col-grp-pe text-center">PUTS (PE)</th>
+                <th colspan="2" class="col-grp-sig text-center">OPTION</th>
+                <th colspan="3" class="col-grp-fut text-center">FUTURES</th>
+                <th colspan="2" class="col-grp-dec text-center">DECISION</th>
+              </tr>
+              <tr class="sub-headers">
+                <th></th>
+                <th></th>
+                <th></th>
+                <!-- CE -->
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- PE -->
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- OPTION -->
+                <th class="text-right">I</th>
+                <th class="text-center">COND</th>
+                <!-- FUTURES -->
+                <th class="text-right">PRICE %</th>
+                <th class="text-right">OI %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- DECISION -->
+                <th class="text-center">RANK &middot; LOTS</th>
+                <th class="text-center">ACTION</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-stocks-bearish">
+              <!-- Dynamically populated via JS -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Section 4: Split Grid: Strike Detail (ATM ±1) + Alerts -->
+      <div class="grid-split-2">
+
+        <!-- Left: Strike Detail Table (ATM ±1) -->
+        <div class="card card-strike-detail">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <h3 class="card-title" id="strike-table-title">NIFTY 50 &middot; strike detail (ATM &plusmn;1)</h3>
+              <span class="card-meta">Live ATM &plusmn;1 contracts for selected index</span>
+            </div>
+            <div class="index-tabs" id="strike-index-tabs">
+              <button class="tab-btn active" data-index="NSE_INDEX|Nifty 50">NIFTY</button>
+              <button class="tab-btn" data-index="NSE_INDEX|Nifty Bank">BANK NIFTY</button>
+              <button class="tab-btn" data-index="BSE_INDEX|SENSEX">SENSEX</button>
+            </div>
+          </div>
+          <div class="table-card">
+            <table class="data-table" id="table-strikes">
+              <thead>
+                <tr>
+                  <th colspan="5" class="col-grp-ce text-center">CALLS (CE)</th>
+                  <th class="col-strike text-center">STRIKE</th>
+                  <th colspan="5" class="col-grp-pe text-center">PUTS (PE)</th>
+                </tr>
+                <tr class="sub-headers">
+                  <th class="text-right">OI (L)</th>
+                  <th class="text-right">&Delta;OI (L)</th>
+                  <th class="text-right">&Delta;OI %</th>
+                  <th class="text-right">PRICE %</th>
+                  <th class="text-center">BU</th>
+                  <th class="text-center font-bold">ATM</th>
+                  <th class="text-center">BU</th>
+                  <th class="text-right">PRICE %</th>
+                  <th class="text-right">&Delta;OI %</th>
+                  <th class="text-right">&Delta;OI (L)</th>
+                  <th class="text-right">OI (L)</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-strikes">
+                <!-- Dynamically populated via JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Right: Execution Engine Alerts & Activity Log -->
+        <div class="card card-alerts">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <h3 class="card-title">Strategy Engine Alerts &middot; Activity Log</h3>
+              <span class="card-meta">Live strategy signals, gate evaluations, and entries</span>
+            </div>
+            <button class="btn btn-xs btn-outline" id="btn-clear-alerts">Clear</button>
+          </div>
+          <div class="alerts-stream" id="alerts-container">
+            <div class="alert-empty-state">Listening for strategy signals and market events...</div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Section 5: Strategy Reference: 16 OI Buildup Conditions & Futures Gate -->
+      <section class="rules-section">
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <h3 class="section-title">Strategy Reference &middot; 16 OI Buildup Conditions &amp; Futures Gate</h3>
+            <span class="section-meta">Complete deterministic decision matrix for Phase 1</span>
+          </div>
+        </div>
+        <div class="rules-grid">
+
+          <!-- Card 1: 16 Conditions -->
+          <div class="rule-card">
+            <h4 class="rule-card-title">16 Conditions (CE vs PE Buildup)</h4>
+            <div class="rules-list">
+              <div class="rule-item rule-ce"><span>1. SC + SB &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-ce"><span>2. SC + LU &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-ce"><span>3. LB + SB &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-ce"><span>4. LB + LU &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-pe"><span>5. SB + SC &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-pe"><span>6. SB + LB &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-pe"><span>7. LU + SC &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-pe"><span>8. LU + LB &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;</span></div>
+              <div class="rule-item text-muted"><span>9&ndash;16. All other combinations</span> <span class="rule-badge">No trade</span></div>
+            </div>
+          </div>
+
+          <!-- Card 2: Buildup Classification -->
+          <div class="rule-card">
+            <h4 class="rule-card-title">Buildup Classification</h4>
+            <div class="buildup-defs">
+              <div class="bu-def-item">
+                <span class="bu-badge bu-lb">LB</span>
+                <div><strong>Long Buildup:</strong> &Delta;OI &gt; +0.10% &amp; Price &ge; +0.50%</div>
+              </div>
+              <div class="bu-def-item">
+                <span class="bu-badge bu-sc">SC</span>
+                <div><strong>Short Covering:</strong> &Delta;OI &le; -0.10% &amp; Price &ge; +0.50%</div>
+              </div>
+              <div class="bu-def-item">
+                <span class="bu-badge bu-sb">SB</span>
+                <div><strong>Short Buildup:</strong> &Delta;OI &gt; +0.10% &amp; Price &le; -0.50%</div>
+              </div>
+              <div class="bu-def-item">
+                <span class="bu-badge bu-lu">LU</span>
+                <div><strong>Long Unwinding:</strong> &Delta;OI &le; -0.10% &amp; Price &le; -0.50%</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 3: Futures gate and final rank -->
+          <div class="rule-card">
+            <h4 class="rule-card-title">Futures gate and final rank</h4>
+            <div class="gate-rule-box">
+              <span><strong>CE Buy</strong> needs futures <span class="bu-badge bu-lb">LB</span> or <span class="bu-badge bu-sc">SC</span></span><br>
+              <span><strong>PE Buy</strong> needs futures <span class="bu-badge bu-sb">SB</span> or <span class="bu-badge bu-lu">LU</span></span><br>
+              <span class="text-muted">Else blocked by Futures Gate</span>
+            </div>
+            <div class="rank-sizing-matrix">
+              <div><span class="text-gold">&starf;&starf;&starf;&starf;</span> LB/SB &rarr; &starf;&starf;&starf;&starf; Full lots</div>
+              <div><span class="text-gold">&starf;&starf;&starf;</span> SC/LU &rarr; &starf;&starf;&starf; Full lots</div>
+              <div><span class="text-gold">&starf;&starf;</span> LB/SB &rarr; &starf;&starf; Normal lots</div>
+              <div><span class="text-gold">&starf;&starf;</span> SC/LU &rarr; &starf;&starf; Half lots</div>
+            </div>
+            <div class="rule-footer-note">
+              Signal must hold 2 consecutive OI updates.<br>
+              <strong>SENSEX:</strong> futures gate OFF, &starf;&starf;&starf; signals only.
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </div> <!-- /tab-dashboard -->
+
+
+    <!-- ====================================================================
+         TAB 2: BOT SETTINGS & CONTROLS (Dedicated Configuration View)
+         ==================================================================== -->
+    <div class="tab-pane" id="tab-settings" style="display: none;">
+      <div class="settings-container">
+        
+        <div class="settings-header">
+          <div class="settings-header-left">
+            <h2 class="settings-title">⚙️ Bot Settings & Strategy Configuration</h2>
+            <p class="settings-subtitle">Manage pre-defined stock screener limits, lot sizing rules, index allocations, and strategy risk parameters. All changes auto-save instantly.</p>
+          </div>
+          <div class="settings-header-right">
+            <button class="btn btn-sm btn-outline" id="btn-back-to-dashboard" title="Switch back to Live Dashboard">← Return to Dashboard</button>
+          </div>
+        </div>
+
+        <!-- Pre-Defined Trading Controls Bar (Moved into Bot Settings) -->
+        <div class="quick-controls-card settings-qc-card">
+          <div class="qc-header">
+            <div class="qc-header-left">
+              <span class="qc-badge">PRE-DEFINED TRADING CONTROLS</span>
+              <span class="qc-sub">Click any pill to adjust today's stock screener limits and lot sizing (instant & auto-saved)</span>
+            </div>
+            <div class="qc-header-right" id="qc-feedback">Ready</div>
+          </div>
+          <div class="qc-grid">
+            <!-- Bullish Stocks Limit -->
+            <div class="qc-group" data-param="max_bullish_stocks">
+              <div class="qc-label-wrap">
+                <span class="qc-label">BULLISH STOCKS TODAY</span>
+                <span class="qc-current-val text-green font-bold" id="lbl-val-bullish">5</span>
+              </div>
+              <div class="pill-group" id="pill-bullish-stocks">
+                <button class="pill-btn" data-param="max_bullish_stocks" data-val="1">1</button>
+                <button class="pill-btn" data-param="max_bullish_stocks" data-val="2">2</button>
+                <button class="pill-btn" data-param="max_bullish_stocks" data-val="3">3</button>
+                <button class="pill-btn active" data-param="max_bullish_stocks" data-val="5">5</button>
+                <button class="pill-btn" data-param="max_bullish_stocks" data-val="10">10</button>
+              </div>
+            </div>
+
+            <!-- Bearish Stocks Limit -->
+            <div class="qc-group" data-param="max_bearish_stocks">
+              <div class="qc-label-wrap">
+                <span class="qc-label">BEARISH STOCKS TODAY</span>
+                <span class="qc-current-val text-red font-bold" id="lbl-val-bearish">5</span>
+              </div>
+              <div class="pill-group" id="pill-bearish-stocks">
+                <button class="pill-btn" data-param="max_bearish_stocks" data-val="1">1</button>
+                <button class="pill-btn" data-param="max_bearish_stocks" data-val="2">2</button>
+                <button class="pill-btn" data-param="max_bearish_stocks" data-val="3">3</button>
+                <button class="pill-btn active" data-param="max_bearish_stocks" data-val="5">5</button>
+                <button class="pill-btn" data-param="max_bearish_stocks" data-val="10">10</button>
+              </div>
+            </div>
+
+            <!-- Full Lots -->
+            <div class="qc-group" data-param="lots_full">
+              <div class="qc-label-wrap">
+                <span class="qc-label">FULL LOT (★★★ / ★★★★)</span>
+                <span class="qc-current-val text-gold font-bold" id="lbl-val-full">1</span>
+              </div>
+              <div class="pill-group" id="pill-lots-full">
+                <button class="pill-btn active" data-param="lots_full" data-val="1">1</button>
+                <button class="pill-btn" data-param="lots_full" data-val="2">2</button>
+                <button class="pill-btn" data-param="lots_full" data-val="3">3</button>
+                <button class="pill-btn" data-param="lots_full" data-val="4">4</button>
+                <button class="pill-btn" data-param="lots_full" data-val="5">5</button>
+              </div>
+            </div>
+
+            <!-- Normal Lots -->
+            <div class="qc-group" data-param="lots_normal">
+              <div class="qc-label-wrap">
+                <span class="qc-label">NORMAL LOT (★★)</span>
+                <span class="qc-current-val text-blue font-bold" id="lbl-val-normal">1</span>
+              </div>
+              <div class="pill-group" id="pill-lots-normal">
+                <button class="pill-btn active" data-param="lots_normal" data-val="1">1</button>
+                <button class="pill-btn" data-param="lots_normal" data-val="2">2</button>
+                <button class="pill-btn" data-param="lots_normal" data-val="3">3</button>
+                <button class="pill-btn" data-param="lots_normal" data-val="4">4</button>
+                <button class="pill-btn" data-param="lots_normal" data-val="5">5</button>
+              </div>
+            </div>
+
+            <!-- Scalp Lots -->
+            <div class="qc-group" data-param="lots_scalp">
+              <div class="qc-label-wrap">
+                <span class="qc-label">SCALP / HALF LOT</span>
+                <span class="qc-current-val text-purple font-bold" id="lbl-val-scalp">1</span>
+              </div>
+              <div class="pill-group" id="pill-lots-scalp">
+                <button class="pill-btn active" data-param="lots_scalp" data-val="1">1</button>
+                <button class="pill-btn" data-param="lots_scalp" data-val="2">2</button>
+                <button class="pill-btn" data-param="lots_scalp" data-val="3">3</button>
+                <button class="pill-btn" data-param="lots_scalp" data-val="4">4</button>
+                <button class="pill-btn" data-param="lots_scalp" data-val="5">5</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Secondary Settings Grid -->
+        <div class="settings-grid-2">
+          <!-- Card: Index Lots -->
+          <div class="settings-card settings-card-lots">
+            <h3 class="settings-card-title">Indices Default Lot Allocation</h3>
+            <p class="settings-card-sub">Base lot sizing assigned when trading each specific index.</p>
+            <div class="settings-rows">
+              <div class="settings-row row-nifty" data-idx="NSE_INDEX|Nifty 50">
+                <div class="row-info">
+                  <span class="idx-color-dot dot-nifty"></span>
+                  <div>
+                    <strong class="font-bold text-bright idx-name">NIFTY 50</strong>
+                    <span class="text-dim font-mono text-xs">(Lot Size: 65)</span>
+                  </div>
+                </div>
+                <div class="row-right">
+                  <div class="idx-selected-badge badge-nifty" id="badge-lots-NSE_INDEX|Nifty 50">2 Lots (130 Qty)</div>
+                  <div class="pill-group idx-pill-group pill-group-nifty" data-idx-key="NSE_INDEX|Nifty 50">
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty 50" data-val="1">1</button>
+                    <button class="pill-btn btn-idx-lot active" data-key="NSE_INDEX|Nifty 50" data-val="2">2</button>
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty 50" data-val="3">3</button>
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty 50" data-val="5">5</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-row row-banknifty" data-idx="NSE_INDEX|Nifty Bank">
+                <div class="row-info">
+                  <span class="idx-color-dot dot-banknifty"></span>
+                  <div>
+                    <strong class="font-bold text-bright idx-name">BANK NIFTY</strong>
+                    <span class="text-dim font-mono text-xs">(Lot Size: 15)</span>
+                  </div>
+                </div>
+                <div class="row-right">
+                  <div class="idx-selected-badge badge-banknifty" id="badge-lots-NSE_INDEX|Nifty Bank">3 Lots (45 Qty)</div>
+                  <div class="pill-group idx-pill-group pill-group-banknifty" data-idx-key="NSE_INDEX|Nifty Bank">
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty Bank" data-val="1">1</button>
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty Bank" data-val="2">2</button>
+                    <button class="pill-btn btn-idx-lot active" data-key="NSE_INDEX|Nifty Bank" data-val="3">3</button>
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty Bank" data-val="5">5</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-row row-sensex" data-idx="BSE_INDEX|SENSEX">
+                <div class="row-info">
+                  <span class="idx-color-dot dot-sensex"></span>
+                  <div>
+                    <strong class="font-bold text-bright idx-name">SENSEX</strong>
+                    <span class="text-dim font-mono text-xs">(Lot Size: 10)</span>
+                  </div>
+                </div>
+                <div class="row-right">
+                  <div class="idx-selected-badge badge-sensex" id="badge-lots-BSE_INDEX|SENSEX">1 Lot (10 Qty)</div>
+                  <div class="pill-group idx-pill-group pill-group-sensex" data-idx-key="BSE_INDEX|SENSEX">
+                    <button class="pill-btn btn-idx-lot active" data-key="BSE_INDEX|SENSEX" data-val="1">1</button>
+                    <button class="pill-btn btn-idx-lot" data-key="BSE_INDEX|SENSEX" data-val="2">2</button>
+                    <button class="pill-btn btn-idx-lot" data-key="BSE_INDEX|SENSEX" data-val="3">3</button>
+                    <button class="pill-btn btn-idx-lot" data-key="BSE_INDEX|SENSEX" data-val="5">5</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card: Strategy Parameters & Filters -->
+          <div class="settings-card">
+            <h3 class="settings-card-title">Strategy Engine Guardrails</h3>
+            <p class="settings-card-sub">Active safety parameters governing automatic execution.</p>
+            <div class="guard-list">
+              <div class="guard-item">
+                <span class="guard-label">Max Spread Filter:</span>
+                <span class="guard-val text-green font-mono font-bold">3.0% (Orders rejected if spread &gt; 3%)</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Futures Buildup Gate:</span>
+                <span class="guard-val text-green font-mono font-bold">Enforced (CE: LB/SC &middot; PE: SB/LU)</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Persistence Rule:</span>
+                <span class="guard-val text-green font-mono font-bold">2 Consecutive OI updates required</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Stop-Loss &amp; Target:</span>
+                <span class="guard-val text-gold font-mono font-bold">SL: 25% | Target: 40%</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Trading Window:</span>
+                <span class="guard-val text-blue font-mono font-bold">09:18 &ndash; 14:45 IST | Squareoff: 15:15 IST</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div> <!-- /tab-settings -->
+
+    <!-- Footer -->
+    <footer class="dash-footer">
+      <span>Upstox V3 Market Feed Engine &middot; Real-Time Protobuf Feed &middot; Zero Lock Contention Architecture</span>
+    </footer>
+
+  </div>
+
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
