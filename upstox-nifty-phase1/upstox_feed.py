@@ -132,9 +132,9 @@ class UpstoxFeed:
         # Upstox strictly limits WebSocket V3 to 100 instruments per connection.
         # With combined indices + stocks feed, we allow up to 115 keys safely.
         # Enforce hard safety cap to prevent connection drops.
-        if len(self._subscribed_keys) > 115:
-            LOGGER.warning("[%s] Instrument count %d exceeds safety cap (115). Pruning non-essential keys.", self.name, len(self._subscribed_keys))
-            keys_list = list(self._subscribed_keys)[:115]
+        if len(self._subscribed_keys) > 150:
+            LOGGER.warning("[%s] Instrument count %d exceeds safety cap (150). Pruning non-essential keys.", self.name, len(self._subscribed_keys))
+            keys_list = list(self._subscribed_keys)[:150]
             self._subscribed_keys = set(keys_list)
         else:
             keys_list = list(self._subscribed_keys)
@@ -170,8 +170,8 @@ class UpstoxFeed:
         if not to_add:
             return
 
-        # Enforce 115 instrument hard ceiling on active keys for combined single-feed mode
-        max_allowed = 115
+        # Enforce 150 instrument hard ceiling on active keys for combined single-feed mode
+        max_allowed = 150
         if len(self._subscribed_keys) + len(to_add) > max_allowed:
             protected = set(getattr(self.settings, "instrument_keys", []))
             prunable = [k for k in self._subscribed_keys if k not in protected]

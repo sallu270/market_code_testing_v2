@@ -338,7 +338,7 @@ class GapEntryStrategyEngine:
                         LOGGER.info("Seeded spot price for stock %s from DB: %.2f", sym, st["spot_price"])
                     else:
                         meta = next((s for s in NIFTY_50_STOCKS if s["symbol"] == sym.upper()), None)
-                        fallback_price = float(meta.get("strike_step", 10) * 100) if meta else 1000.0
+                        fallback_price = float(st.get("prev_close") or (meta.get("strike_step", 10) * 100 if meta else 1000.0))
                         st["spot_price"] = fallback_price
                         LOGGER.info("Seeded spot price for stock %s from baseline: %.2f", sym, fallback_price)
                 except Exception as exc:
@@ -401,9 +401,9 @@ class GapEntryStrategyEngine:
                         if "lots_scalp" in data:
                             self.lots_scalp = max(1, int(data["lots_scalp"]))
                         if "max_bullish_stocks" in data:
-                            self.max_bullish_stocks = max(1, min(50, int(data["max_bullish_stocks"])))
+                            self.max_bullish_stocks = max(1, min(5, int(data["max_bullish_stocks"])))
                         if "max_bearish_stocks" in data:
-                            self.max_bearish_stocks = max(1, min(50, int(data["max_bearish_stocks"])))
+                            self.max_bearish_stocks = max(1, min(5, int(data["max_bearish_stocks"])))
                         if NIFTY_KEY in self.index_lots:
                             self.lots = self.index_lots[NIFTY_KEY]
                         if hasattr(self, "index_underlyings"):
@@ -450,6 +450,24 @@ class GapEntryStrategyEngine:
             self.alerts.append(alert)
             if len(self.alerts) > 200:
                 self.alerts.pop(0)
+
+            # Persist alert to database audit trail if available
+            if hasattr(self, "database") and self.database:
+                try:
+                    sym = (details or {}).get("underlying") or (details or {}).get("symbol") or ""
+                    self.database.insert_strategy_alert({
+                        "alert_date": now_dt.strftime("%Y-%m-%d"),
+                        "timestamp_ist": alert["timestamp_ist"],
+                        "timestamp_ms": alert["timestamp_ms"],
+                        "level": level,
+                        "alert_type": alert_type,
+                        "symbol": str(sym),
+                        "message": message,
+                        "details_json": json.dumps(details or {}),
+                    })
+                except Exception as ex:
+                    LOGGER.debug("Could not persist alert to database: %s", ex)
+
             LOGGER.info("[ALERT] [%s] %s: %s", level, alert_type, message)
             return alert
 
@@ -1392,9 +1410,11 @@ class GapEntryStrategyEngine:
                 if l_keys:
                     ce_keys = [k for k in l_keys if self.hot_cache.get(k, {}).get("side") == "CE"]
                     pe_keys = [k for k in l_keys if self.hot_cache.get(k, {}).get("side") == "PE"]
-                    # 4 options per stock: 2 CE (ATM & ATM+1) + 2 PE (ATM & ATM-1)
-                    atm_keys_to_sub.extend(ce_keys[:2])
-                    atm_keys_to_sub.extend(pe_keys[:2])
+                    # 1 ATM CE + 1 ATM PE per stock (20 options total for 10 stocks)
+                    if ce_keys:
+                        atm_keys_to_sub.append(ce_keys[0])
+                    if pe_keys:
+                        atm_keys_to_sub.append(pe_keys[0])
 
             if not hasattr(self, "_active_stock_option_keys"):
                 self._active_stock_option_keys = set()
@@ -1402,9 +1422,9 @@ class GapEntryStrategyEngine:
 
             if atm_keys_to_sub and self.feed and hasattr(self.feed, "subscribe"):
                 try:
-                    self.feed.subscribe(atm_keys_to_sub, target="stocks")
+                    self.feed.subscribe(atm_keys_to_sub)
                     LOGGER.info(
-                        "Pre-subscribed %d ATM+-2 option contracts for Top %d stocks on stocks WebSocket: %s",
+                        "Pre-subscribed %d ATM option contracts for Top %d stocks on WebSocket: %s",
                         len(atm_keys_to_sub), len(top_syms), atm_keys_to_sub
                     )
                 except Exception as exc:
@@ -3924,9 +3944,9 @@ class GapEntryStrategyEngine:
             if "lots_scalp" in body:
                 self.lots_scalp = max(1, int(body["lots_scalp"]))
             if "max_bullish_stocks" in body:
-                self.max_bullish_stocks = max(1, min(50, int(body["max_bullish_stocks"])))
+                self.max_bullish_stocks = max(1, min(5, int(body["max_bullish_stocks"])))
             if "max_bearish_stocks" in body:
-                self.max_bearish_stocks = max(1, min(50, int(body["max_bearish_stocks"])))
+                self.max_bearish_stocks = max(1, min(5, int(body["max_bearish_stocks"])))
             if "price_threshold_pct" in body:
                 self.price_threshold_pct = float(body["price_threshold_pct"])
             if "oi_threshold_pct" in body:

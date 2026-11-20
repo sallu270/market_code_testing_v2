@@ -212,9 +212,23 @@
       const score = st.score !== undefined && st.score !== null ? st.score : (st.clv !== undefined ? Math.round(st.clv * 100) : null);
       const scoreDisp = score !== null ? (score > 0 ? `+${score}` : `${score}`) : '-';
 
+      const spot = (st.spot_price && Number(st.spot_price) > 0)
+        ? `₹${Number(st.spot_price).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+        : '-';
+      const changePct = st.net_change_pct !== undefined && st.net_change_pct !== null ? Number(st.net_change_pct) : Number(st.change_pct || 0);
+      const spotCls = changePct >= 0 ? 'text-green font-mono' : 'text-red font-mono';
+      const changeSign = changePct >= 0 ? '+' : '';
+      const gapDisp = st.gap_pct !== undefined && st.gap_pct !== null ? `${st.gap_pct > 0 ? '+' : ''}${Number(st.gap_pct).toFixed(2)}%` : '-';
+      const rvolDisp = st.rvol ? `${Number(st.rvol).toFixed(1)}x` : '-';
+      const atmDisp = st.atm_strike ? `ATM ${Number(st.atm_strike).toLocaleString()}` : '';
+
       html += `<tr>
         <td class="text-center text-dim font-bold">${i + 1}</td>
-        <td class="text-left font-bold text-bright">${sym}</td>
+        <td class="text-left">
+          <strong class="font-bold text-bright">${sym}</strong><br>
+          <span class="${spotCls}">${spot} (${changeSign}${changePct.toFixed(2)}%)</span>
+          <span class="text-dim font-bold">&middot; Gap ${gapDisp} &middot; RVOL ${rvolDisp}${atmDisp ? ' &middot; ' + atmDisp : ''}</span>
+        </td>
         <td class="text-right text-green font-bold">${scoreDisp}</td>
         
         <!-- CE -->
@@ -264,9 +278,23 @@
       const score = st.score !== undefined && st.score !== null ? st.score : (st.clv !== undefined ? Math.round((st.clv - 1) * 100) : null);
       const scoreDisp = score !== null ? (score > 0 ? `+${score}` : `${score}`) : '-';
 
+      const spot = (st.spot_price && Number(st.spot_price) > 0)
+        ? `₹${Number(st.spot_price).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+        : '-';
+      const changePct = st.net_change_pct !== undefined && st.net_change_pct !== null ? Number(st.net_change_pct) : Number(st.change_pct || 0);
+      const spotCls = changePct >= 0 ? 'text-green font-mono' : 'text-red font-mono';
+      const changeSign = changePct >= 0 ? '+' : '';
+      const gapDisp = st.gap_pct !== undefined && st.gap_pct !== null ? `${st.gap_pct > 0 ? '+' : ''}${Number(st.gap_pct).toFixed(2)}%` : '-';
+      const rvolDisp = st.rvol ? `${Number(st.rvol).toFixed(1)}x` : '-';
+      const atmDisp = st.atm_strike ? `ATM ${Number(st.atm_strike).toLocaleString()}` : '';
+
       html += `<tr>
         <td class="text-center text-dim font-bold">${i + 1}</td>
-        <td class="text-left font-bold text-bright">${sym}</td>
+        <td class="text-left">
+          <strong class="font-bold text-bright">${sym}</strong><br>
+          <span class="${spotCls}">${spot} (${changeSign}${changePct.toFixed(2)}%)</span>
+          <span class="text-dim font-bold">&middot; Gap ${gapDisp} &middot; RVOL ${rvolDisp}${atmDisp ? ' &middot; ' + atmDisp : ''}</span>
+        </td>
         <td class="text-right text-red font-bold">${scoreDisp}</td>
         
         <!-- CE -->
@@ -303,7 +331,7 @@
   function renderStrikeDetail(strikes, indexName, atmStrike) {
     if (!tbodyStrikes) return;
     if (!strikes || !strikes.length) {
-      tbodyStrikes.innerHTML = `<tr><td colspan="11" class="text-center text-muted">Awaiting strike detail for ${indexName}...</td></tr>`;
+      tbodyStrikes.innerHTML = `<tr><td colspan="13" class="text-center text-muted">Awaiting strike detail for ${indexName}...</td></tr>`;
       return;
     }
 
@@ -316,12 +344,20 @@
       const isAtm = Number(s.strike) === Number(atmStrike);
       const atmBadge = isAtm ? `<span class="atm-strike-badge">ATM</span>` : '';
 
+      const ceLtp = (s.ce_ltp && Number(s.ce_ltp) > 0)
+        ? `<span class="font-mono font-bold text-bright">₹${Number(s.ce_ltp).toFixed(2)}</span>`
+        : '<span class="text-dim">-</span>';
+      const peLtp = (s.pe_ltp && Number(s.pe_ltp) > 0)
+        ? `<span class="font-mono font-bold text-bright">₹${Number(s.pe_ltp).toFixed(2)}</span>`
+        : '<span class="text-dim">-</span>';
+
       html += `<tr class="${isAtm ? 'row-atm' : ''}">
         <!-- CE -->
         <td class="text-right">${fmtLakh(s.ce_oi)}</td>
         <td class="text-right">${fmtLakh(s.ce_delta_oi)}</td>
         <td class="text-right">${fmtPct(s.ce_delta_oi_pct)}</td>
         <td class="text-right">${fmtPct(s.ce_price_pct)}</td>
+        <td class="text-right">${ceLtp}</td>
         <td class="text-center">${fmtBuildup(s.ce_buildup)}</td>
 
         <!-- STRIKE -->
@@ -329,6 +365,7 @@
 
         <!-- PE -->
         <td class="text-center">${fmtBuildup(s.pe_buildup)}</td>
+        <td class="text-right">${peLtp}</td>
         <td class="text-right">${fmtPct(s.pe_price_pct)}</td>
         <td class="text-right">${fmtPct(s.pe_delta_oi_pct)}</td>
         <td class="text-right">${fmtLakh(s.pe_delta_oi)}</td>
@@ -752,33 +789,359 @@
     }
   });
 
-  // 14. Top-level Application Tabs (Live Dashboard vs Bot Settings)
+  // 14. Top-level Application Tabs (Live Dashboard vs Trade Book vs Activity Logs vs Bot Settings)
   const navBtnDash = document.getElementById('nav-btn-dashboard');
+  const navBtnTrades = document.getElementById('nav-btn-trades');
+  const navBtnLogs = document.getElementById('nav-btn-logs');
   const navBtnSettings = document.getElementById('nav-btn-settings');
   const paneDash = document.getElementById('tab-dashboard');
+  const paneTrades = document.getElementById('tab-trades');
+  const paneLogs = document.getElementById('tab-logs');
   const paneSettings = document.getElementById('tab-settings');
   const navCurrentText = document.getElementById('nav-current-tab-text');
   const btnBackToDash = document.getElementById('btn-back-to-dashboard');
+  const badgeTradesCount = document.getElementById('badge-trades-count');
+  const badgeLogsCount = document.getElementById('badge-logs-count');
+
+  // Trade Book Elements
+  const selectTradeDate = document.getElementById('select-trade-date');
+  const btnExportCsv = document.getElementById('btn-export-trades-csv');
+  const btnRefreshTrades = document.getElementById('btn-refresh-trades');
+  const tbodyTradesJournal = document.getElementById('tbody-trades-journal');
+  const summaryTotalTrades = document.getElementById('summary-total-trades');
+  const summaryWinTrades = document.getElementById('summary-win-trades');
+  const summaryLossTrades = document.getElementById('summary-loss-trades');
+  const summaryWinRate = document.getElementById('summary-win-rate');
+  const summaryDayPnl = document.getElementById('summary-day-pnl');
+
+  // Activity Logs Elements
+  const selectLogDate = document.getElementById('select-log-date');
+  const selectLogLevel = document.getElementById('select-log-level');
+  const btnExportLogsCsv = document.getElementById('btn-export-logs-csv');
+  const btnRefreshLogs = document.getElementById('btn-refresh-logs');
+  const tbodyLogsJournal = document.getElementById('tbody-logs-journal');
+  const summaryTotalLogs = document.getElementById('summary-total-logs');
+  const summaryEntriesCount = document.getElementById('summary-entries-count');
+  const summaryExitsCount = document.getElementById('summary-exits-count');
+  const summaryBlocksCount = document.getElementById('summary-blocks-count');
+  const summaryWarningsCount = document.getElementById('summary-warnings-count');
 
   function switchTab(target) {
+    [navBtnDash, navBtnTrades, navBtnLogs, navBtnSettings].forEach(b => { if (b) b.classList.remove('active'); });
+    [paneDash, paneTrades, paneLogs, paneSettings].forEach(p => { if (p) p.style.display = 'none'; });
+
     if (target === 'settings') {
       if (navBtnSettings) navBtnSettings.classList.add('active');
-      if (navBtnDash) navBtnDash.classList.remove('active');
       if (paneSettings) paneSettings.style.display = 'block';
-      if (paneDash) paneDash.style.display = 'none';
       if (navCurrentText) navCurrentText.textContent = 'BOT SETTINGS';
+    } else if (target === 'trades') {
+      if (navBtnTrades) navBtnTrades.classList.add('active');
+      if (paneTrades) paneTrades.style.display = 'block';
+      if (navCurrentText) navCurrentText.textContent = 'TRADE BOOK';
+      loadTradesJournal();
+    } else if (target === 'logs') {
+      if (navBtnLogs) navBtnLogs.classList.add('active');
+      if (paneLogs) paneLogs.style.display = 'block';
+      if (navCurrentText) navCurrentText.textContent = 'ACTIVITY LOGS';
+      loadAlertsJournal();
     } else {
       if (navBtnDash) navBtnDash.classList.add('active');
-      if (navBtnSettings) navBtnSettings.classList.remove('active');
       if (paneDash) paneDash.style.display = 'block';
-      if (paneSettings) paneSettings.style.display = 'none';
       if (navCurrentText) navCurrentText.textContent = 'LIVE DASHBOARD';
     }
   }
 
   if (navBtnDash) navBtnDash.addEventListener('click', () => switchTab('dashboard'));
+  if (navBtnTrades) navBtnTrades.addEventListener('click', () => switchTab('trades'));
+  if (navBtnLogs) navBtnLogs.addEventListener('click', () => switchTab('logs'));
   if (navBtnSettings) navBtnSettings.addEventListener('click', () => switchTab('settings'));
   if (btnBackToDash) btnBackToDash.addEventListener('click', () => switchTab('dashboard'));
+
+  // 15. Trade Book & Journal Manager (Day-by-Day + Millisecond Timestamps + CSV Export)
+  let currentSelectedDate = 'today';
+
+  async function loadTradeDates() {
+    if (!selectTradeDate) return;
+    try {
+      const res = await fetch('/api/strategy/trade-dates');
+      if (!res.ok) return;
+      const data = await res.json();
+      const dates = data.dates || [];
+      const today = data.today || new Date().toISOString().split('T')[0];
+
+      const prevVal = selectTradeDate.value || 'today';
+      let html = `<option value="today">Today (${today})</option>`;
+      dates.forEach(d => {
+        if (d !== today) {
+          html += `<option value="${d}">${d}</option>`;
+        }
+      });
+      html += `<option value="all">All Dates</option>`;
+      selectTradeDate.innerHTML = html;
+      selectTradeDate.value = prevVal;
+    } catch (err) {
+      console.warn('Error loading trade dates:', err);
+    }
+  }
+
+  function formatTimeWithMs(timeStr, tsMs) {
+    if (timeStr && timeStr.includes('.')) return timeStr;
+    if (tsMs) {
+      const d = new Date(Number(tsMs));
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      const ms = String(d.getMilliseconds()).padStart(3, '0');
+      return `${hh}:${mm}:${ss}.${ms}`;
+    }
+    return timeStr || '-';
+  }
+
+  function formatExitBadge(reason) {
+    if (!reason) return '<span class="badge-exit">-</span>';
+    const r = String(reason).toUpperCase();
+    if (r.includes('STOP_LOSS') || r.includes('SL')) {
+      return '<span class="badge-exit badge-exit-sl">SL 25%</span>';
+    }
+    if (r.includes('TARGET') || r.includes('PROFIT')) {
+      return '<span class="badge-exit badge-exit-target">TARGET 40%</span>';
+    }
+    if (r.includes('MANUAL')) {
+      return '<span class="badge-exit badge-exit-manual">MANUAL</span>';
+    }
+    if (r.includes('15:15') || r.includes('EOD') || r.includes('SQUAREOFF')) {
+      return '<span class="badge-exit badge-exit-eod">EOD 15:15</span>';
+    }
+    return `<span class="badge-exit">${reason}</span>`;
+  }
+
+  async function loadTradesJournal() {
+    if (!tbodyTradesJournal) return;
+    const selectedDate = selectTradeDate ? selectTradeDate.value : 'today';
+    currentSelectedDate = selectedDate;
+
+    try {
+      const res = await fetch(`/api/strategy/trades?date=${encodeURIComponent(selectedDate)}&limit=1000`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const trades = data.trades || [];
+
+      if (badgeTradesCount) {
+        badgeTradesCount.textContent = trades.length;
+      }
+
+      // Calculate Day Summary Metrics
+      let winCount = 0;
+      let lossCount = 0;
+      let totalPnl = 0.0;
+
+      if (!trades.length) {
+        tbodyTradesJournal.innerHTML = `<tr><td colspan="12" class="text-center text-muted font-mono" style="padding: 24px;">No trades recorded for ${selectedDate}.</td></tr>`;
+      } else {
+        let html = '';
+        trades.forEach((t, i) => {
+          const pnl = Number(t.net_pnl || 0.0);
+          totalPnl += pnl;
+          if (pnl > 0) winCount++;
+          else if (pnl < 0) lossCount++;
+
+          const pnlSign = pnl > 0 ? '+' : '';
+          const pnlCls = pnl > 0 ? 'text-green font-bold' : (pnl < 0 ? 'text-red font-bold' : 'text-muted font-bold');
+
+          const entryTime = formatTimeWithMs(t.entry_time_ist, t.entry_timestamp_ms);
+          const exitTime = t.status === 'OPEN' ? '<span class="text-cyan font-bold font-mono">ACTIVE</span>' : formatTimeWithMs(t.exit_time_ist, t.exit_timestamp_ms);
+
+          const exitPriceDisp = t.status === 'OPEN'
+            ? `<span class="text-cyan font-mono font-bold">₹${Number(t.current_price || t.exit_price || t.entry_price || 0).toFixed(2)} (Live)</span>`
+            : (t.exit_price !== null && t.exit_price !== undefined ? `<span class="font-mono text-bright font-bold">₹${Number(t.exit_price).toFixed(2)}</span>` : '<span class="text-dim">-</span>');
+
+          const sideBadge = (t.side || '').toUpperCase().includes('CE')
+            ? '<span class="act-badge act-enter-ce">BUY CE</span>'
+            : '<span class="act-badge act-enter-pe">BUY PE</span>';
+
+          const statusBadge = t.status === 'OPEN'
+            ? '<span class="badge-status-open">OPEN</span>'
+            : '<span class="badge-status-closed">CLOSED</span>';
+
+          const ptsVal = Number(t.pnl_points || 0.0);
+          const ptsSign = ptsVal > 0 ? '+' : '';
+          const ptsCls = ptsVal > 0 ? 'text-green font-mono' : (ptsVal < 0 ? 'text-red font-mono' : 'text-muted font-mono');
+
+          html += `<tr>
+            <td class="text-center text-dim font-bold font-mono">${trades.length - i}</td>
+            <td class="text-left font-bold text-bright font-mono">${t.symbol || t.underlying_key || '-'}</td>
+            <td class="text-center">${sideBadge}</td>
+            <td class="text-right font-mono text-bright font-bold">${Number(t.strike || 0).toLocaleString()}</td>
+            <td class="text-right font-mono text-bright font-bold">₹${Number(t.entry_price || 0).toFixed(2)}</td>
+            <td class="text-center font-mono text-bright font-bold">${entryTime}</td>
+            <td class="text-right font-mono">${exitPriceDisp}</td>
+            <td class="text-center font-mono font-bold">${exitTime}</td>
+            <td class="text-right ${ptsCls} font-bold">${ptsSign}${ptsVal.toFixed(2)}</td>
+            <td class="text-right font-mono ${pnlCls}">${pnlSign}₹${pnl.toFixed(2)}</td>
+            <td class="text-center">${formatExitBadge(t.exit_reason)}</td>
+            <td class="text-center">${statusBadge}</td>
+          </tr>`;
+        });
+
+        tbodyTradesJournal.innerHTML = html;
+      }
+
+      // Update Summary KPI Cards
+      if (summaryTotalTrades) summaryTotalTrades.textContent = trades.length;
+      if (summaryWinTrades) summaryWinTrades.textContent = `${winCount} W`;
+      if (summaryLossTrades) summaryLossTrades.textContent = `${lossCount} L`;
+
+      const completedTrades = winCount + lossCount;
+      const winRatePct = completedTrades > 0 ? ((winCount / completedTrades) * 100).toFixed(1) : '0.0';
+      if (summaryWinRate) summaryWinRate.textContent = `${winRatePct}%`;
+
+      if (summaryDayPnl) {
+        const sign = totalPnl > 0 ? '+' : '';
+        const pnlCls = totalPnl > 0 ? 'text-green' : (totalPnl < 0 ? 'text-red' : 'text-bright');
+        summaryDayPnl.className = `summary-val font-mono ${pnlCls}`;
+        summaryDayPnl.textContent = `${sign}₹${totalPnl.toFixed(2)}`;
+      }
+
+    } catch (err) {
+      console.warn('Error loading trades journal:', err);
+      if (tbodyTradesJournal) {
+        tbodyTradesJournal.innerHTML = `<tr><td colspan="12" class="text-center text-red">Error loading trades: ${err.message}</td></tr>`;
+      }
+    }
+  }
+
+  // Date picker change & refresh events
+  if (selectTradeDate) {
+    selectTradeDate.addEventListener('change', () => {
+      loadTradesJournal();
+    });
+  }
+
+  if (btnRefreshTrades) {
+    btnRefreshTrades.addEventListener('click', () => {
+      loadTradesJournal();
+    });
+  }
+
+  if (btnExportCsv) {
+    btnExportCsv.addEventListener('click', () => {
+      const selectedDate = selectTradeDate ? selectTradeDate.value : 'today';
+      window.location.href = `/api/strategy/trades/export.csv?date=${encodeURIComponent(selectedDate)}`;
+    });
+  }
+
+  // 16. Activity Logs Manager (Day-by-Day + Level Filter + CSV Export)
+  async function loadAlertDates() {
+    if (!selectLogDate) return;
+    try {
+      const res = await fetch('/api/strategy/alert-dates');
+      if (!res.ok) return;
+      const data = await res.json();
+      const dates = data.dates || [];
+      const today = data.today || new Date().toISOString().split('T')[0];
+
+      const prevVal = selectLogDate.value || 'today';
+      let html = `<option value="today">Today (${today})</option>`;
+      dates.forEach(d => {
+        if (d !== today) {
+          html += `<option value="${d}">${d}</option>`;
+        }
+      });
+      html += `<option value="all">All Dates</option>`;
+      selectLogDate.innerHTML = html;
+      selectLogDate.value = prevVal;
+    } catch (err) {
+      console.warn('Error loading alert dates:', err);
+    }
+  }
+
+  async function loadAlertsJournal() {
+    if (!tbodyLogsJournal) return;
+    try {
+      const selectedDate = selectLogDate ? selectLogDate.value : 'today';
+      const selectedLevel = selectLogLevel ? selectLogLevel.value : 'ALL';
+      let url = `/api/strategy/alerts?limit=500&date=${encodeURIComponent(selectedDate)}`;
+      if (selectedLevel && selectedLevel !== 'ALL') {
+        url += `&level=${encodeURIComponent(selectedLevel)}`;
+      }
+
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const alerts = data.alerts || [];
+
+      if (badgeLogsCount) badgeLogsCount.textContent = alerts.length;
+
+      if (!alerts.length) {
+        tbodyLogsJournal.innerHTML = `<tr><td colspan="6" class="text-center text-muted">No activity logs recorded for ${selectedDate}.</td></tr>`;
+        if (summaryTotalLogs) summaryTotalLogs.textContent = '0';
+        if (summaryEntriesCount) summaryEntriesCount.textContent = '0 Entries';
+        if (summaryExitsCount) summaryExitsCount.textContent = '0 Exits';
+        if (summaryBlocksCount) summaryBlocksCount.textContent = '0';
+        if (summaryWarningsCount) summaryWarningsCount.textContent = '0';
+      } else {
+        let html = '';
+        let entriesCount = 0;
+        let exitsCount = 0;
+        let blocksCount = 0;
+        let warningsCount = 0;
+
+        alerts.forEach((a, i) => {
+          const typeStr = (a.alert_type || a.type || 'EVENT').toUpperCase();
+          const lvl = (a.level || 'INFO').toUpperCase();
+
+          if (typeStr.includes('ENTRY')) entriesCount++;
+          else if (typeStr.includes('EXIT')) exitsCount++;
+          else if (typeStr.includes('BLOCK') || typeStr.includes('GUARD') || typeStr.includes('REJECT')) blocksCount++;
+          else if (lvl.includes('WARN') || lvl.includes('ERR')) warningsCount++;
+
+          let tagCls = 'tag-data';
+          if (typeStr.includes('ENTRY')) tagCls = 'tag-entry';
+          else if (typeStr.includes('EXIT')) tagCls = 'tag-exit';
+          else if (typeStr.includes('BLOCK') || typeStr.includes('GUARD') || typeStr.includes('REJECT')) tagCls = 'tag-blocked';
+          else if (lvl.includes('WARN')) tagCls = 'tag-warning';
+          else if (lvl.includes('ERR')) tagCls = 'tag-exit';
+
+          let lvlBadgeCls = 'badge-level-info';
+          if (lvl.includes('WARN')) lvlBadgeCls = 'badge-level-warning';
+          else if (lvl.includes('ERR')) lvlBadgeCls = 'badge-level-error';
+
+          html += `<tr>
+            <td class="text-center text-dim font-bold font-mono">${alerts.length - i}</td>
+            <td class="text-center font-mono text-bright font-bold">${a.timestamp_ist || '-'}</td>
+            <td class="text-center"><span class="badge-level ${lvlBadgeCls}">${lvl}</span></td>
+            <td class="text-center"><span class="alert-tag ${tagCls}">${typeStr}</span></td>
+            <td class="text-left font-bold text-bright font-mono">${a.symbol || '-'}</td>
+            <td class="text-left text-dim font-mono">${a.message || ''}</td>
+          </tr>`;
+        });
+
+        tbodyLogsJournal.innerHTML = html;
+
+        if (summaryTotalLogs) summaryTotalLogs.textContent = alerts.length;
+        if (summaryEntriesCount) summaryEntriesCount.textContent = `${entriesCount} Entries`;
+        if (summaryExitsCount) summaryExitsCount.textContent = `${exitsCount} Exits`;
+        if (summaryBlocksCount) summaryBlocksCount.textContent = blocksCount;
+        if (summaryWarningsCount) summaryWarningsCount.textContent = warningsCount;
+      }
+    } catch (err) {
+      console.warn('Error loading alerts journal:', err);
+      if (tbodyLogsJournal) {
+        tbodyLogsJournal.innerHTML = `<tr><td colspan="6" class="text-center text-red">Error loading logs: ${err.message}</td></tr>`;
+      }
+    }
+  }
+
+  if (selectLogDate) selectLogDate.addEventListener('change', () => loadAlertsJournal());
+  if (selectLogLevel) selectLogLevel.addEventListener('change', () => loadAlertsJournal());
+  if (btnRefreshLogs) btnRefreshLogs.addEventListener('click', () => loadAlertsJournal());
+  if (btnExportLogsCsv) {
+    btnExportLogsCsv.addEventListener('click', () => {
+      const selectedDate = selectLogDate ? selectLogDate.value : 'today';
+      const selectedLevel = selectLogLevel ? selectLogLevel.value : 'ALL';
+      window.location.href = `/api/strategy/alerts/export.csv?date=${encodeURIComponent(selectedDate)}&level=${encodeURIComponent(selectedLevel)}`;
+    });
+  }
 
   // Index specific lot pills handler
   document.querySelectorAll('.btn-idx-lot').forEach(btn => {
@@ -812,8 +1175,20 @@
 
   // Initial Boot
   fetchDashboardData();
+  loadTradeDates();
+  loadTradesJournal();
+  loadAlertDates();
+  loadAlertsJournal();
   setupSSE();
   // Continuous fallback polling every 2 seconds
-  setInterval(fetchDashboardData, 2000);
+  setInterval(() => {
+    fetchDashboardData();
+    if (paneTrades && paneTrades.style.display !== 'none') {
+      loadTradesJournal();
+    }
+    if (paneLogs && paneLogs.style.display !== 'none') {
+      loadAlertsJournal();
+    }
+  }, 2000);
 
 })();

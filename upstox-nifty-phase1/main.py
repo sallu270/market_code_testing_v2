@@ -501,12 +501,14 @@ def api_dashboard_data() -> Response:
                 bu = "NEU"
 
             if side == "CE":
+                by_strike[stk]["ce_ltp"] = ltp
                 by_strike[stk]["ce_oi"] = oi
                 by_strike[stk]["ce_delta_oi"] = d_oi
                 by_strike[stk]["ce_delta_oi_pct"] = d_oi_pct
                 by_strike[stk]["ce_price_pct"] = p_pct
                 by_strike[stk]["ce_buildup"] = bu
             else:
+                by_strike[stk]["pe_ltp"] = ltp
                 by_strike[stk]["pe_oi"] = oi
                 by_strike[stk]["pe_delta_oi"] = d_oi
                 by_strike[stk]["pe_delta_oi_pct"] = d_oi_pct
@@ -573,6 +575,30 @@ def api_dashboard_data() -> Response:
         stk_st = strategy_engine.stock_underlyings.get(sym, {})
         last_eval = stk_st.get("last_evaluation") or {}
 
+        # 1. Live spot price & screening metrics
+        spot_price = float(stk_st.get("spot_price") or s.get("price") or 0.0)
+        prev_close = float(stk_st.get("prev_close") or s.get("prev_close") or spot_price or 1.0)
+        net_change_pct = round(((spot_price - prev_close) / prev_close) * 100.0, 2) if (prev_close > 0 and spot_price > 0) else float(s.get("change_pct") or 0.0)
+        gap_pct = float(stk_st.get("gap_pct") if stk_st.get("gap_pct") is not None else (s.get("gap_pct") or 0.0))
+        rvol = float(s.get("rvol") or 1.0)
+        step = float(stk_st.get("strike_step") or s.get("strike_step") or 10.0)
+        atm_strike = round(spot_price / step) * step if (spot_price > 0 and step > 0) else None
+
+        # 2. Ensure ATM contracts are planned & locked for Top watchlist stocks
+        if spot_price > 0 and not stk_st.get("locked_keys"):
+            try:
+                strategy_engine.plan_stock_contracts(sym, spot_price)
+                strategy_engine.lock_stock_contracts(sym)
+                l_keys = stk_st.get("locked_keys") or []
+                ce_sub = [k for k in l_keys if strategy_engine.hot_cache.get(k, {}).get("side") == "CE"][:1]
+                pe_sub = [k for k in l_keys if strategy_engine.hot_cache.get(k, {}).get("side") == "PE"][:1]
+                to_sub = ce_sub + pe_sub
+                if to_sub and feed and hasattr(feed, "subscribe"):
+                    feed.subscribe(to_sub)
+            except Exception as ex:
+                LOGGER.debug("Auto-plan ATM options failed for %s: %s", sym, ex)
+
+        # 3. Pull live ATM option metrics
         delta_ce = float(last_eval.get("delta_ce") or 0.0)
         delta_pe = float(last_eval.get("delta_pe") or 0.0)
         ce_price_pct = float(last_eval.get("ce_price_pct") or 0.0)
@@ -581,6 +607,36 @@ def api_dashboard_data() -> Response:
         pe_bu = last_eval.get("pe_type")
         rule_num = last_eval.get("rule")
         decision = last_eval.get("decision") or "No trade"
+
+        locked_keys = stk_st.get("locked_keys") or []
+        ce_keys = [k for k in locked_keys if strategy_engine.hot_cache.get(k, {}).get("side") == "CE"]
+        pe_keys = [k for k in locked_keys if strategy_engine.hot_cache.get(k, {}).get("side") == "PE"]
+
+        if delta_ce == 0.0 and ce_keys:
+            ce_entry = strategy_engine.hot_cache.get(ce_keys[0], {})
+            ce_ref = float(ce_entry.get("ref_ltp") or ce_entry.get("prev_close") or 0.0)
+            ce_ltp = float(ce_entry.get("ltp") or ce_entry.get("bid_price") or 0.0)
+            if ce_ref > 0 and ce_ltp > 0:
+                ce_price_pct = round(((ce_ltp - ce_ref) / ce_ref) * 100.0, 2)
+            ce_oi = float(ce_entry.get("oi") or 0.0)
+            ce_prev_oi = float(ce_entry.get("prev_oi") or ce_oi or 0.0)
+            if ce_prev_oi > 0 and ce_oi > 0:
+                delta_ce = ce_oi - ce_prev_oi
+                ce_oi_pct = round((delta_ce / ce_prev_oi) * 100.0, 2)
+            ce_bu = ce_entry.get("build_up") or ce_bu or "NEU"
+
+        if delta_pe == 0.0 and pe_keys:
+            pe_entry = strategy_engine.hot_cache.get(pe_keys[0], {})
+            pe_ref = float(pe_entry.get("ref_ltp") or pe_entry.get("prev_close") or 0.0)
+            pe_ltp = float(pe_entry.get("ltp") or pe_entry.get("bid_price") or 0.0)
+            if pe_ref > 0 and pe_ltp > 0:
+                pe_price_pct = round(((pe_ltp - pe_ref) / pe_ref) * 100.0, 2)
+            pe_oi = float(pe_entry.get("oi") or 0.0)
+            pe_prev_oi = float(pe_entry.get("prev_oi") or pe_oi or 0.0)
+            if pe_prev_oi > 0 and pe_oi > 0:
+                delta_pe = pe_oi - pe_prev_oi
+                pe_oi_pct = round((delta_pe / pe_prev_oi) * 100.0, 2)
+            pe_bu = pe_entry.get("build_up") or pe_bu or "NEU"
 
         tot_oi_abs = abs(delta_pe) + abs(delta_ce)
         oi_i = round((delta_pe - delta_ce) / tot_oi_abs, 2) if tot_oi_abs > 0 else (0.0 if (delta_ce or delta_pe) else None)
@@ -609,6 +665,12 @@ def api_dashboard_data() -> Response:
         return {
             "symbol": sym,
             "name": s.get("name", sym),
+            "spot_price": spot_price,
+            "prev_close": prev_close,
+            "net_change_pct": net_change_pct,
+            "gap_pct": gap_pct,
+            "rvol": rvol,
+            "atm_strike": atm_strike,
             "score": score,
             "rank": s.get("rank") or stk_st.get("watchlist_rank") or "★★",
             "size": last_eval.get("size") or "Normal",
@@ -990,6 +1052,56 @@ def api_strategy_trade_dates() -> Response:
         dates.insert(0, today_str)
     return jsonify({"dates": dates, "today": today_str})
 
+@app.get("/api/strategy/trades/export.csv")
+def api_strategy_trades_export_csv() -> Response:
+    """Exports trades for a given date (or all) as a downloadable CSV spreadsheet."""
+    date_param = request.args.get("date", default=None, type=str)
+    if not date_param or date_param.strip().lower() == "today":
+        target_date = datetime.now(IST).strftime("%Y-%m-%d")
+    elif date_param.strip().lower() == "all":
+        target_date = None
+    else:
+        target_date = date_param.strip()
+
+    trades = database.get_strategy_trades(limit=5000, trade_date=target_date)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Trade ID", "Trade Date", "Symbol", "Side", "Strike", "Lot Size",
+        "Entry Price", "Entry Time (IST ms)", "Exit Price", "Exit Time (IST ms)",
+        "PnL Points", "Net PnL (INR)", "Status", "Profit / Exit Type", "Underlying"
+    ])
+    for t in trades:
+        writer.writerow([
+            t.get("trade_id", ""),
+            t.get("trade_date", ""),
+            t.get("symbol", ""),
+            t.get("side", ""),
+            t.get("strike", ""),
+            t.get("lot_size", ""),
+            t.get("entry_price", ""),
+            t.get("entry_time_ist", ""),
+            t.get("exit_price", ""),
+            t.get("exit_time_ist", ""),
+            t.get("pnl_points", ""),
+            t.get("net_pnl", ""),
+            t.get("status", ""),
+            t.get("exit_reason", ""),
+            t.get("underlying_key", ""),
+        ])
+
+    csv_data = output.getvalue().encode("utf-8")
+    fname = f"trades_{target_date or 'all'}.csv"
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={fname}",
+            "Cache-Control": "no-cache, no-store",
+        },
+    )
+
 @app.get("/api/strategy/signals")
 def api_strategy_signals() -> Response:
     limit = request.args.get("limit", default=100, type=int)
@@ -998,9 +1110,103 @@ def api_strategy_signals() -> Response:
 
 @app.get("/api/strategy/alerts")
 def api_strategy_alerts() -> Response:
-    limit = request.args.get("limit", default=50, type=int)
-    alerts = strategy_engine.get_alerts(limit=limit) if hasattr(strategy_engine, "get_alerts") else []
-    return jsonify({"alerts": alerts})
+    limit = request.args.get("limit", default=500, type=int)
+    date_param = request.args.get("date", default=None, type=str)
+    level = request.args.get("level", default=None, type=str)
+
+    if not date_param or date_param.strip().lower() == "today":
+        target_date = datetime.now(IST).strftime("%Y-%m-%d")
+    elif date_param.strip().lower() == "all":
+        target_date = None
+    else:
+        target_date = date_param.strip()
+
+    # Query persistent alerts from database
+    alerts = database.get_strategy_alerts(limit=limit, alert_date=target_date, level=level)
+    
+    # If DB has no records for today yet (e.g. fresh startup), fallback to memory alerts
+    if not alerts and (target_date == datetime.now(IST).strftime("%Y-%m-%d") or not target_date):
+        mem_alerts = strategy_engine.get_alerts(limit=limit) if hasattr(strategy_engine, "get_alerts") else []
+        today_s = datetime.now(IST).strftime("%Y-%m-%d")
+        alerts = [{
+            "id": a.get("id", i + 1),
+            "alert_date": today_s,
+            "timestamp_ist": a.get("timestamp_ist", ""),
+            "timestamp_ms": a.get("timestamp_ms", 0),
+            "level": a.get("level", "INFO"),
+            "alert_type": a.get("type", "GENERAL"),
+            "symbol": (a.get("details") or {}).get("underlying") or "",
+            "message": a.get("message", ""),
+        } for i, a in enumerate(mem_alerts)]
+
+    return jsonify({
+        "alerts": alerts,
+        "date": target_date or "all",
+        "today": datetime.now(IST).strftime("%Y-%m-%d"),
+        "count": len(alerts),
+    })
+
+@app.get("/api/strategy/alert-dates")
+def api_strategy_alert_dates() -> Response:
+    dates = database.get_strategy_alert_dates()
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    if today_str not in dates:
+        dates.insert(0, today_str)
+    return jsonify({"dates": dates, "today": today_str})
+
+@app.get("/api/strategy/alerts/export.csv")
+def api_strategy_alerts_export_csv() -> Response:
+    """Exports activity alerts for a given date (or all) as a downloadable CSV spreadsheet."""
+    date_param = request.args.get("date", default=None, type=str)
+    level = request.args.get("level", default=None, type=str)
+
+    if not date_param or date_param.strip().lower() == "today":
+        target_date = datetime.now(IST).strftime("%Y-%m-%d")
+    elif date_param.strip().lower() == "all":
+        target_date = None
+    else:
+        target_date = date_param.strip()
+
+    alerts = database.get_strategy_alerts(limit=5000, alert_date=target_date, level=level)
+    if not alerts and (target_date == datetime.now(IST).strftime("%Y-%m-%d") or not target_date):
+        mem_alerts = strategy_engine.get_alerts(limit=5000) if hasattr(strategy_engine, "get_alerts") else []
+        today_s = datetime.now(IST).strftime("%Y-%m-%d")
+        alerts = [{
+            "id": a.get("id", i + 1),
+            "alert_date": today_s,
+            "timestamp_ist": a.get("timestamp_ist", ""),
+            "level": a.get("level", "INFO"),
+            "alert_type": a.get("type", "GENERAL"),
+            "symbol": (a.get("details") or {}).get("underlying") or "",
+            "message": a.get("message", ""),
+        } for i, a in enumerate(mem_alerts)]
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Alert ID", "Date", "Timestamp (IST)", "Level", "Event Type", "Symbol / Underlying", "Action / Event Message"
+    ])
+    for a in alerts:
+        writer.writerow([
+            a.get("id", ""),
+            a.get("alert_date", ""),
+            a.get("timestamp_ist", ""),
+            a.get("level", ""),
+            a.get("alert_type", ""),
+            a.get("symbol", ""),
+            a.get("message", ""),
+        ])
+
+    csv_data = output.getvalue().encode("utf-8")
+    fname = f"activity_logs_{target_date or 'all'}.csv"
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={fname}",
+            "Cache-Control": "no-cache, no-store",
+        },
+    )
 
 @app.get("/api/strategy/flow")
 def api_strategy_flow() -> Response:

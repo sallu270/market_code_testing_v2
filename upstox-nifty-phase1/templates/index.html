@@ -54,6 +54,16 @@
           <span class="nav-tab-icon">📊</span>
           <span class="nav-tab-title">Live Dashboard</span>
         </button>
+        <button class="nav-tab" data-tab="tab-trades" id="nav-btn-trades">
+          <span class="nav-tab-icon">📒</span>
+          <span class="nav-tab-title">Trade Book</span>
+          <span class="nav-tab-badge" id="badge-trades-count">0</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-logs" id="nav-btn-logs">
+          <span class="nav-tab-icon">📜</span>
+          <span class="nav-tab-title">Activity Logs</span>
+          <span class="nav-tab-badge" id="badge-logs-count">0</span>
+        </button>
         <button class="nav-tab" data-tab="tab-settings" id="nav-btn-settings">
           <span class="nav-tab-icon">⚙️</span>
           <span class="nav-tab-title">Bot Settings</span>
@@ -248,18 +258,20 @@
             <table class="data-table" id="table-strikes">
               <thead>
                 <tr>
-                  <th colspan="5" class="col-grp-ce text-center">CALLS (CE)</th>
+                  <th colspan="6" class="col-grp-ce text-center">CALLS (CE)</th>
                   <th class="col-strike text-center">STRIKE</th>
-                  <th colspan="5" class="col-grp-pe text-center">PUTS (PE)</th>
+                  <th colspan="6" class="col-grp-pe text-center">PUTS (PE)</th>
                 </tr>
                 <tr class="sub-headers">
                   <th class="text-right">OI (L)</th>
                   <th class="text-right">&Delta;OI (L)</th>
                   <th class="text-right">&Delta;OI %</th>
                   <th class="text-right">PRICE %</th>
+                  <th class="text-right">LTP (₹)</th>
                   <th class="text-center">BU</th>
                   <th class="text-center font-bold">ATM</th>
                   <th class="text-center">BU</th>
+                  <th class="text-right">LTP (₹)</th>
                   <th class="text-right">PRICE %</th>
                   <th class="text-right">&Delta;OI %</th>
                   <th class="text-right">&Delta;OI (L)</th>
@@ -401,7 +413,6 @@
                 <button class="pill-btn" data-param="max_bullish_stocks" data-val="2">2</button>
                 <button class="pill-btn" data-param="max_bullish_stocks" data-val="3">3</button>
                 <button class="pill-btn active" data-param="max_bullish_stocks" data-val="5">5</button>
-                <button class="pill-btn" data-param="max_bullish_stocks" data-val="10">10</button>
               </div>
             </div>
 
@@ -416,7 +427,6 @@
                 <button class="pill-btn" data-param="max_bearish_stocks" data-val="2">2</button>
                 <button class="pill-btn" data-param="max_bearish_stocks" data-val="3">3</button>
                 <button class="pill-btn active" data-param="max_bearish_stocks" data-val="5">5</button>
-                <button class="pill-btn" data-param="max_bearish_stocks" data-val="10">10</button>
               </div>
             </div>
 
@@ -564,6 +574,174 @@
 
       </div>
     </div> <!-- /tab-settings -->
+
+    <!-- ====================================================================
+         TAB 3: TRADE BOOK / JOURNAL (Day-by-Day Trade History + CSV Export)
+         ==================================================================== -->
+    <div class="tab-pane" id="tab-trades" style="display: none;">
+      <section class="dash-section">
+        
+        <!-- Controls Bar: Day Selector & Export CSV -->
+        <div class="trades-control-bar">
+          <div class="trades-bar-left">
+            <h2 class="section-title">Trade Book &middot; Execution Journal</h2>
+            <span class="section-meta">All algorithmic trades taken by bot with exact fill prices, millisecond timestamps &amp; profit types</span>
+          </div>
+          <div class="trades-bar-right">
+            <div class="trade-date-picker-wrap">
+              <label for="select-trade-date" class="label-date-picker">Date:</label>
+              <select id="select-trade-date" class="select-trade-date">
+                <!-- Dynamically populated with dates -->
+              </select>
+            </div>
+            <button id="btn-export-trades-csv" class="btn btn-sm btn-outline btn-export-csv" title="Download trades as CSV">
+              <span class="btn-icon">📥</span> Export CSV
+            </button>
+            <button id="btn-refresh-trades" class="btn btn-sm btn-outline" title="Refresh trade list">
+              <span class="btn-icon">🔄</span> Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Day's Key Metrics Overview -->
+        <div class="trades-summary-grid">
+          <div class="trade-summary-card">
+            <span class="summary-label">Total Trades</span>
+            <strong class="summary-val font-mono text-bright" id="summary-total-trades">0</strong>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Winning / Losing</span>
+            <div class="summary-val-split">
+              <span class="text-green font-mono font-bold" id="summary-win-trades">0 W</span>
+              <span class="text-dim">/</span>
+              <span class="text-red font-mono font-bold" id="summary-loss-trades">0 L</span>
+            </div>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Win Rate</span>
+            <strong class="summary-val font-mono text-cyan" id="summary-win-rate">0.0%</strong>
+          </div>
+          <div class="trade-summary-card card-pnl">
+            <span class="summary-label">Day Net P&amp;L</span>
+            <strong class="summary-val font-mono text-bright" id="summary-day-pnl">₹0.00</strong>
+          </div>
+        </div>
+
+        <!-- Table: Executed Trade Orders -->
+        <div class="table-card">
+          <table class="data-table" id="table-trades-journal">
+            <thead>
+              <tr>
+                <th class="col-idx text-center">#</th>
+                <th class="text-left">TRADE NAME / SYMBOL</th>
+                <th class="text-center">SIDE</th>
+                <th class="text-right">STRIKE</th>
+                <th class="text-right">ENTRY PRICE</th>
+                <th class="text-center">ENTRY TIME (IST &middot; MS)</th>
+                <th class="text-right">EXIT PRICE</th>
+                <th class="text-center">EXIT TIME (IST &middot; MS)</th>
+                <th class="text-right">POINTS</th>
+                <th class="text-right">NET P&amp;L</th>
+                <th class="text-center">PROFIT / EXIT TYPE</th>
+                <th class="text-center">STATUS</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-trades-journal">
+              <tr>
+                <td colspan="12" class="text-center text-muted">Select a date or wait for trades to load...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+      </section>
+    </div> <!-- /tab-trades -->
+
+    <!-- ====================================================================
+         TAB 4: ACTIVITY LOGS / AUDIT TRAIL (Per-Day Logs + CSV Export)
+         ==================================================================== -->
+    <div class="tab-pane" id="tab-logs" style="display: none;">
+      <section class="dash-section">
+        
+        <!-- Controls Bar: Day Selector, Event Filter & Export CSV -->
+        <div class="trades-control-bar">
+          <div class="trades-bar-left">
+            <h2 class="section-title">Activity Logs &middot; Strategy Audit Trail</h2>
+            <span class="section-meta">All algorithmic signals, gate evaluations, entries, exits, risk guards, and clock events</span>
+          </div>
+          <div class="trades-bar-right">
+            <div class="trade-date-picker-wrap">
+              <label for="select-log-date" class="label-date-picker">Date:</label>
+              <select id="select-log-date" class="select-trade-date">
+                <!-- Dynamically populated -->
+              </select>
+            </div>
+            <div class="trade-date-picker-wrap">
+              <label for="select-log-level" class="label-date-picker">Filter:</label>
+              <select id="select-log-level" class="select-trade-date">
+                <option value="ALL">All Events</option>
+                <option value="ENTRY">Entries Only</option>
+                <option value="EXIT">Exits Only</option>
+                <option value="WARNING">Warnings</option>
+                <option value="ERROR">Errors / Feed</option>
+              </select>
+            </div>
+            <button id="btn-export-logs-csv" class="btn btn-sm btn-outline btn-export-csv" title="Download logs as CSV">
+              <span class="btn-icon">📥</span> Export CSV
+            </button>
+            <button id="btn-refresh-logs" class="btn btn-sm btn-outline" title="Refresh logs">
+              <span class="btn-icon">🔄</span> Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Day's Key Metrics Overview -->
+        <div class="trades-summary-grid">
+          <div class="trade-summary-card">
+            <span class="summary-label">Total Events</span>
+            <strong class="summary-val font-mono text-bright" id="summary-total-logs">0</strong>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Entries / Exits</span>
+            <div class="summary-val-split">
+              <span class="text-green font-mono font-bold" id="summary-entries-count">0 Entries</span>
+              <span class="text-dim">/</span>
+              <span class="text-red font-mono font-bold" id="summary-exits-count">0 Exits</span>
+            </div>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Risk Blocks / Guards</span>
+            <strong class="summary-val font-mono text-amber" id="summary-blocks-count">0</strong>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Warnings &amp; System Alerts</span>
+            <strong class="summary-val font-mono text-cyan" id="summary-warnings-count">0</strong>
+          </div>
+        </div>
+
+        <!-- Table: Executed Activity Logs -->
+        <div class="table-card">
+          <table class="data-table" id="table-logs-journal">
+            <thead>
+              <tr>
+                <th class="col-idx text-center">#</th>
+                <th class="text-center" style="width: 130px;">TIMESTAMP (IST)</th>
+                <th class="text-center" style="width: 100px;">LEVEL</th>
+                <th class="text-center" style="width: 180px;">EVENT TYPE</th>
+                <th class="text-left" style="width: 180px;">SYMBOL / UNDERLYING</th>
+                <th class="text-left">ACTION / EVENT MESSAGE</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-logs-journal">
+              <tr>
+                <td colspan="6" class="text-center text-muted">Select a date or wait for logs to load...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+      </section>
+    </div> <!-- /tab-logs -->
 
     <!-- Footer -->
     <footer class="dash-footer">

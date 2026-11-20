@@ -126,6 +126,21 @@ class MarketDatabase:
                     oi_change REAL,
                     confidence TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS strategy_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    alert_date TEXT NOT NULL,
+                    timestamp_ist TEXT NOT NULL,
+                    timestamp_ms INTEGER NOT NULL,
+                    level TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    symbol TEXT,
+                    message TEXT NOT NULL,
+                    details_json TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_alerts_date_time
+                    ON strategy_alerts(alert_date, timestamp_ms DESC);
                 """
             )
             self._connection.commit()
@@ -620,6 +635,71 @@ class MarketDatabase:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def insert_strategy_alert(self, alert: dict[str, Any]) -> int:
+        with self._lock:
+            cur = self._connection.execute(
+                """
+                INSERT INTO strategy_alerts (
+                    alert_date, timestamp_ist, timestamp_ms, level,
+                    alert_type, symbol, message, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    alert["alert_date"],
+                    alert["timestamp_ist"],
+                    alert["timestamp_ms"],
+                    alert.get("level", "INFO"),
+                    alert.get("alert_type", "GENERAL"),
+                    alert.get("symbol", ""),
+                    alert["message"],
+                    alert.get("details_json", "{}"),
+                ),
+            )
+            self._connection.commit()
+            return int(cur.lastrowid or 0)
+
+    def get_strategy_alerts(
+        self,
+        limit: int = 500,
+        alert_date: str | None = None,
+        level: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            clauses: list[str] = []
+            params: list[Any] = []
+            if alert_date:
+                clauses.append("alert_date = ?")
+                params.append(alert_date)
+            if level and level.upper() not in ("ALL", ""):
+                if level.upper() in ("ENTRY", "EXIT"):
+                    clauses.append("alert_type LIKE ?")
+                    params.append(f"%{level.upper()}%")
+                else:
+                    clauses.append("(level = ? OR alert_type LIKE ?)")
+                    params.extend([level.upper(), f"%{level.upper()}%"])
+
+            where_str = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            params.append(limit)
+            query = f"""
+                SELECT * FROM strategy_alerts
+                {where_str}
+                ORDER BY timestamp_ms DESC
+                LIMIT ?
+            """
+            rows = self._connection.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_strategy_alert_dates(self) -> list[str]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT DISTINCT alert_date FROM strategy_alerts
+                WHERE alert_date IS NOT NULL AND alert_date != ''
+                ORDER BY alert_date DESC
+                """
+            ).fetchall()
+        return [r[0] for r in rows if r[0]]
 
     def get_db_stats(self) -> dict[str, Any]:
         """Returns database size, row counts, and disk statistics."""
