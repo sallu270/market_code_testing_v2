@@ -8,3 +8,25 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+
+*.zip
+
+# Secrets & Environment variables
+.env
+.env.*
+*.env
+**/.env
+
+# Documentation & Office files
+docx/
+*.docx
+**/*.docx
+*.md
+**/*.md
+!README.md
+!**/README.md
+

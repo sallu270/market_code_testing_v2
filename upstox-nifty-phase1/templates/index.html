@@ -1,428 +1,755 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta
-        name="description"
-        content="Live Upstox NIFTY tick and one-minute candle monitoring dashboard."
-    >
-    <title>NIFTY Phase 1 Data Monitor</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-        rel="stylesheet"
-    >
-    <link
-        rel="stylesheet"
-        href="{{ url_for('static', filename='css/styles.css') }}?v=2.1.0"
-    >
-    <script
-        src="{{ url_for('static', filename='js/lightweight-charts.standalone.production.js') }}"
-        defer
-    ></script>
-    <script
-        src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"
-        defer
-    ></script>
-    <script
-        src="{{ url_for('static', filename='js/dashboard.js') }}?v=2.1.0"
-        defer
-    ></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OI Conditions Dashboard | NIFTY · BANK NIFTY · SENSEX · Stocks</title>
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
-<body>
-<header class="topbar">
-    <div class="topbar__inner">
-        <div class="identity">
-            <div class="identity__mark" aria-hidden="true">
-                <svg viewBox="0 0 24 24">
-                    <path d="M4 18h3V9H4v9Zm6 0h4V4h-4v14Zm7 0h3v-6h-3v6Z"/>
-                </svg>
-            </div>
-            <div>
-                <p class="eyebrow">UPSTOX · PHASE 1</p>
-                <h1>NIFTY Data Monitor</h1>
-            </div>
-        </div>
+<body class="theme-dark">
+  <div class="dashboard-container">
 
-        <div class="connection">
-            <span
-                id="statusDot"
-                class="connection__dot connection__dot--waiting"
-                aria-hidden="true"
-            ></span>
-            <div>
-                <strong id="connectionState">Starting</strong>
-                <span id="connectionMessage">Waiting for feed status</span>
-            </div>
+    <!-- Top Header -->
+    <header class="dashboard-header">
+      <div class="header-left">
+        <h1 class="dashboard-title">OI Conditions Dashboard</h1>
+        <p class="dashboard-subtitle">CE/PE change in OI &middot; option premium change &middot; futures price and OI change &middot; 16 conditions + futures gate</p>
+      </div>
+      <div class="header-right">
+        <div class="status-pill status-feed" id="feed-status-pill">
+          <span class="status-dot dot-live" id="feed-status-dot"></span>
+          <span id="feed-status-text">Feed live</span>
         </div>
-    </div>
-</header>
-
-<main class="dashboard">
-    {% if not configured %}
-    <section class="notice notice--warning" role="alert">
-        <strong>Configuration required</strong>
-        <span>
-            Add your Upstox access token and instrument keys to the
-            <code>.env</code> file, then restart the Python application.
-        </span>
-    </section>
-    {% endif %}
-
-    <!-- GCHART TOP STRIP (MATCHING USER SCREENSHOT) -->
-    <header class="gchart-header-strip">
-        <div class="gchart-ticker-group">
-            <span id="gchartClock" class="gchart-clock">09:15:00</span>
-            <span id="gchartSpot" class="gchart-spot-ticker">NC=— (—)</span>
-            <span id="stratStatusBadge" class="gchart-state-badge state-setup">SETUP</span>
-            <span id="gchartExpiry" style="color: #94a3b8; font-size: 0.8rem; font-family: monospace;">EXP: 09 NOV 2026</span>
+        <div class="status-pill status-time" id="clock-display">--:--:-- IST</div>
+        <div class="status-pill status-baseline" id="baseline-display">Baseline: 09:15 snapshot</div>
+        <div class="status-pill status-update" id="oi-update-display">OI update: #1 &middot; next ~ 3m</div>
+        <div class="status-pill status-mode" id="mode-display">PAPER MODE</div>
+        
+        <div class="header-actions">
+          <button class="btn btn-sm btn-outline btn-arm-idx" data-key="NSE_INDEX|Nifty 50" id="btn-arm-nifty" title="Force lock & arm Nifty 50">Arm Nifty</button>
+          <button class="btn btn-sm btn-outline btn-arm-idx" data-key="NSE_INDEX|Nifty Bank" id="btn-arm-banknifty" title="Force lock & arm Bank Nifty">Arm BankNifty</button>
+          <button class="btn btn-sm btn-outline btn-arm-idx" data-key="BSE_INDEX|SENSEX" id="btn-arm-sensex" title="Force lock & arm Sensex">Arm Sensex</button>
+          <button class="btn btn-sm btn-outline" id="btn-arm-all" title="Force lock & arm all indices">Arm All</button>
+          <button class="btn btn-sm btn-outline" id="btn-re-eval" title="Trigger instant evaluation">Evaluate</button>
+          <button class="btn btn-sm btn-danger" id="btn-emergency-exit" title="Emergency squareoff all positions">Exit All</button>
         </div>
-
-        <div id="gchartPositionPill" class="gchart-pos-strip">
-            <strong id="stratCurrentPosition" style="color: #94a3b8;">FLAT (NO POSITION)</strong>
-            <span id="stratPositionDetail" style="color: #64748b; font-size: 0.8rem;">Watching 8 ITM candidates at 09:15</span>
-            <span id="stratNetPnl" style="font-weight: 800; margin-left: 8px;">₹0.00</span>
-            <span id="stratPnlPoints" style="font-size: 0.78rem; color: #94a3b8;">(0.00 pts)</span>
-        </div>
-
-        <div class="gchart-actions-group">
-            <button id="btnStratArmNow" class="button button--primary" type="button" title="Force arm bot immediately for live testing">
-                ⚡ Arm Now (Test)
-            </button>
-            <button id="btnStratReset" class="button button--secondary" type="button" title="Reset bot state back to Planning">
-                🔄 Reset
-            </button>
-            <button id="btnStratExit" class="button button--danger" type="button" title="Manual Exit active position immediately">
-                ⛔ Exit Now
-            </button>
-            <button id="btnToggleOptionChain" class="button button--secondary" type="button" title="Toggle Full Option Chain view">
-                📊 Option Chain
-            </button>
-        </div>
+      </div>
     </header>
 
-    <!-- MAIN GCHART SPLIT WORKSPACE -->
-    <div class="gchart-workspace" style="margin-top: 12px;">
-        <!-- LEFT: GCHART CANDLESTICK CHART WINDOW -->
-        <section class="gchart-window">
-            <div class="gchart-window-bar">
-                <div class="gchart-window-title">
-                    <span style="color: #53e0c1; font-weight: 800;">GChart</span>
-                    <span style="font-family: monospace;">· NIFTY 50 REALTIME CANDLES</span>
-                    <span id="chartLiveBadge" class="live-pill" style="padding: 1px 7px; font-size: 0.65rem;">
-                        <span class="live-pill__dot"></span>
-                        <span>LIVE</span>
-                    </span>
-                </div>
-
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <!-- Floating/Anchored Period Keypad matching user screenshot -->
-                    <div class="gchart-period-keypad" role="group" aria-label="Chart Period Select">
-                        <button type="button" class="gchart-key-btn tf-btn" data-timeframe="tick">0</button>
-                        <button type="button" class="gchart-key-btn tf-btn tf-btn--active active" data-timeframe="1m">1</button>
-                        <button type="button" class="gchart-key-btn tf-btn" data-timeframe="3m">3</button>
-                        <button type="button" class="gchart-key-btn tf-btn" data-timeframe="5m">5</button>
-                        <button type="button" class="gchart-key-btn tf-btn" data-timeframe="15m">15</button>
-                        <button type="button" class="gchart-key-btn tf-btn" data-timeframe="1d">D</button>
-                    </div>
-
-                    <button id="btnRefreshChart" class="button button--secondary" type="button" title="Refresh Chart Scale" style="padding: 4px 10px; font-size: 0.75rem;">
-                        ↻
-                    </button>
-
-                    <select id="instrumentSelect" style="display: none;">
-                        {% for instrument in instrument_keys %}
-                        <option value="{{ instrument }}" {% if loop.first %}selected{% endif %}>{{ instrument }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-            </div>
-
-            <div class="gchart-canvas-wrap">
-                <div id="tvChartContainer" style="width: 100%; height: 100%;"></div>
-                <div id="chartEmpty" class="empty-state">
-                    <strong>Waiting for market data</strong>
-                    <span>Real-time candlestick ticks will render here.</span>
-                </div>
-            </div>
-
-            <!-- TradingView Style Live OHLC bar -->
-            <div id="chartOhlcLegend" style="display: flex; gap: 14px; padding: 6px 14px; background: #131722; border-top: 1px solid #2a2e39; font-size: 0.8rem; font-family: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, monospace; color: #787b86; flex-wrap: wrap; align-items: center;">
-                <span style="font-weight: 700; color: #d1d4dc;">NIFTY 50</span>
-                <span>O <strong id="openValue" style="color: #d1d4dc;">—</strong></span>
-                <span>H <strong id="highValue" style="color: #089981;">—</strong></span>
-                <span>L <strong id="lowValue" style="color: #f23645;">—</strong></span>
-                <span>C <strong id="closeValue" style="color: #d1d4dc;">—</strong></span>
-                <span id="ohlcChangeWrapper" style="display: inline-flex; gap: 4px;">Chg <strong id="ohlcChange" style="color: #089981;">0.00 (0.00%)</strong></span>
-                <span>Vol <strong id="volumeValue" style="color: #d1d4dc;">—</strong></span>
-                <span style="margin-left: auto;">Ticks: <strong id="storedCounts" style="color: #2962ff;">0</strong></span>
-            </div>
-        </section>
-
-        <!-- RIGHT: TICK QUERY WINDOW (EXACT MATCH WITH USER SCREENSHOT) -->
-        <section class="tickquery-window">
-            <div class="tickquery-titlebar">
-                <span>Tick Query - INTRADAY INDICES</span>
-                <span class="tickquery-win-btns">_ □ ✕</span>
-            </div>
-
-            <div class="tickquery-subtabs">
-                <button id="btnTqResult" class="tq-tab-btn active" type="button">Result</button>
-                <button id="btnTqTrades" class="tq-tab-btn" type="button">Trades Journal</button>
-                <button id="btnTqSettings" class="tq-tab-btn" type="button">Settings</button>
-            </div>
-
-            <!-- SUBTAB 1: RESULT (8 ITM CANDIDATES TABLE) -->
-            <div id="tqPaneResult">
-                <div id="tqPositionBanner" style="padding: 8px 12px; background: #07111e; border-bottom: 1px solid #1e293b; font-size: 0.8rem; display: flex; justify-content: space-between; align-items: center; font-family: monospace;">
-                    <span id="tqPosSummary" style="color: #94a3b8;">Watching 8 ITM Candidates at 09:15:00</span>
-                    <span id="stratTotalTrades" style="color: #53e0c1; font-weight: 700;">0 / 1 Traded</span>
-                </div>
-
-                <div class="tq-table-wrap">
-                    <table class="tq-table" id="stratLockedTable">
-                        <thead>
-                            <tr>
-                                <th style="text-align: left;">Time</th>
-                                <th style="text-align: left;">Name</th>
-                                <th style="text-align: right;">Rate</th>
-                                <th style="text-align: right;">Diff</th>
-                                <th style="text-align: right;">Qty</th>
-                                <th style="text-align: right;">Spread%</th>
-                            </tr>
-                        </thead>
-                        <tbody id="stratLockedBody">
-                            <tr>
-                                <td colspan="6" style="text-align: center; color: var(--muted); padding: 30px;">
-                                    Awaiting spot price to plan 8 ITM candidates (4 CE below spot, 4 PE above spot)...
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Footer Summary of the Tick Query window -->
-                <div style="padding: 6px 12px; background: #060b13; border-top: 1px solid #162030; font-size: 0.75rem; color: #64748b; font-family: monospace; display: flex; justify-content: space-between;">
-                    <span>Rule R8: Positive tick (Diff &gt; 0) at 09:15:00</span>
-                    <span>Rule R14: Lowest Spread % Winner</span>
-                </div>
-            </div>
-
-            <!-- SUBTAB 2: TRADES JOURNAL -->
-            <div id="tqPaneTrades" hidden style="padding: 10px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <span style="font-size: 0.8rem; color: #94a3b8; font-weight: 700; font-family: monospace;">EXECUTED TRADES JOURNAL</span>
-                    <div style="display: flex; gap: 8px;">
-                        <a href="/api/strategy/export" class="button button--secondary" style="padding: 3px 8px; font-size: 0.75rem;" download="paper_trades.csv">
-                            📥 Trades CSV
-                        </a>
-                        <a href="/api/strategy/export-ticks" class="button button--secondary" style="padding: 3px 8px; font-size: 0.75rem;" download="today_ticks.csv">
-                            📥 Ticks CSV
-                        </a>
-                    </div>
-                </div>
-                <div class="tq-table-wrap">
-                    <table class="tq-table" id="stratTradesTable">
-                        <thead>
-                            <tr>
-                                <th style="text-align: left;">ID</th>
-                                <th style="text-align: center;">Side</th>
-                                <th style="text-align: left;">Symbol</th>
-                                <th style="text-align: right;">Entry</th>
-                                <th style="text-align: right;">Exit</th>
-                                <th style="text-align: right;">P&L (₹)</th>
-                                <th style="text-align: center;">Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="stratTradesBody">
-                            <tr>
-                                <td colspan="7" style="text-align: center; color: var(--muted); padding: 25px;">
-                                    No trades executed today.
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- SUBTAB 3: SETTINGS -->
-            <div id="tqPaneSettings" hidden style="padding: 16px;">
-                <div style="display: flex; flex-direction: column; gap: 12px; font-size: 0.84rem;">
-                    <label style="display: flex; justify-content: space-between; align-items: center;">
-                        <span style="color: #cbd5e1;">Lots (65 shares/lot)</span>
-                        <input type="number" id="stratLots" value="1" min="1" max="50" style="width: 80px; background: #081220; border: 1px solid #1e293b; color: #fff; padding: 4px 8px; border-radius: 6px; font-family: monospace;">
-                    </label>
-
-                    <label style="display: flex; justify-content: space-between; align-items: center;">
-                        <span style="color: #cbd5e1;">Limit Order Buffer (₹)</span>
-                        <input type="number" id="stratOrderBuffer" value="0.50" step="0.05" style="width: 80px; background: #081220; border: 1px solid #1e293b; color: #fff; padding: 4px 8px; border-radius: 6px; font-family: monospace;">
-                    </label>
-
-                    <label style="display: flex; justify-content: space-between; align-items: center;">
-                        <span style="color: #cbd5e1;">Max Spread %</span>
-                        <input type="number" id="stratMaxSpread" value="3.0" step="0.5" style="width: 80px; background: #081220; border: 1px solid #1e293b; color: #fff; padding: 4px 8px; border-radius: 6px; font-family: monospace;">
-                    </label>
-
-                    <label style="display: flex; justify-content: space-between; align-items: center;">
-                        <span style="color: #cbd5e1;">Trading Mode</span>
-                        <select id="stratMode" style="width: 90px; background: #081220; border: 1px solid #1e293b; color: #fff; padding: 4px 8px; border-radius: 6px; font-family: monospace;">
-                            <option value="paper" selected>Paper</option>
-                            <option value="live">Live</option>
-                        </select>
-                    </label>
-
-                    <div style="margin-top: 10px; display: flex; justify-content: space-between; align-items: center;">
-                        <button id="btnSaveStratConfig" class="button button--primary" type="button" style="padding: 6px 16px; font-size: 0.8rem;">
-                            Save Settings
-                        </button>
-                        <span id="stratConfigStatus" style="font-size: 0.75rem; color: #94a3b8;">Ready</span>
-                    </div>
-                </div>
-            </div>
-        </section>
+    <!-- Sub-header Notice / Reference Info -->
+    <div class="system-bar">
+      <span>Layout reference for the developer. All live values, buildup, condition, gate, rank, and action are calculated dynamically from Upstox feed ticks.</span>
+      <div class="system-bar-right">
+        <span id="trades-counter-text">Today's Trades: 0 | P&L: ₹0.00</span>
+      </div>
     </div>
 
-    <!-- OPTIONAL FULL OPTION CHAIN VIEW (TOGGLED VIA BUTTON) -->
-    <div id="viewOptionChain" class="view-container" hidden style="margin-top: 20px;">
-        <section class="chain-header-panel">
-            <div class="chain-meta-grid">
-                <article class="metric-card metric-card--accent">
-                    <span class="metric-card__label">NIFTY 50 SPOT</span>
-                    <strong id="chainSpotPrice">—</strong>
-                    <span id="chainSpotTime">Live from Upstox</span>
-                </article>
+    <!-- Main App Navigation Tabs (Clean Navigation) -->
+    <nav class="app-nav-bar">
+      <div class="nav-tabs-group">
+        <button class="nav-tab active" data-tab="tab-dashboard" id="nav-btn-dashboard">
+          <span class="nav-tab-icon">📊</span>
+          <span class="nav-tab-title">Live Dashboard</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-trades" id="nav-btn-trades">
+          <span class="nav-tab-icon">📒</span>
+          <span class="nav-tab-title">Trade Book</span>
+          <span class="nav-tab-badge" id="badge-trades-count">0</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-logs" id="nav-btn-logs">
+          <span class="nav-tab-icon">📜</span>
+          <span class="nav-tab-title">Activity Logs</span>
+          <span class="nav-tab-badge" id="badge-logs-count">0</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-settings" id="nav-btn-settings">
+          <span class="nav-tab-icon">⚙️</span>
+          <span class="nav-tab-title">Bot Settings</span>
+          <span class="nav-tab-badge">CONTROLS</span>
+        </button>
+      </div>
+      <div class="nav-meta-info">
+        <span class="text-dim">Active View:</span>
+        <strong class="text-bright font-mono" id="nav-current-tab-text">LIVE DASHBOARD</strong>
+      </div>
+    </nav>
 
-                <article class="metric-card">
-                    <span class="metric-card__label">ATM STRIKE</span>
-                    <strong id="chainAtmStrike">—</strong>
-                    <span id="chainAtmType">At-The-Money Anchor</span>
-                </article>
+    <!-- ====================================================================
+         TAB 1: MAIN LIVE DASHBOARD (Clean Tables Only - No Controls Bar)
+         ==================================================================== -->
+    <div class="tab-pane active" id="tab-dashboard">
 
-                <article class="metric-card">
-                    <span class="metric-card__label">PCR (PUT / CALL RATIO)</span>
-                    <strong id="chainPcr">—</strong>
-                    <span id="chainPcrSentiment">OI Sentiment</span>
-                </article>
+      <!-- Section 1: Indices · ATM ±1 summed -->
+      <section class="dash-section">
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <h2 class="section-title">Indices &middot; ATM &plusmn;1 summed</h2>
+            <span class="section-meta">OI in lakh &middot; 09:15 baseline &middot; Futures = current month</span>
+          </div>
+        </div>
+        <div class="table-card">
+          <table class="data-table" id="table-indices">
+            <thead>
+              <tr>
+                <th class="col-inst text-left">INSTRUMENT<br><span class="th-sub">NAME &middot; SPOT &middot; ATM</span></th>
+                <th colspan="4" class="col-grp-ce text-center">CALLS (CE)</th>
+                <th colspan="4" class="col-grp-pe text-center">PUTS (PE)</th>
+                <th colspan="3" class="col-grp-sig text-center">OPTION SIGNAL</th>
+                <th colspan="4" class="col-grp-fut text-center">FUTURES</th>
+                <th colspan="3" class="col-grp-dec text-center">DECISION</th>
+              </tr>
+              <tr class="sub-headers">
+                <th class="text-left"></th>
+                <!-- CE -->
+                <th class="text-right">&Delta;OI</th>
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- PE -->
+                <th class="text-right">&Delta;OI</th>
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- OPTION SIGNAL -->
+                <th class="text-right">I</th>
+                <th class="text-center">COND</th>
+                <th class="text-center">SIGNAL</th>
+                <!-- FUTURES -->
+                <th class="text-right">PRICE %</th>
+                <th class="text-right">OI %</th>
+                <th class="text-center">BUILD-UP</th>
+                <th class="text-center">GATE</th>
+                <!-- DECISION -->
+                <th class="text-center">RANK &middot; LOTS</th>
+                <th class="text-center">HOLD</th>
+                <th class="text-center">ACTION</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-indices">
+              <!-- Dynamically populated via JS -->
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-                <article class="metric-card">
-                    <span class="metric-card__label">TOTAL OPEN INTEREST</span>
-                    <strong id="chainTotalOi">—</strong>
-                    <span id="chainOiSplit">CE: — | PE: —</span>
-                </article>
+      <!-- Section 2: NIFTY 50 stocks · Top Bullish -->
+      <section class="dash-section">
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <h2 class="section-title">NIFTY 50 stocks &middot; Top <span id="heading-count-bullish">5</span> Bullish</h2>
+            <span class="section-meta">Sorted by Power Score / CLV (highest score first) &middot; only tradeable rows (gate passed)</span>
+          </div>
+        </div>
+        <div class="table-card">
+          <table class="data-table" id="table-stocks-bullish">
+            <thead>
+              <tr>
+                <th class="col-idx text-center">#</th>
+                <th class="col-sym text-left">SYMBOL</th>
+                <th class="col-score text-right">SCORE</th>
+                <th colspan="3" class="col-grp-ce text-center">CALLS (CE)</th>
+                <th colspan="3" class="col-grp-pe text-center">PUTS (PE)</th>
+                <th colspan="2" class="col-grp-sig text-center">OPTION</th>
+                <th colspan="3" class="col-grp-fut text-center">FUTURES</th>
+                <th colspan="2" class="col-grp-dec text-center">DECISION</th>
+              </tr>
+              <tr class="sub-headers">
+                <th></th>
+                <th></th>
+                <th></th>
+                <!-- CE -->
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- PE -->
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- OPTION -->
+                <th class="text-right">I</th>
+                <th class="text-center">COND</th>
+                <!-- FUTURES -->
+                <th class="text-right">PRICE %</th>
+                <th class="text-right">OI %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- DECISION -->
+                <th class="text-center">RANK &middot; LOTS</th>
+                <th class="text-center">ACTION</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-stocks-bullish">
+              <!-- Dynamically populated via JS -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Section 3: NIFTY 50 stocks · Top Bearish -->
+      <section class="dash-section">
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <h2 class="section-title">NIFTY 50 stocks &middot; Top <span id="heading-count-bearish">5</span> Bearish</h2>
+            <span class="section-meta">Sorted by Power Score (most negative first)</span>
+          </div>
+        </div>
+        <div class="table-card">
+          <table class="data-table" id="table-stocks-bearish">
+            <thead>
+              <tr>
+                <th class="col-idx text-center">#</th>
+                <th class="col-sym text-left">SYMBOL</th>
+                <th class="col-score text-right">SCORE</th>
+                <th colspan="3" class="col-grp-ce text-center">CALLS (CE)</th>
+                <th colspan="3" class="col-grp-pe text-center">PUTS (PE)</th>
+                <th colspan="2" class="col-grp-sig text-center">OPTION</th>
+                <th colspan="3" class="col-grp-fut text-center">FUTURES</th>
+                <th colspan="2" class="col-grp-dec text-center">DECISION</th>
+              </tr>
+              <tr class="sub-headers">
+                <th></th>
+                <th></th>
+                <th></th>
+                <!-- CE -->
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- PE -->
+                <th class="text-right">&Delta;OI %</th>
+                <th class="text-right">PRICE %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- OPTION -->
+                <th class="text-right">I</th>
+                <th class="text-center">COND</th>
+                <!-- FUTURES -->
+                <th class="text-right">PRICE %</th>
+                <th class="text-right">OI %</th>
+                <th class="text-center">BUILD-UP</th>
+                <!-- DECISION -->
+                <th class="text-center">RANK &middot; LOTS</th>
+                <th class="text-center">ACTION</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-stocks-bearish">
+              <!-- Dynamically populated via JS -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Section 4: Split Grid: Strike Detail (ATM ±1) + Alerts -->
+      <div class="grid-split-2">
+
+        <!-- Left: Strike Detail Table (ATM ±1) -->
+        <div class="card card-strike-detail">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <h3 class="card-title" id="strike-table-title">NIFTY 50 &middot; strike detail (ATM &plusmn;1)</h3>
+              <span class="card-meta">Live ATM &plusmn;1 contracts for selected index</span>
+            </div>
+            <div class="index-tabs" id="strike-index-tabs">
+              <button class="tab-btn active" data-index="NSE_INDEX|Nifty 50">NIFTY</button>
+              <button class="tab-btn" data-index="NSE_INDEX|Nifty Bank">BANK NIFTY</button>
+              <button class="tab-btn" data-index="BSE_INDEX|SENSEX">SENSEX</button>
+            </div>
+          </div>
+          <div class="table-card">
+            <table class="data-table" id="table-strikes">
+              <thead>
+                <tr>
+                  <th colspan="6" class="col-grp-ce text-center">CALLS (CE)</th>
+                  <th class="col-strike text-center">STRIKE</th>
+                  <th colspan="6" class="col-grp-pe text-center">PUTS (PE)</th>
+                </tr>
+                <tr class="sub-headers">
+                  <th class="text-right">OI (L)</th>
+                  <th class="text-right">&Delta;OI (L)</th>
+                  <th class="text-right">&Delta;OI %</th>
+                  <th class="text-right">PRICE %</th>
+                  <th class="text-right">LTP (₹)</th>
+                  <th class="text-center">BU</th>
+                  <th class="text-center font-bold">ATM</th>
+                  <th class="text-center">BU</th>
+                  <th class="text-right">LTP (₹)</th>
+                  <th class="text-right">PRICE %</th>
+                  <th class="text-right">&Delta;OI %</th>
+                  <th class="text-right">&Delta;OI (L)</th>
+                  <th class="text-right">OI (L)</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-strikes">
+                <!-- Dynamically populated via JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Right: Execution Engine Alerts & Activity Log -->
+        <div class="card card-alerts">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <h3 class="card-title">Strategy Engine Alerts &middot; Activity Log</h3>
+              <span class="card-meta">Live strategy signals, gate evaluations, and entries</span>
+            </div>
+            <button class="btn btn-xs btn-outline" id="btn-clear-alerts">Clear</button>
+          </div>
+          <div class="alerts-stream" id="alerts-container">
+            <div class="alert-empty-state">Listening for strategy signals and market events...</div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Section 5: Strategy Reference: 16 OI Buildup Conditions & Futures Gate -->
+      <section class="rules-section">
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <h3 class="section-title">Strategy Reference &middot; 16 OI Buildup Conditions &amp; Futures Gate</h3>
+            <span class="section-meta">Complete deterministic decision matrix for Phase 1</span>
+          </div>
+        </div>
+        <div class="rules-grid">
+
+          <!-- Card 1: 16 Conditions -->
+          <div class="rule-card">
+            <h4 class="rule-card-title">16 Conditions (CE vs PE Buildup)</h4>
+            <div class="rules-list">
+              <div class="rule-item rule-ce"><span>1. SC + SB &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-ce"><span>2. SC + LU &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-ce"><span>3. LB + SB &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-ce"><span>4. LB + LU &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-pe"><span>5. SB + SC &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-pe"><span>6. SB + LB &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-pe"><span>7. LU + SC &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;</span></div>
+              <div class="rule-item rule-pe"><span>8. LU + LB &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;</span></div>
+              <div class="rule-item text-muted"><span>9&ndash;16. All other combinations</span> <span class="rule-badge">No trade</span></div>
+            </div>
+          </div>
+
+          <!-- Card 2: Buildup Classification -->
+          <div class="rule-card">
+            <h4 class="rule-card-title">Buildup Classification</h4>
+            <div class="buildup-defs">
+              <div class="bu-def-item">
+                <span class="bu-badge bu-lb">LB</span>
+                <div><strong>Long Buildup:</strong> &Delta;OI &gt; +0.10% &amp; Price &ge; +0.50%</div>
+              </div>
+              <div class="bu-def-item">
+                <span class="bu-badge bu-sc">SC</span>
+                <div><strong>Short Covering:</strong> &Delta;OI &le; -0.10% &amp; Price &ge; +0.50%</div>
+              </div>
+              <div class="bu-def-item">
+                <span class="bu-badge bu-sb">SB</span>
+                <div><strong>Short Buildup:</strong> &Delta;OI &gt; +0.10% &amp; Price &le; -0.50%</div>
+              </div>
+              <div class="bu-def-item">
+                <span class="bu-badge bu-lu">LU</span>
+                <div><strong>Long Unwinding:</strong> &Delta;OI &le; -0.10% &amp; Price &le; -0.50%</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 3: Futures gate and final rank -->
+          <div class="rule-card">
+            <h4 class="rule-card-title">Futures gate and final rank</h4>
+            <div class="gate-rule-box">
+              <span><strong>CE Buy</strong> needs futures <span class="bu-badge bu-lb">LB</span> or <span class="bu-badge bu-sc">SC</span></span><br>
+              <span><strong>PE Buy</strong> needs futures <span class="bu-badge bu-sb">SB</span> or <span class="bu-badge bu-lu">LU</span></span><br>
+              <span class="text-muted">Else blocked by Futures Gate</span>
+            </div>
+            <div class="rank-sizing-matrix">
+              <div><span class="text-gold">&starf;&starf;&starf;&starf;</span> LB/SB &rarr; &starf;&starf;&starf;&starf; Full lots</div>
+              <div><span class="text-gold">&starf;&starf;&starf;</span> SC/LU &rarr; &starf;&starf;&starf; Full lots</div>
+              <div><span class="text-gold">&starf;&starf;</span> LB/SB &rarr; &starf;&starf; Normal lots</div>
+              <div><span class="text-gold">&starf;&starf;</span> SC/LU &rarr; &starf;&starf; Half lots</div>
+            </div>
+            <div class="rule-footer-note">
+              Signal must hold 2 consecutive OI updates.<br>
+              <strong>SENSEX:</strong> futures gate OFF, &starf;&starf;&starf; signals only.
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </div> <!-- /tab-dashboard -->
+
+
+    <!-- ====================================================================
+         TAB 2: BOT SETTINGS & CONTROLS (Dedicated Configuration View)
+         ==================================================================== -->
+    <div class="tab-pane" id="tab-settings" style="display: none;">
+      <div class="settings-container">
+        
+        <div class="settings-header">
+          <div class="settings-header-left">
+            <h2 class="settings-title">⚙️ Bot Settings & Strategy Configuration</h2>
+            <p class="settings-subtitle">Manage pre-defined stock screener limits, lot sizing rules, index allocations, and strategy risk parameters. All changes auto-save instantly.</p>
+          </div>
+          <div class="settings-header-right">
+            <button class="btn btn-sm btn-outline" id="btn-back-to-dashboard" title="Switch back to Live Dashboard">← Return to Dashboard</button>
+          </div>
+        </div>
+
+        <!-- Pre-Defined Trading Controls Bar (Moved into Bot Settings) -->
+        <div class="quick-controls-card settings-qc-card">
+          <div class="qc-header">
+            <div class="qc-header-left">
+              <span class="qc-badge">PRE-DEFINED TRADING CONTROLS</span>
+              <span class="qc-sub">Click any pill to adjust today's stock screener limits and lot sizing (instant & auto-saved)</span>
+            </div>
+            <div class="qc-header-right" id="qc-feedback">Ready</div>
+          </div>
+          <div class="qc-grid">
+            <!-- Bullish Stocks Limit -->
+            <div class="qc-group" data-param="max_bullish_stocks">
+              <div class="qc-label-wrap">
+                <span class="qc-label">BULLISH STOCKS TODAY</span>
+                <span class="qc-current-val text-green font-bold" id="lbl-val-bullish">5</span>
+              </div>
+              <div class="pill-group" id="pill-bullish-stocks">
+                <button class="pill-btn" data-param="max_bullish_stocks" data-val="1">1</button>
+                <button class="pill-btn" data-param="max_bullish_stocks" data-val="2">2</button>
+                <button class="pill-btn" data-param="max_bullish_stocks" data-val="3">3</button>
+                <button class="pill-btn active" data-param="max_bullish_stocks" data-val="5">5</button>
+              </div>
             </div>
 
-            <div class="chain-controls-bar">
-                <div class="chain-controls-group">
-                    <label class="field field--compact">
-                        <span>Underlying Index</span>
-                        <select id="optionIndexSelect" aria-label="Select underlying index">
-                            <option value="NSE_INDEX|Nifty 50" selected>NIFTY 50</option>
-                        </select>
-                    </label>
+            <!-- Bearish Stocks Limit -->
+            <div class="qc-group" data-param="max_bearish_stocks">
+              <div class="qc-label-wrap">
+                <span class="qc-label">BEARISH STOCKS TODAY</span>
+                <span class="qc-current-val text-red font-bold" id="lbl-val-bearish">5</span>
+              </div>
+              <div class="pill-group" id="pill-bearish-stocks">
+                <button class="pill-btn" data-param="max_bearish_stocks" data-val="1">1</button>
+                <button class="pill-btn" data-param="max_bearish_stocks" data-val="2">2</button>
+                <button class="pill-btn" data-param="max_bearish_stocks" data-val="3">3</button>
+                <button class="pill-btn active" data-param="max_bearish_stocks" data-val="5">5</button>
+              </div>
+            </div>
 
-                    <label class="field field--compact">
-                        <span>Expiry Date</span>
-                        <select id="optionExpirySelect" aria-label="Select expiry date">
-                            <option value="">Loading expiries...</option>
-                        </select>
-                    </label>
+            <!-- Full Lots -->
+            <div class="qc-group" data-param="lots_full">
+              <div class="qc-label-wrap">
+                <span class="qc-label">FULL LOT (★★★ / ★★★★)</span>
+                <span class="qc-current-val text-gold font-bold" id="lbl-val-full">1</span>
+              </div>
+              <div class="pill-group" id="pill-lots-full">
+                <button class="pill-btn active" data-param="lots_full" data-val="1">1</button>
+                <button class="pill-btn" data-param="lots_full" data-val="2">2</button>
+                <button class="pill-btn" data-param="lots_full" data-val="3">3</button>
+                <button class="pill-btn" data-param="lots_full" data-val="4">4</button>
+                <button class="pill-btn" data-param="lots_full" data-val="5">5</button>
+              </div>
+            </div>
 
-                    <label class="field field--compact">
-                        <span>Strikes Range</span>
-                        <select id="strikeRangeSelect" aria-label="Filter strike range">
-                            <option value="10">ATM ± 10 Strikes</option>
-                            <option value="15" selected>ATM ± 15 Strikes</option>
-                            <option value="25">ATM ± 25 Strikes</option>
-                            <option value="all">All Strikes (100+)</option>
-                        </select>
-                    </label>
+            <!-- Normal Lots -->
+            <div class="qc-group" data-param="lots_normal">
+              <div class="qc-label-wrap">
+                <span class="qc-label">NORMAL LOT (★★)</span>
+                <span class="qc-current-val text-blue font-bold" id="lbl-val-normal">1</span>
+              </div>
+              <div class="pill-group" id="pill-lots-normal">
+                <button class="pill-btn active" data-param="lots_normal" data-val="1">1</button>
+                <button class="pill-btn" data-param="lots_normal" data-val="2">2</button>
+                <button class="pill-btn" data-param="lots_normal" data-val="3">3</button>
+                <button class="pill-btn" data-param="lots_normal" data-val="4">4</button>
+                <button class="pill-btn" data-param="lots_normal" data-val="5">5</button>
+              </div>
+            </div>
+
+            <!-- Scalp Lots -->
+            <div class="qc-group" data-param="lots_scalp">
+              <div class="qc-label-wrap">
+                <span class="qc-label">SCALP / HALF LOT</span>
+                <span class="qc-current-val text-purple font-bold" id="lbl-val-scalp">1</span>
+              </div>
+              <div class="pill-group" id="pill-lots-scalp">
+                <button class="pill-btn active" data-param="lots_scalp" data-val="1">1</button>
+                <button class="pill-btn" data-param="lots_scalp" data-val="2">2</button>
+                <button class="pill-btn" data-param="lots_scalp" data-val="3">3</button>
+                <button class="pill-btn" data-param="lots_scalp" data-val="4">4</button>
+                <button class="pill-btn" data-param="lots_scalp" data-val="5">5</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Secondary Settings Grid -->
+        <div class="settings-grid-2">
+          <!-- Card: Index Lots -->
+          <div class="settings-card settings-card-lots">
+            <h3 class="settings-card-title">Indices Default Lot Allocation</h3>
+            <p class="settings-card-sub">Base lot sizing assigned when trading each specific index.</p>
+            <div class="settings-rows">
+              <div class="settings-row row-nifty" data-idx="NSE_INDEX|Nifty 50">
+                <div class="row-info">
+                  <span class="idx-color-dot dot-nifty"></span>
+                  <div>
+                    <strong class="font-bold text-bright idx-name">NIFTY 50</strong>
+                    <span class="text-dim font-mono text-xs">(Lot Size: 65)</span>
+                  </div>
                 </div>
-
-                <div class="chain-controls-actions">
-                    <div class="live-pill">
-                        <span class="live-pill__dot"></span>
-                        <span>LIVE (REAL-TIME)</span>
-                    </div>
-
-                    <button id="btnRefreshChain" class="button button--secondary" type="button" title="Force refresh option chain">
-                        Refresh
-                    </button>
-
-                    <span id="chainStatusMsg" class="chain-status-text">Streaming ms ticks</span>
+                <div class="row-right">
+                  <div class="idx-selected-badge badge-nifty" id="badge-lots-NSE_INDEX|Nifty 50">2 Lots (130 Qty)</div>
+                  <div class="pill-group idx-pill-group pill-group-nifty" data-idx-key="NSE_INDEX|Nifty 50">
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty 50" data-val="1">1</button>
+                    <button class="pill-btn btn-idx-lot active" data-key="NSE_INDEX|Nifty 50" data-val="2">2</button>
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty 50" data-val="3">3</button>
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty 50" data-val="5">5</button>
+                  </div>
                 </div>
+              </div>
+
+              <div class="settings-row row-banknifty" data-idx="NSE_INDEX|Nifty Bank">
+                <div class="row-info">
+                  <span class="idx-color-dot dot-banknifty"></span>
+                  <div>
+                    <strong class="font-bold text-bright idx-name">BANK NIFTY</strong>
+                    <span class="text-dim font-mono text-xs">(Lot Size: 15)</span>
+                  </div>
+                </div>
+                <div class="row-right">
+                  <div class="idx-selected-badge badge-banknifty" id="badge-lots-NSE_INDEX|Nifty Bank">3 Lots (45 Qty)</div>
+                  <div class="pill-group idx-pill-group pill-group-banknifty" data-idx-key="NSE_INDEX|Nifty Bank">
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty Bank" data-val="1">1</button>
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty Bank" data-val="2">2</button>
+                    <button class="pill-btn btn-idx-lot active" data-key="NSE_INDEX|Nifty Bank" data-val="3">3</button>
+                    <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty Bank" data-val="5">5</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-row row-sensex" data-idx="BSE_INDEX|SENSEX">
+                <div class="row-info">
+                  <span class="idx-color-dot dot-sensex"></span>
+                  <div>
+                    <strong class="font-bold text-bright idx-name">SENSEX</strong>
+                    <span class="text-dim font-mono text-xs">(Lot Size: 10)</span>
+                  </div>
+                </div>
+                <div class="row-right">
+                  <div class="idx-selected-badge badge-sensex" id="badge-lots-BSE_INDEX|SENSEX">1 Lot (10 Qty)</div>
+                  <div class="pill-group idx-pill-group pill-group-sensex" data-idx-key="BSE_INDEX|SENSEX">
+                    <button class="pill-btn btn-idx-lot active" data-key="BSE_INDEX|SENSEX" data-val="1">1</button>
+                    <button class="pill-btn btn-idx-lot" data-key="BSE_INDEX|SENSEX" data-val="2">2</button>
+                    <button class="pill-btn btn-idx-lot" data-key="BSE_INDEX|SENSEX" data-val="3">3</button>
+                    <button class="pill-btn btn-idx-lot" data-key="BSE_INDEX|SENSEX" data-val="5">5</button>
+                  </div>
+                </div>
+              </div>
             </div>
-        </section>
+          </div>
 
-        <!-- OPTION CHAIN TABLE PANEL -->
-        <section class="panel panel--chain">
-            <div class="chain-legend">
-                <span class="legend-item"><span class="legend-color legend-color--itm-call"></span> Call ITM</span>
-                <span class="legend-item"><span class="legend-color legend-color--atm"></span> ATM Strike</span>
-                <span class="legend-item"><span class="legend-color legend-color--itm-put"></span> Put ITM</span>
-                <span class="legend-item"><span class="legend-color legend-color--otm"></span> OTM</span>
+          <!-- Card: Strategy Parameters & Filters -->
+          <div class="settings-card">
+            <h3 class="settings-card-title">Strategy Engine Guardrails</h3>
+            <p class="settings-card-sub">Active safety parameters governing automatic execution.</p>
+            <div class="guard-list">
+              <div class="guard-item">
+                <span class="guard-label">Max Spread Filter:</span>
+                <span class="guard-val text-green font-mono font-bold">3.0% (Orders rejected if spread &gt; 3%)</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Futures Buildup Gate:</span>
+                <span class="guard-val text-green font-mono font-bold">Enforced (CE: LB/SC &middot; PE: SB/LU)</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Persistence Rule:</span>
+                <span class="guard-val text-green font-mono font-bold">2 Consecutive OI updates required</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Stop-Loss &amp; Target:</span>
+                <span class="guard-val text-gold font-mono font-bold">SL: 25% | Target: 40%</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Trading Window:</span>
+                <span class="guard-val text-blue font-mono font-bold">09:18 &ndash; 14:45 IST | Squareoff: 15:15 IST</span>
+              </div>
             </div>
+          </div>
+        </div>
 
-            <div class="chain-table-wrap">
-                <table class="table--chain" id="optionChainTable">
-                    <thead>
-                        <tr class="thead-group">
-                            <th colspan="7" class="th--calls">CALL OPTIONS (CE)</th>
-                            <th class="th--strike">STRIKE</th>
-                            <th colspan="7" class="th--puts">PUT OPTIONS (PE)</th>
-                        </tr>
-                        <tr class="thead-cols">
-                            <th scope="col">OI</th>
-                            <th scope="col">OI Chg</th>
-                            <th scope="col">Volume</th>
-                            <th scope="col">IV %</th>
-                            <th scope="col">LTP</th>
-                            <th scope="col">Chg</th>
-                            <th scope="col">Bid / Ask</th>
-                            <th scope="col" class="th--strike-num">Strike Price</th>
-                            <th scope="col">Bid / Ask</th>
-                            <th scope="col">Chg</th>
-                            <th scope="col">LTP</th>
-                            <th scope="col">IV %</th>
-                            <th scope="col">Volume</th>
-                            <th scope="col">OI Chg</th>
-                            <th scope="col">OI</th>
-                        </tr>
-                    </thead>
-                    <tbody id="optionChainBody">
-                        <tr>
-                            <td colspan="15" class="table-empty">
-                                Loading NIFTY Option Chain from Upstox...
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
+      </div>
+    </div> <!-- /tab-settings -->
+
+    <!-- ====================================================================
+         TAB 3: TRADE BOOK / JOURNAL (Day-by-Day Trade History + CSV Export)
+         ==================================================================== -->
+    <div class="tab-pane" id="tab-trades" style="display: none;">
+      <section class="dash-section">
+        
+        <!-- Controls Bar: Day Selector & Export CSV -->
+        <div class="trades-control-bar">
+          <div class="trades-bar-left">
+            <h2 class="section-title">Trade Book &middot; Execution Journal</h2>
+            <span class="section-meta">All algorithmic trades taken by bot with exact fill prices, millisecond timestamps &amp; profit types</span>
+          </div>
+          <div class="trades-bar-right">
+            <div class="trade-date-picker-wrap">
+              <label for="select-trade-date" class="label-date-picker">Date:</label>
+              <select id="select-trade-date" class="select-trade-date">
+                <!-- Dynamically populated with dates -->
+              </select>
             </div>
-        </section>
-    </div>
+            <button id="btn-export-trades-csv" class="btn btn-sm btn-outline btn-export-csv" title="Download trades as CSV">
+              <span class="btn-icon">📥</span> Export CSV
+            </button>
+            <button id="btn-refresh-trades" class="btn btn-sm btn-outline" title="Refresh trade list">
+              <span class="btn-icon">🔄</span> Refresh
+            </button>
+          </div>
+        </div>
 
-    <!-- Hidden system status elements for dashboard.js bindings -->
-    <div style="display: none;">
-        <span id="browserStream"></span>
-        <span id="lastEvent"></span>
-        <span id="feedLatency"></span>
-        <span id="upstoxStatus"></span>
-        <span id="feedMode"></span>
-        <span id="selectedInstrument"></span>
-        <span id="lastPrice"></span>
-        <span id="lastPriceTime"></span>
-        <span id="bidAsk"></span>
-        <span id="spread"></span>
-        <span id="storedCandles"></span>
-        <span id="tickCount"></span>
-        <table><tbody id="ticksBody"></tbody></table>
-    </div>
-</main>
+        <!-- Day's Key Metrics Overview -->
+        <div class="trades-summary-grid">
+          <div class="trade-summary-card">
+            <span class="summary-label">Total Trades</span>
+            <strong class="summary-val font-mono text-bright" id="summary-total-trades">0</strong>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Winning / Losing</span>
+            <div class="summary-val-split">
+              <span class="text-green font-mono font-bold" id="summary-win-trades">0 W</span>
+              <span class="text-dim">/</span>
+              <span class="text-red font-mono font-bold" id="summary-loss-trades">0 L</span>
+            </div>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Win Rate</span>
+            <strong class="summary-val font-mono text-cyan" id="summary-win-rate">0.0%</strong>
+          </div>
+          <div class="trade-summary-card card-pnl">
+            <span class="summary-label">Day Net P&amp;L</span>
+            <strong class="summary-val font-mono text-bright" id="summary-day-pnl">₹0.00</strong>
+          </div>
+        </div>
 
-<footer class="footer">
-    <p>Phase 1 collects data only. No real or paper order is placed.</p>
-    <p>Times are displayed in Asia/Kolkata.</p>
-</footer>
+        <!-- Table: Executed Trade Orders -->
+        <div class="table-card">
+          <table class="data-table" id="table-trades-journal">
+            <thead>
+              <tr>
+                <th class="col-idx text-center">#</th>
+                <th class="text-left">TRADE NAME / SYMBOL</th>
+                <th class="text-center">SIDE</th>
+                <th class="text-right">STRIKE</th>
+                <th class="text-right">ENTRY PRICE</th>
+                <th class="text-center">ENTRY TIME (IST &middot; MS)</th>
+                <th class="text-right">EXIT PRICE</th>
+                <th class="text-center">EXIT TIME (IST &middot; MS)</th>
+                <th class="text-right">POINTS</th>
+                <th class="text-right">NET P&amp;L</th>
+                <th class="text-center">PROFIT / EXIT TYPE</th>
+                <th class="text-center">STATUS</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-trades-journal">
+              <tr>
+                <td colspan="12" class="text-center text-muted">Select a date or wait for trades to load...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+      </section>
+    </div> <!-- /tab-trades -->
+
+    <!-- ====================================================================
+         TAB 4: ACTIVITY LOGS / AUDIT TRAIL (Per-Day Logs + CSV Export)
+         ==================================================================== -->
+    <div class="tab-pane" id="tab-logs" style="display: none;">
+      <section class="dash-section">
+        
+        <!-- Controls Bar: Day Selector, Event Filter & Export CSV -->
+        <div class="trades-control-bar">
+          <div class="trades-bar-left">
+            <h2 class="section-title">Activity Logs &middot; Strategy Audit Trail</h2>
+            <span class="section-meta">All algorithmic signals, gate evaluations, entries, exits, risk guards, and clock events</span>
+          </div>
+          <div class="trades-bar-right">
+            <div class="trade-date-picker-wrap">
+              <label for="select-log-date" class="label-date-picker">Date:</label>
+              <select id="select-log-date" class="select-trade-date">
+                <!-- Dynamically populated -->
+              </select>
+            </div>
+            <div class="trade-date-picker-wrap">
+              <label for="select-log-level" class="label-date-picker">Filter:</label>
+              <select id="select-log-level" class="select-trade-date">
+                <option value="ALL">All Events</option>
+                <option value="ENTRY">Entries Only</option>
+                <option value="EXIT">Exits Only</option>
+                <option value="WARNING">Warnings</option>
+                <option value="ERROR">Errors / Feed</option>
+              </select>
+            </div>
+            <button id="btn-export-logs-csv" class="btn btn-sm btn-outline btn-export-csv" title="Download logs as CSV">
+              <span class="btn-icon">📥</span> Export CSV
+            </button>
+            <button id="btn-refresh-logs" class="btn btn-sm btn-outline" title="Refresh logs">
+              <span class="btn-icon">🔄</span> Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Day's Key Metrics Overview -->
+        <div class="trades-summary-grid">
+          <div class="trade-summary-card">
+            <span class="summary-label">Total Events</span>
+            <strong class="summary-val font-mono text-bright" id="summary-total-logs">0</strong>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Entries / Exits</span>
+            <div class="summary-val-split">
+              <span class="text-green font-mono font-bold" id="summary-entries-count">0 Entries</span>
+              <span class="text-dim">/</span>
+              <span class="text-red font-mono font-bold" id="summary-exits-count">0 Exits</span>
+            </div>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Risk Blocks / Guards</span>
+            <strong class="summary-val font-mono text-amber" id="summary-blocks-count">0</strong>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Warnings &amp; System Alerts</span>
+            <strong class="summary-val font-mono text-cyan" id="summary-warnings-count">0</strong>
+          </div>
+        </div>
+
+        <!-- Table: Executed Activity Logs -->
+        <div class="table-card">
+          <table class="data-table" id="table-logs-journal">
+            <thead>
+              <tr>
+                <th class="col-idx text-center">#</th>
+                <th class="text-center" style="width: 130px;">TIMESTAMP (IST)</th>
+                <th class="text-center" style="width: 100px;">LEVEL</th>
+                <th class="text-center" style="width: 180px;">EVENT TYPE</th>
+                <th class="text-left" style="width: 180px;">SYMBOL / UNDERLYING</th>
+                <th class="text-left">ACTION / EVENT MESSAGE</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-logs-journal">
+              <tr>
+                <td colspan="6" class="text-center text-muted">Select a date or wait for logs to load...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+      </section>
+    </div> <!-- /tab-logs -->
+
+    <!-- Footer -->
+    <footer class="dash-footer">
+      <span>Upstox V3 Market Feed Engine &middot; Real-Time Protobuf Feed &middot; Zero Lock Contention Architecture</span>
+    </footer>
+
+  </div>
+
+  <script src="/static/js/dashboard.js"></script>
 </body>
 </html>
