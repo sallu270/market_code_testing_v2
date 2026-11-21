@@ -13,3 +13,16 @@ __pycache__/
 *.user
 *.suo
 
+*.zip
+
+# Secrets & Environment variables
+.env
+.env.*
+*.env
+**/.env
+
+# Secrets & Environment variables
+.env
+.env.*
+*.env
+**/.env
