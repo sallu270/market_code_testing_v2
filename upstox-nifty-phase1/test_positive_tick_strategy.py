@@ -206,72 +206,7 @@ class TestFirstPositiveTickStrategy(unittest.TestCase):
         self.assertEqual(exit_trade["exit_reason"], "STOP_LOSS_25PCT")
         self.assertEqual(exit_trade["exit_price"], 74.0)
 
-    def test_index_futures_gate_nifty_and_banknifty(self):
-        """Phase 2 Requirement 8: CE Buy needs Futures LB or SC; PE Buy needs SB or LU."""
-        idx_st = self.engine.index_underlyings[NIFTY_KEY]
-        idx_st["state"] = "ARMED"
 
-        # Mock ATM +-1 contracts
-        keys = [f"NIFTY_ATM_{i}" for i in range(4)]
-        idx_st["atm_plus_minus_keys"] = keys
-        idx_st["locked_keys"] = keys
-        snap = {}
-        for i, k in enumerate(keys):
-            side = "CE" if i < 2 else "PE"
-            snap[k] = {"ltp": 100.0, "oi": 50000.0, "bid": 99.0, "ask": 100.0, "strike": 24000, "side": side}
-            self.engine.hot_cache[k] = {
-                "instrument_key": k, "trading_symbol": k, "strike": 24000, "side": side,
-                "ltp": 110.0 if side == "CE" else 90.0,
-                "oi": 40000.0 if side == "CE" else 60000.0, # CE SC, PE SB -> Rule 1 CE Buy ⭐⭐⭐
-                "bid_price": 99.0, "ask_price": 100.0, "spread_pct": 1.0,
-            }
-        idx_st["snapshot"] = snap
-        idx_st["snapshot_taken"] = True
-
-        # Opposing futures: Short Build-up (SB) blocks CE Buy
-        idx_st["futures_buildup"] = "SB"
-        trade_blocked = self.engine.evaluate_oi_buildup(underlying_key=NIFTY_KEY, force=True)
-        self.assertIsNone(trade_blocked)
-
-        # Confirming futures: Long Build-up (LB) allows CE Buy
-        idx_st["futures_buildup"] = "LB"
-        trade_allowed = self.engine.evaluate_oi_buildup(underlying_key=NIFTY_KEY, force=True)
-        self.assertIsNotNone(trade_allowed)
-        self.assertEqual(trade_allowed["side"], "BUY_CE")
-
-    def test_index_futures_gate_sensex_exception_and_stars(self):
-        """Phase 2 Requirement 8: SENSEX has Futures check OFF, but ONLY ★★★ signals allowed (Rules 1 & 5)."""
-        idx_st = self.engine.index_underlyings[SENSEX_KEY]
-        idx_st["state"] = "ARMED"
-
-        keys = [f"SENSEX_ATM_{i}" for i in range(4)]
-        idx_st["atm_plus_minus_keys"] = keys
-        idx_st["locked_keys"] = keys
-        snap = {}
-        for i, k in enumerate(keys):
-            side = "CE" if i < 2 else "PE"
-            snap[k] = {"ltp": 100.0, "oi": 50000.0, "bid": 99.0, "ask": 100.0, "strike": 80000, "side": side}
-            self.engine.hot_cache[k] = {
-                "instrument_key": k, "trading_symbol": k, "strike": 80000, "side": side,
-                "ltp": 110.0 if side == "CE" else 90.0,
-                "oi": 60000.0,  # CE LB, PE SB -> Rule 2 CE Buy ⭐⭐ (2 stars!)
-                "bid_price": 99.0, "ask_price": 100.0, "spread_pct": 1.0,
-            }
-        idx_st["snapshot"] = snap
-        idx_st["snapshot_taken"] = True
-
-        # Rule 2 is ⭐⭐: BLOCKED on SENSEX because only ⭐⭐⭐ allowed
-        trade_2star = self.engine.evaluate_oi_buildup(underlying_key=SENSEX_KEY, force=True)
-        self.assertIsNone(trade_2star)
-
-        # Change to Rule 1: CE SC (oi 40000) + PE SB (oi 60000) -> ⭐⭐⭐: ALLOWED on SENSEX even with Neutral futures!
-        idx_st["futures_buildup"] = "Neutral"
-        for k in keys[:2]:
-            self.engine.hot_cache[k]["oi"] = 40000.0  # SC
-        trade_3star = self.engine.evaluate_oi_buildup(underlying_key=SENSEX_KEY, force=True)
-        self.assertIsNotNone(trade_3star)
-        self.assertEqual(trade_3star["stars"], "⭐⭐⭐")
-        self.assertEqual(trade_3star["rule_number"], 1)
 
     def test_index_daily_loss_limit(self):
         """Phase 3 Requirement 11: Realized loss >= daily loss limit halts further trading for that index."""

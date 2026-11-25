@@ -464,7 +464,9 @@ def api_dashboard_data() -> Response:
 
         # Strikes detail
         strikes_data = []
-        l_keys = idx_st.get("locked_keys") or []
+        l_keys = (idx_st.get("ce_basket_keys") or []) + (idx_st.get("pe_basket_keys") or [])
+        if not l_keys:
+            l_keys = idx_st.get("locked_keys") or []
         hot_cache = strategy_engine.hot_cache
         snap = idx_st.get("snapshot") or {}
 
@@ -529,13 +531,33 @@ def api_dashboard_data() -> Response:
         tot_oi_abs = abs(delta_pe) + abs(delta_ce)
         oi_i = round((delta_pe - delta_ce) / tot_oi_abs, 2) if tot_oi_abs > 0 else 0.0
 
-        # Real consecutive hold status from engine state
-        c_count = int(idx_st.get("consecutive_count", 0))
-        c_sig = idx_st.get("consecutive_signal")
-        if decision in ("CE Buy", "PE Buy") or c_sig:
-            hold_status = f"{c_count}/2"
+        # Sum Signal metrics
+        ce_current_sum = float(idx_st.get("ce_current_sum") or 0.0)
+        pe_current_sum = float(idx_st.get("pe_current_sum") or 0.0)
+        ce_baseline_sum = float(idx_st.get("ce_baseline_sum") or 0.0)
+        pe_baseline_sum = float(idx_st.get("pe_baseline_sum") or 0.0)
+        ce_pct = float(idx_st.get("ce_pct") or 0.0)
+        pe_pct = float(idx_st.get("pe_pct") or 0.0)
+        score = float(idx_st.get("score") or 0.0)
+        raw_signal = str(idx_st.get("raw_signal") or "Neutral")
+        confirmed_signal = idx_st.get("confirmed_signal")
+        hold_elapsed_sec = float(idx_st.get("hold_elapsed_sec") or 0.0)
+        whipsaw_sec = float(idx_st.get("whipsaw_sec") or 300.0)
+
+        # Real hold status from engine state
+        if confirmed_signal:
+            decision = confirmed_signal
+            hold_status = f"CONFIRMED ({int(whipsaw_sec)}s)"
+            action = "ENTER CE" if decision == "CE Buy" else "ENTER PE"
+        elif raw_signal != "Neutral":
+            decision = f"{raw_signal} (Holding)"
+            hold_status = f"{int(hold_elapsed_sec)}s / {int(whipsaw_sec)}s"
+            action = "WAIT"
         else:
+            decision = "Neutral"
             hold_status = "-"
+            if not idx_st.get("current_position"):
+                action = "NO_TRADE"
 
         indices_out.append({
             "key": ukey,
@@ -543,6 +565,17 @@ def api_dashboard_data() -> Response:
             "spot_price": spot,
             "atm_strike": atm_strike,
             "net_change_pct": net_chg_pct,
+            "ce_current_sum": ce_current_sum,
+            "pe_current_sum": pe_current_sum,
+            "ce_baseline_sum": ce_baseline_sum,
+            "pe_baseline_sum": pe_baseline_sum,
+            "ce_pct": ce_pct,
+            "pe_pct": pe_pct,
+            "score": score,
+            "raw_signal": raw_signal,
+            "confirmed_signal": confirmed_signal,
+            "hold_elapsed_sec": hold_elapsed_sec,
+            "whipsaw_sec": whipsaw_sec,
             "delta_ce": delta_ce,
             "delta_ce_pct": round(delta_ce / 100000.0, 2) if delta_ce else 0.0,
             "ce_price_pct": ce_price_pct,

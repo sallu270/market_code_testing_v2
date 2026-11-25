@@ -282,6 +282,24 @@ class GapEntryStrategyEngine:
                 },
                 "current_position": None,
                 "_last_eval_time": 0.0,
+                "ce_basket_keys": [],
+                "pe_basket_keys": [],
+                "baseline_prices": {},
+                "ce_baseline_sum": 0.0,
+                "pe_baseline_sum": 0.0,
+                "baseline_locked": False,
+                "ce_current_sum": 0.0,
+                "pe_current_sum": 0.0,
+                "ce_pct": 0.0,
+                "pe_pct": 0.0,
+                "score": 0.0,
+                "raw_signal": "NEUTRAL",
+                "candidate_signal": "NEUTRAL",
+                "candidate_start_time": 0.0,
+                "hold_elapsed_sec": 0.0,
+                "confirmed_signal": "NEUTRAL",
+                "cooldown_until": 0.0,
+                "whipsaw_sec": 300.0,
             }
 
             # Initialize futures in hot_cache if available
@@ -1759,11 +1777,8 @@ class GapEntryStrategyEngine:
 
     def plan_8_itm_contracts(self, spot: float, underlying_key: str = NIFTY_KEY) -> list[str]:
         """
-        Section 3:
-        ATM +- 3 Strikes (6 Contracts Total):
-        CE ITM = the 3 largest strikes below spot.
-        PE ITM = the 3 smallest strikes above spot.
-        A strike equal to spot is excluded.
+        Plans ATM +- 5 Strikes (11 CE and 11 PE strikes, 22 contracts total per index)
+        for both the 09:15 Positive Tick and the new Sum Signal (Score = CE % - PE %) strategy.
         """
         if underlying_key not in self.ce_by_underlying or not self.ce_by_underlying[underlying_key]:
             self.load_contracts_if_needed(underlying_key)
@@ -1771,34 +1786,52 @@ class GapEntryStrategyEngine:
         ce_dict = self.ce_by_underlying.get(underlying_key) or (self.ce_by_strike if underlying_key == NIFTY_KEY else {})
         pe_dict = self.pe_by_underlying.get(underlying_key) or (self.pe_by_strike if underlying_key == NIFTY_KEY else {})
 
-        # ATM +- 3: 3 CE ITM strikes below spot and 3 PE ITM strikes above spot
-        ce_strikes = sorted([s for s in ce_dict.keys() if s < spot], reverse=True)[:3]
-        pe_strikes = sorted([s for s in pe_dict.keys() if s > spot])[:3]
+        step = float(self.index_underlyings.get(underlying_key, {}).get("step") or 50.0)
+        atm_strike = round(spot / step) * step
 
+        # ATM +- 5: 11 strikes total (5 below ATM, ATM, 5 above ATM)
+        all_ce_strikes = sorted(ce_dict.keys())
+        all_pe_strikes = sorted(pe_dict.keys())
+
+        ce_basket_keys: list[str] = []
+        pe_basket_keys: list[str] = []
         keys: list[str] = []
-        for s in ce_strikes:
-            c = ce_dict.get(s)
-            if c and c.get("instrument_key"):
-                keys.append(c["instrument_key"])
-        for s in pe_strikes:
-            c = pe_dict.get(s)
-            if c and c.get("instrument_key"):
-                keys.append(c["instrument_key"])
+
+        if all_ce_strikes:
+            nearest_idx = min(range(len(all_ce_strikes)), key=lambda i: abs(all_ce_strikes[i] - atm_strike))
+            start_i = max(0, nearest_idx - 5)
+            end_i = min(len(all_ce_strikes), nearest_idx + 6)
+            for s in all_ce_strikes[start_i:end_i]:
+                c = ce_dict.get(s)
+                if c and c.get("instrument_key"):
+                    keys.append(c["instrument_key"])
+                    ce_basket_keys.append(c["instrument_key"])
+
+        if all_pe_strikes:
+            nearest_idx = min(range(len(all_pe_strikes)), key=lambda i: abs(all_pe_strikes[i] - atm_strike))
+            start_i = max(0, nearest_idx - 5)
+            end_i = min(len(all_pe_strikes), nearest_idx + 6)
+            for s in all_pe_strikes[start_i:end_i]:
+                p = pe_dict.get(s)
+                if p and p.get("instrument_key"):
+                    keys.append(p["instrument_key"])
+                    pe_basket_keys.append(p["instrument_key"])
 
         if underlying_key in self.index_underlyings:
             self.index_underlyings[underlying_key]["planned_keys"] = keys
+            self.index_underlyings[underlying_key]["ce_basket_keys"] = ce_basket_keys
+            self.index_underlyings[underlying_key]["pe_basket_keys"] = pe_basket_keys
+            self.index_underlyings[underlying_key]["atm_strike"] = atm_strike
             if self.index_underlyings[underlying_key]["state"] == "SETUP":
                 self.index_underlyings[underlying_key]["state"] = "PLANNING"
 
-            # Point atm_plus_minus_keys strictly to these 6 locked keys (eliminates subscribing to distant extra strikes)
             self.index_underlyings[underlying_key]["atm_plus_minus_keys"] = list(keys)
-
-            fut_k = self.index_underlyings[underlying_key].get("futures_key")
-            if fut_k and fut_k not in keys:
-                keys.append(fut_k)
 
         if underlying_key == NIFTY_KEY:
             self.planned_keys = keys
+            self.ce_basket_keys = ce_basket_keys
+            self.pe_basket_keys = pe_basket_keys
+            self.atm_strike = atm_strike
             if self.state == "SETUP":
                 self.state = "PLANNING"
 
@@ -1975,6 +2008,30 @@ class GapEntryStrategyEngine:
                 idx_state["snapshot_taken"] = True
                 idx_state["state"] = "ARMED"
 
+                # Lock the 09:15:00 Sum Signal Baseline (11 CE and 11 PE strikes)
+                idx_state["baseline_prices"] = {}
+                for k in l_keys:
+                    c = self.hot_cache.get(k, {})
+                    snap_p = float(c.get("ltp") or c.get("ref_ltp") or 0.0)
+                    if snap_p <= 0.0:
+                        bid_p = float(c.get("bid_price") or 0.0)
+                        ask_p = float(c.get("ask_price") or 0.0)
+                        if bid_p > 0 and ask_p > 0:
+                            snap_p = round((bid_p + ask_p) / 2.0, 2)
+                        else:
+                            snap_p = float(c.get("prev_close") or 100.0)
+                    idx_state["baseline_prices"][k] = snap_p
+
+                ce_b_keys = idx_state.get("ce_basket_keys") or [k for k in l_keys if self.hot_cache.get(k, {}).get("side") == "CE"]
+                pe_b_keys = idx_state.get("pe_basket_keys") or [k for k in l_keys if self.hot_cache.get(k, {}).get("side") == "PE"]
+
+                ce_base_sum = sum(idx_state["baseline_prices"].get(k, 0.0) for k in ce_b_keys)
+                pe_base_sum = sum(idx_state["baseline_prices"].get(k, 0.0) for k in pe_b_keys)
+                idx_state["ce_baseline_sum"] = round(ce_base_sum, 2)
+                idx_state["pe_baseline_sum"] = round(pe_base_sum, 2)
+                idx_state["baseline_locked"] = True
+                LOGGER.info("SUM SIGNAL BASELINE LOCKED at 09:15 for %s: CE Sum = %.2f, PE Sum = %.2f across %d strikes.", ukey, ce_base_sum, pe_base_sum, len(ce_b_keys) + len(pe_b_keys))
+
                 if ukey == NIFTY_KEY:
                     self.snapshot = dict(idx_snap)
                     self.snapshot_taken = True
@@ -2003,26 +2060,37 @@ class GapEntryStrategyEngine:
                 LOGGER.info("ARMED ALL INDICES for First Positive Tick strategy at 09:15:00.")
 
     # -------------------------------------------------------------------------
-    # PREVIOUS STRATEGY: 09:18:00 OI Build-Up Evaluation & 16-Condition Table
-    # (PRESERVED AS REQUESTED - DO NOT REMOVE OLD STRATEGY)
-    # The active live strategy for indices is now First Positive Tick (Rule R8).
+    # SUM SIGNAL STRATEGY (Dr. Vijay Bhilwade Specification)
+    # Score = CE % - PE % across ATM +- 5 strikes (11 CE and 11 PE strikes)
+    # Baseline locked at 09:15:00. Confirmation requires 5-minute continuous hold.
     # -------------------------------------------------------------------------
 
-    def evaluate_oi_buildup(self, underlying_key: str = NIFTY_KEY, trigger_ms: int = 0, force: bool = False, require_consecutive: bool = False) -> dict[str, Any] | None:
+    def evaluate_sum_signal(
+        self,
+        underlying_key: str = NIFTY_KEY,
+        trigger_ms: int = 0,
+        force: bool = False,
+        require_consecutive: bool = False,
+    ) -> dict[str, Any] | None:
         """
-        Phase 2: Evaluates the 16-condition table from 09:18:00 onwards for a specific index.
-        - Checks for fresh OI on both CE and PE sides vs 09:15 snapshot.
-        - Calculates Delta CE, Delta PE, price change %, OI change %.
-        - Assigns direction (UP, DOWN, FLAT) based on ±0.5% price threshold.
-        - If any direction is FLAT, returns WAIT.
-        - Determines CE build-up (LB, SB, SC, LU) and PE build-up (LB, SB, SC, LU).
-        - Requires signal to hold for 2 consecutive OI updates.
-        - Futures check: CE Buy needs LB/SC, PE Buy needs SB/LU. For SENSEX, check is off and only ★★★ signals allowed.
-        - Final rank sets lot size (user-configurable, default 1).
+        Calculates the real-time Sum Signal for an index using WebSocket ticks:
+        - Basket: ATM +- 5 strikes (11 CE and 11 PE contracts).
+        - CE % = ((Sum of CE LTPs - Baseline CE Sum) / Baseline CE Sum) * 100
+        - PE % = ((Sum of PE LTPs - Baseline PE Sum) / Baseline PE Sum) * 100
+        - Score = CE % - PE %
+        - Signal:
+            Bullish: CE % > +2.0% AND PE % < -2.0% -> 'CE Buy'
+            Bearish: PE % > +2.0% AND CE % < -2.0% -> 'PE Buy'
+            Neutral: within +-2.0% buffer or mixed -> 'Neutral'
+        - Whipsaw Control: Signal must hold continuously for 300 seconds (5 minutes).
+          If it breaks to Neutral or opposite, timer resets to 0.
+        - Execution: On confirmation, enters tightest spread strike on signal side
+          with -20% Stop-Loss and +40% Target, with Stepped Trailing Stop-Loss.
         """
         with self._lock:
             now_dt = datetime.now(IST)
             now_time_hms = now_dt.strftime("%H:%M:%S")
+            now_ts = time.time()
 
             idx_state = self.index_underlyings.get(underlying_key)
             if not idx_state:
@@ -2031,384 +2099,265 @@ class GapEntryStrategyEngine:
             if not idx_state or not idx_state.get("enabled", True):
                 return None
 
-            # 1. Trading Window Validation
-            if not force and now_time_hms < self.entry_start_time:
-                res = {
-                    "decision": "WAIT",
-                    "reason": f"No entry before {self.entry_start_time} (Current: {now_time_hms})",
-                    "summary_line": f"{idx_state['name']} WAIT: Pre-09:18 data collection only (Time: {now_time_hms})",
-                }
-                idx_state["last_evaluation"] = res
-                if underlying_key == NIFTY_KEY:
-                    self.last_evaluation = res
-                return None
-
-            if not force and now_time_hms >= self.entry_end_time:
-                res = {
-                    "decision": "WAIT",
-                    "reason": f"No entry after {self.entry_end_time} (Current: {now_time_hms})",
-                    "summary_line": f"{idx_state['name']} WAIT: Market entry closed after 14:45 (Time: {now_time_hms})",
-                }
-                idx_state["last_evaluation"] = res
-                if underlying_key == NIFTY_KEY:
-                    self.last_evaluation = res
-                return None
-
-            # 2. Per-Index Daily limits and existing position
-            if idx_state.get("current_position") is not None:
-                return None
-            if idx_state.get("today_trades_count", 0) >= idx_state.get("max_trades_per_day", self.max_trades_per_day):
-                return None
-            if idx_state.get("realized_pnl", 0.0) <= -idx_state.get("daily_loss_limit_inr", self.daily_loss_limit_inr):
-                return None
-
-            # 3. Snapshot validation for this index
-            if underlying_key == NIFTY_KEY:
-                if not idx_state.get("snapshot") and self.snapshot:
-                    idx_state["snapshot"] = dict(self.snapshot)
-                if not idx_state.get("locked_keys") and self.locked_keys:
-                    idx_state["locked_keys"] = list(self.locked_keys)
-
-            snap = idx_state.get("snapshot") or (self.snapshot if underlying_key == NIFTY_KEY else {})
-            locked_keys = idx_state.get("locked_keys") or (self.locked_keys if underlying_key == NIFTY_KEY else [])
-            eval_keys = idx_state.get("atm_plus_minus_keys") or locked_keys
-
-            if not snap or not eval_keys or len(snap) < 2:
-                spot = idx_state.get("spot_price")
-                if spot and spot > 0:
-                    self.plan_8_itm_contracts(spot, underlying_key=underlying_key)
-                    self.lock_contracts(underlying_key=underlying_key)
-                    self.take_snapshot(underlying_key=underlying_key)
-                    snap = idx_state.get("snapshot") or {}
-                    eval_keys = idx_state.get("atm_plus_minus_keys") or idx_state.get("locked_keys") or []
-                elif underlying_key == NIFTY_KEY and self.snapshot and self.locked_keys:
-                    idx_state["snapshot"] = dict(self.snapshot)
-                    idx_state["locked_keys"] = list(self.locked_keys)
-                    snap = idx_state["snapshot"]
-                    eval_keys = idx_state["locked_keys"]
-                else:
-                    return None
-
-            if len(eval_keys) < 2 or len(snap) < 2:
-                return None
-
-            # 4. Fresh OI Check (at least one locked contract on each side has an OI value different from snapshot)
-            ce_fresh = False
-            pe_fresh = False
-            for k in eval_keys:
-                s_entry = snap.get(k)
-                curr = self.hot_cache.get(k)
-                if not s_entry or not curr:
-                    continue
-                side_val = curr.get("side")
-                c_oi = curr.get("oi")
-                s_oi = s_entry.get("oi")
-                if c_oi is not None and s_oi is not None and c_oi != s_oi:
-                    if side_val == "CE":
-                        ce_fresh = True
-                    elif side_val == "PE":
-                        pe_fresh = True
-
-            if not force and not (ce_fresh and pe_fresh):
-                res = {
-                    "decision": "WAIT",
-                    "reason": f"Waiting for fresh OI update on both CE and PE sides for {idx_state['name']}",
-                    "summary_line": f"{idx_state['name']} WAIT: Awaiting fresh OI on both sides (CE: {ce_fresh}, PE: {pe_fresh})",
-                }
-                idx_state["last_evaluation"] = res
-                if underlying_key == NIFTY_KEY:
-                    self.last_evaluation = res
-                return None
-
-            # 5. Throttling: at most once every 5 seconds per index
-            cur_t = time.time()
-            if not force and (cur_t - idx_state.get("_last_eval_time", 0.0) < self.re_eval_min_interval_sec):
-                return None
-            idx_state["_last_eval_time"] = cur_t
-
-            # 6. Separate CE and PE contracts
-            ce_keys = [k for k in eval_keys if self.hot_cache.get(k, {}).get("side") == "CE"]
-            pe_keys = [k for k in eval_keys if self.hot_cache.get(k, {}).get("side") == "PE"]
+            # Get or auto-plan CE and PE baskets (11 strikes each)
+            ce_keys = idx_state.get("ce_basket_keys") or []
+            pe_keys = idx_state.get("pe_basket_keys") or []
 
             if not ce_keys or not pe_keys:
-                return None
+                spot = float(idx_state.get("spot_price") or self.spot_price or 0.0)
+                if spot > 0:
+                    self.plan_8_itm_contracts(spot, underlying_key=underlying_key)
+                    ce_keys = idx_state.get("ce_basket_keys") or []
+                    pe_keys = idx_state.get("pe_basket_keys") or []
 
-            # 7. Mathematical Aggregations
-            ce_oi_snap_sum = sum(float(snap[k]["oi"]) for k in ce_keys if k in snap)
-            ce_oi_curr_sum = sum(float(self.hot_cache[k].get("oi") or snap.get(k, {}).get("oi") or 0.0) for k in ce_keys)
-            delta_ce = ce_oi_curr_sum - ce_oi_snap_sum
-            ce_oi_pct = (delta_ce / ce_oi_snap_sum * 100.0) if ce_oi_snap_sum > 0 else 0.0
+            if not ce_keys or not pe_keys:
+                # Fallback to locked keys if baskets still empty
+                l_keys = idx_state.get("locked_keys") or []
+                ce_keys = [k for k in l_keys if "CE" in self.hot_cache.get(k, {}).get("trading_symbol", "") or self.hot_cache.get(k, {}).get("side") == "CE"]
+                pe_keys = [k for k in l_keys if "PE" in self.hot_cache.get(k, {}).get("trading_symbol", "") or self.hot_cache.get(k, {}).get("side") == "PE"]
 
-            ce_ltp_snap_sum = sum(float(snap[k]["ltp"]) for k in ce_keys if k in snap)
-            ce_ltp_curr_sum = sum(float(self.hot_cache[k].get("ltp") or snap.get(k, {}).get("ltp") or 0.0) for k in ce_keys)
-            ce_price_delta = ce_ltp_curr_sum - ce_ltp_snap_sum
-            ce_price_pct = (ce_price_delta / ce_ltp_snap_sum * 100.0) if ce_ltp_snap_sum > 0 else 0.0
+            # Compute current sums from live WebSocket hot cache
+            ce_curr_sum = 0.0
+            for k in ce_keys:
+                c = self.hot_cache.get(k)
+                if c:
+                    p = float(c.get("ltp") or c.get("bid_price") or c.get("ref_ltp") or 0.0)
+                    ce_curr_sum += p
 
-            pe_oi_snap_sum = sum(float(snap[k]["oi"]) for k in pe_keys if k in snap)
-            pe_oi_curr_sum = sum(float(self.hot_cache[k].get("oi") or snap.get(k, {}).get("oi") or 0.0) for k in pe_keys)
-            delta_pe = pe_oi_curr_sum - pe_oi_snap_sum
-            pe_oi_pct = (delta_pe / pe_oi_snap_sum * 100.0) if pe_oi_snap_sum > 0 else 0.0
+            pe_curr_sum = 0.0
+            for k in pe_keys:
+                c = self.hot_cache.get(k)
+                if c:
+                    p = float(c.get("ltp") or c.get("bid_price") or c.get("ref_ltp") or 0.0)
+                    pe_curr_sum += p
 
-            pe_ltp_snap_sum = sum(float(snap[k]["ltp"]) for k in pe_keys if k in snap)
-            pe_ltp_curr_sum = sum(float(self.hot_cache[k].get("ltp") or snap.get(k, {}).get("ltp") or 0.0) for k in pe_keys)
-            pe_price_delta = pe_ltp_curr_sum - pe_ltp_snap_sum
-            pe_price_pct = (pe_price_delta / pe_ltp_snap_sum * 100.0) if pe_ltp_snap_sum > 0 else 0.0
+            idx_state["ce_current_sum"] = round(ce_curr_sum, 2)
+            idx_state["pe_current_sum"] = round(pe_curr_sum, 2)
 
-            # 8. Direction Evaluation (UP, DOWN, FLAT with 0.5% threshold)
-            def _get_dir(pct_val: float, threshold: float) -> str:
-                if pct_val > threshold:
-                    return "UP"
-                elif pct_val < -threshold:
-                    return "DOWN"
-                return "FLAT"
+            # Retrieve baseline sums locked at 09:15:00
+            ce_base = float(idx_state.get("ce_baseline_sum") or 0.0)
+            pe_base = float(idx_state.get("pe_baseline_sum") or 0.0)
 
-            ce_price_dir = _get_dir(ce_price_pct, self.price_threshold_pct)
-            ce_oi_dir = _get_dir(ce_oi_pct, self.oi_threshold_pct)
-            pe_price_dir = _get_dir(pe_price_pct, self.price_threshold_pct)
-            pe_oi_dir = _get_dir(pe_oi_pct, self.oi_threshold_pct)
+            # Auto-lock baseline if not locked yet and market is open or forced
+            market_open_hms = getattr(self, "market_open_time", getattr(self, "snapshot_time", "09:15:00"))
+            if not idx_state.get("baseline_locked") and (now_time_hms >= market_open_hms or force):
+                if ce_curr_sum > 0 or pe_curr_sum > 0:
+                    idx_state["ce_baseline_sum"] = round(ce_curr_sum, 2)
+                    idx_state["pe_baseline_sum"] = round(pe_curr_sum, 2)
+                    idx_state["baseline_locked"] = True
+                    ce_base = round(ce_curr_sum, 2)
+                    pe_base = round(pe_curr_sum, 2)
+                    LOGGER.info("Sum Signal baseline auto-locked for %s: CE=%.2f, PE=%.2f", underlying_key, ce_base, pe_base)
 
-            # 9. FLAT Direction Check: If any direction is FLAT -> WAIT
-            if "FLAT" in (ce_price_dir, ce_oi_dir, pe_price_dir, pe_oi_dir):
-                eval_res = {
-                    "decision": "WAIT",
-                    "reason": f"FLAT direction detected (CE_P: {ce_price_dir}, CE_OI: {ce_oi_dir}, PE_P: {pe_price_dir}, PE_OI: {pe_oi_dir})",
-                    "delta_ce": delta_ce,
-                    "delta_pe": delta_pe,
-                    "ce_price_pct": round(ce_price_pct, 2),
-                    "pe_price_pct": round(pe_price_pct, 2),
-                    "ce_price_dir": ce_price_dir,
-                    "ce_oi_dir": ce_oi_dir,
-                    "pe_price_dir": pe_price_dir,
-                    "pe_oi_dir": pe_oi_dir,
-                    "ce_type": None,
-                    "pe_type": None,
-                    "rule": None,
-                    "stars": "",
-                    "size": "",
-                    "summary_line": f"{idx_state['name']} ΔCE: {delta_ce:+,.0f} | ΔPE: {delta_pe:+,.0f} | WAIT (FLAT direction)",
-                }
-                idx_state["last_evaluation"] = eval_res
-                if underlying_key == NIFTY_KEY:
-                    self.last_evaluation = eval_res
-                return None
+            # Compute percentage changes and Sum Signal Score
+            if ce_base > 0:
+                ce_pct = round(((ce_curr_sum - ce_base) / ce_base) * 100.0, 2)
+            else:
+                ce_pct = 0.0
 
-            # 10. Build-up Type Assignment
-            def _get_buildup(p_dir: str, oi_dir: str) -> str:
-                if p_dir == "UP" and oi_dir == "UP": return "LB"
-                if p_dir == "DOWN" and oi_dir == "UP": return "SB"
-                if p_dir == "UP" and oi_dir == "DOWN": return "SC"
-                if p_dir == "DOWN" and oi_dir == "DOWN": return "LU"
-                return "Neutral"
+            if pe_base > 0:
+                pe_pct = round(((pe_curr_sum - pe_base) / pe_base) * 100.0, 2)
+            else:
+                pe_pct = 0.0
 
-            ce_type = _get_buildup(ce_price_dir, ce_oi_dir)
-            pe_type = _get_buildup(pe_price_dir, pe_oi_dir)
+            score = round(ce_pct - pe_pct, 2)
 
-            # 11. Table Lookup (16-condition table)
-            table_entry = DECISION_TABLE.get((ce_type, pe_type), {
-                "rule": None,
-                "decision": "No trade",
-                "side": None,
-                "stars": "",
-                "size": "",
-            })
+            idx_state["ce_pct"] = ce_pct
+            idx_state["pe_pct"] = pe_pct
+            idx_state["score"] = score
 
-            decision = table_entry["decision"]
-            side = table_entry.get("side")
-            stars = table_entry.get("stars", "")
-            size = table_entry.get("size", "")
-            rule_num = table_entry.get("rule")
+            # Signal classification as per Dr. Bhilwade's document
+            if ce_pct > 2.0 and pe_pct < -2.0:
+                raw_signal = "CE Buy"
+            elif pe_pct > 2.0 and ce_pct < -2.0:
+                raw_signal = "PE Buy"
+            else:
+                raw_signal = "Neutral"
 
-            # --- Dynamic Upgrade Rule for Conditions 2 & 6 (Client Spec & PDF Guide) ---
-            # Condition 2 (LB, SB -> CE Buy): Upgrades to ⭐⭐⭐ Full Lots if PE added OI >= 2x CE added OI at ATM,
-            # and spot >= VWAP.
-            # Condition 6 (SB, LB -> PE Buy): Upgrades to ⭐⭐⭐ Full Lots if CE added OI >= 2x PE added OI at ATM,
-            # and spot <= VWAP.
-            step = float(idx_state.get("step") or 50.0)
-            spot = float(idx_state.get("spot_price") or self.spot_price or 0.0)
-            vwap = float(idx_state.get("futures_vwap") or idx_state.get("vwap") or idx_state.get("open_price") or spot)
-            atm_strike = round(spot / step) * step if step > 0 and spot > 0 else 0.0
+            idx_state["raw_signal"] = raw_signal
 
-            if rule_num in (2, 6) and atm_strike > 0:
-                atm_ce = next((self.hot_cache[k] for k in ce_keys if abs(float(self.hot_cache.get(k, {}).get("strike") or 0.0) - atm_strike) < 0.1), None)
-                atm_pe = next((self.hot_cache[k] for k in pe_keys if abs(float(self.hot_cache.get(k, {}).get("strike") or 0.0) - atm_strike) < 0.1), None)
+            # Whipsaw / 5-Minute Continuous Hold Tracking
+            whipsaw_sec = float(idx_state.get("whipsaw_sec", 300.0))
+            if raw_signal == "Neutral":
+                idx_state["candidate_signal"] = None
+                idx_state["candidate_start_time"] = None
+                idx_state["hold_elapsed_sec"] = 0.0
+                idx_state["confirmed_signal"] = None
+            elif raw_signal in ("CE Buy", "PE Buy"):
+                if idx_state.get("candidate_signal") == raw_signal:
+                    start_t = idx_state.get("candidate_start_time") or now_ts
+                    elapsed = round(now_ts - start_t, 1)
+                    idx_state["hold_elapsed_sec"] = elapsed
+                    if elapsed >= whipsaw_sec:
+                        idx_state["confirmed_signal"] = raw_signal
+                else:
+                    # Raw signal flipped or started fresh
+                    idx_state["candidate_signal"] = raw_signal
+                    idx_state["candidate_start_time"] = now_ts
+                    idx_state["hold_elapsed_sec"] = 0.0
+                    idx_state["confirmed_signal"] = None
 
-                atm_ce_oi_curr = float(atm_ce.get("oi") or 0.0) if atm_ce else 0.0
-                atm_ce_oi_snap = float(snap.get(atm_ce.get("instrument_key"), {}).get("oi") or 0.0) if atm_ce else 0.0
-                atm_ce_added_oi = max(0.0, atm_ce_oi_curr - atm_ce_oi_snap)
+            confirmed = idx_state.get("confirmed_signal")
+            elapsed_sec = idx_state.get("hold_elapsed_sec", 0.0)
 
-                atm_pe_oi_curr = float(atm_pe.get("oi") or 0.0) if atm_pe else 0.0
-                atm_pe_oi_snap = float(snap.get(atm_pe.get("instrument_key"), {}).get("oi") or 0.0) if atm_pe else 0.0
-                atm_pe_added_oi = max(0.0, atm_pe_oi_curr - atm_pe_oi_snap)
-
-                if rule_num == 2 and decision == "CE Buy":
-                    if atm_pe_added_oi >= 2.0 * max(100.0, atm_ce_added_oi) and spot >= vwap:
-                        stars = "⭐⭐⭐"
-                        size = "full"
-                        LOGGER.info("DYNAMIC UPGRADE on %s: Rule #2 CE Buy upgraded to ⭐⭐⭐ Full Lots (ATM PE ΔOI: %.0f >= 2x CE ΔOI: %.0f, Spot: %.2f >= VWAP: %.2f)",
-                                    idx_state["name"], atm_pe_added_oi, atm_ce_added_oi, spot, vwap)
-
-                elif rule_num == 6 and decision == "PE Buy":
-                    if atm_ce_added_oi >= 2.0 * max(100.0, atm_pe_added_oi) and spot <= vwap:
-                        stars = "⭐⭐⭐"
-                        size = "full"
-                        LOGGER.info("DYNAMIC UPGRADE on %s: Rule #6 PE Buy upgraded to ⭐⭐⭐ Full Lots (ATM CE ΔOI: %.0f >= 2x PE ΔOI: %.0f, Spot: %.2f <= VWAP: %.2f)",
-                                    idx_state["name"], atm_ce_added_oi, atm_pe_added_oi, spot, vwap)
-
-            summary_line = f"{idx_state['name']} ΔCE: {delta_ce:+,.0f} | ΔPE: {delta_pe:+,.0f} | CE: {ce_type} | PE: {pe_type} | Rule #{rule_num} {stars} -> {decision}"
-
-            eval_res = {
-                "decision": decision,
-                "reason": "Evaluated 16-condition table",
-                "delta_ce": delta_ce,
-                "delta_pe": delta_pe,
-                "ce_price_pct": round(ce_price_pct, 2),
-                "pe_price_pct": round(pe_price_pct, 2),
-                "ce_price_dir": ce_price_dir,
-                "ce_oi_dir": ce_oi_dir,
-                "pe_price_dir": pe_price_dir,
-                "pe_oi_dir": pe_oi_dir,
-                "ce_type": ce_type,
-                "pe_type": pe_type,
-                "rule": rule_num,
-                "stars": stars,
-                "size": size,
-                "summary_line": summary_line,
+            res = {
+                "decision": confirmed or ("WAIT" if raw_signal != "Neutral" else "NEUTRAL"),
+                "raw_signal": raw_signal,
+                "confirmed_signal": confirmed,
+                "score": score,
+                "ce_pct": ce_pct,
+                "pe_pct": pe_pct,
+                "ce_current_sum": round(ce_curr_sum, 2),
+                "pe_current_sum": round(pe_curr_sum, 2),
+                "ce_baseline_sum": round(ce_base, 2),
+                "pe_baseline_sum": round(pe_base, 2),
+                "hold_elapsed_sec": elapsed_sec,
+                "whipsaw_sec": whipsaw_sec,
+                "reason": f"Score {score:+0.2f}% (CE: {ce_pct:+0.2f}%, PE: {pe_pct:+0.2f}%). Hold: {int(elapsed_sec)}/{int(whipsaw_sec)}s",
+                "summary_line": f"{idx_state['name']} SUM SIGNAL: Score {score:+0.2f}% | CE {ce_pct:+0.2f}% vs PE {pe_pct:+0.2f}% -> {confirmed or raw_signal}",
             }
-            idx_state["last_evaluation"] = eval_res
+            idx_state["last_evaluation"] = res
             if underlying_key == NIFTY_KEY:
-                self.last_evaluation = eval_res
+                self.last_evaluation = res
 
-            # Log audit for No Trade rules
-            if decision == "No trade":
-                self._log_signal_audit(
-                    underlying_key=underlying_key,
-                    side="NONE",
-                    strike=idx_state.get("spot_price") or 0.0,
-                    contract_key="",
-                    ltp=0.0,
-                    confidence=f"{stars} Rule #{rule_num}",
-                    action_taken=f"NO_TRADE_RULE_{rule_num}",
-                    delta_ce=delta_ce,
-                    delta_pe=delta_pe,
-                )
+            # Check if active position needs reversal
+            if idx_state.get("current_position"):
+                pos = idx_state["current_position"]
+                if "CE" in pos.get("side", "") and confirmed == "PE Buy":
+                    LOGGER.info("CONFIRMED REVERSAL to PE Buy for %s. Closing CE position at live bid.", underlying_key)
+                    self._exit_single_trade(pos, "SIGNAL_REVERSAL_PE", underlying_key)
+                    return self._enter_sum_signal_trade(underlying_key=underlying_key, side="PE")
+                elif "PE" in pos.get("side", "") and confirmed == "CE Buy":
+                    LOGGER.info("CONFIRMED REVERSAL to CE Buy for %s. Closing PE position at live bid.", underlying_key)
+                    self._exit_single_trade(pos, "SIGNAL_REVERSAL_CE", underlying_key)
+                    return self._enter_sum_signal_trade(underlying_key=underlying_key, side="CE")
                 return None
 
-            # 12. Trade Trigger (Phase 2 Gates & Checks)
-            if decision in ("CE Buy", "PE Buy") and side:
-                if not self.index_enabled.get(underlying_key, True):
-                    LOGGER.info("Decision %s triggered, but index %s is paused today.", decision, underlying_key)
-                    self._log_signal_audit(
-                        underlying_key=underlying_key,
-                        side=side,
-                        strike=idx_state.get("spot_price") or 0.0,
-                        contract_key="",
-                        ltp=0.0,
-                        confidence=f"{stars} Rule #{rule_num}",
-                        action_taken="BLOCKED_INDEX_PAUSED",
-                    )
-                    return None
+            # Fresh Entry Check
+            if confirmed in ("CE Buy", "PE Buy"):
+                side = "CE" if confirmed == "CE Buy" else "PE"
 
-                # Gate 1: Require signal to hold for 2 consecutive OI updates (distinct exchange broadcasts)
-                current_oi_fp = (round(ce_oi_curr_sum, 1), round(pe_oi_curr_sum, 1))
-                last_oi_fp = idx_state.get("last_oi_fingerprint")
-                if not force and current_oi_fp == last_oi_fp and idx_state.get("consecutive_signal") == decision:
-                    return None  # Same exchange OI update, await fresh broadcast
-
-                idx_state["last_oi_fingerprint"] = current_oi_fp
-
-                if idx_state.get("consecutive_signal") == decision:
-                    idx_state["consecutive_count"] = idx_state.get("consecutive_count", 0) + 1
-                else:
-                    idx_state["consecutive_signal"] = decision
-                    idx_state["consecutive_count"] = 1
-
-                if require_consecutive and not force and idx_state.get("consecutive_count", 0) < 2:
-                    self._log_signal_audit(
-                        underlying_key=underlying_key,
-                        side=side,
-                        strike=idx_state.get("spot_price") or 0.0,
-                        contract_key="",
-                        ltp=0.0,
-                        confidence=f"{stars} Rule #{rule_num}",
-                        action_taken="AWAITING_2ND_OI_UPDATE",
-                    )
-                    LOGGER.info("%s signal %s awaiting 2nd consecutive OI update (count: %d).", idx_state["name"], decision, idx_state["consecutive_count"])
-                    return None
-
-                # Gate 2: Futures Check
-                if underlying_key == SENSEX_KEY:
-                    # For SENSEX the futures check is off and only ★★★ signals are allowed
-                    if stars != "⭐⭐⭐":
-                        self._log_signal_audit(
-                            underlying_key=underlying_key,
-                            side=side,
-                            strike=idx_state.get("spot_price") or 0.0,
-                            contract_key="",
-                            ltp=0.0,
-                            confidence=f"{stars} Rule #{rule_num}",
-                            action_taken="BLOCKED_SENSEX_NOT_3_STAR",
-                        )
-                        LOGGER.info("SENSEX blocked signal %s Rule #%s because only ★★★ signals are allowed.", decision, rule_num)
-                        idx_state["consecutive_signal"] = None
-                        idx_state["consecutive_count"] = 0
+                # Check 15-minute cooldown for same direction
+                cooldown_until = idx_state.get("cooldown_until")
+                if cooldown_until and now_dt < cooldown_until:
+                    if idx_state.get("last_closed_side") == side:
+                        LOGGER.debug("Underlying %s in 15-min cooldown for %s until %s", underlying_key, side, cooldown_until)
                         return None
-                else:
-                    # NIFTY and BANK NIFTY: CE Buy needs LB or SC (blocked on SB/LU or non-confirming in live); PE Buy needs SB or LU (blocked on LB/SC or non-confirming in live)
-                    fut_bu = idx_state.get("futures_buildup", "Neutral")
-                    if decision == "CE Buy":
-                        if fut_bu in ("SB", "LU") or (require_consecutive and fut_bu not in ("LB", "SC")):
-                            self._log_signal_audit(
-                                underlying_key=underlying_key,
-                                side=side,
-                                strike=idx_state.get("spot_price") or 0.0,
-                                contract_key="",
-                                ltp=0.0,
-                                confidence=f"{stars} Rule #{rule_num}",
-                                action_taken="BLOCKED_FUTURES_MISMATCH",
-                            )
-                            LOGGER.info("%s blocked CE Buy: Futures buildup is %s (must be LB or SC).", idx_state["name"], fut_bu)
-                            idx_state["consecutive_signal"] = None
-                            idx_state["consecutive_count"] = 0
-                            return None
-                    elif decision == "PE Buy":
-                        if fut_bu in ("LB", "SC") or (require_consecutive and fut_bu not in ("SB", "LU")):
-                            self._log_signal_audit(
-                                underlying_key=underlying_key,
-                                side=side,
-                                strike=idx_state.get("spot_price") or 0.0,
-                                contract_key="",
-                                ltp=0.0,
-                                confidence=f"{stars} Rule #{rule_num}",
-                                action_taken="BLOCKED_FUTURES_MISMATCH",
-                            )
-                            LOGGER.info("%s blocked PE Buy: Futures buildup is %s (must be SB or LU).", idx_state["name"], fut_bu)
-                            idx_state["consecutive_signal"] = None
-                            idx_state["consecutive_count"] = 0
-                            return None
 
-                winner = self._select_best_strike(side, locked_keys=locked_keys) or self._select_atm_strike(side, underlying_key=underlying_key)
-                if not winner:
-                    LOGGER.warning("Could not find valid candidate quote for %s side on %s.", side, underlying_key)
+                # Check daily trade limits
+                max_t = idx_state.get("max_trades_per_day", self.max_trades_per_day)
+                if idx_state.get("today_trades_count", 0) >= max_t:
                     return None
 
-                trigger_ts_ms = trigger_ms or int(time.time() * 1000)
-                trade = self._execute_entry_order(
-                    winner=winner,
-                    side=side,
-                    size=size,
-                    rule_num=rule_num,
-                    stars=stars,
-                    delta_ce=delta_ce,
-                    delta_pe=delta_pe,
-                    ce_type=ce_type,
-                    pe_type=pe_type,
-                    time_str=now_dt.strftime("%H:%M:%S.%f")[:-3],
-                    trigger_ms=trigger_ts_ms,
-                    underlying_key=underlying_key,
-                )
+                # Check daily loss limit
+                loss_lim = idx_state.get("daily_loss_limit_inr", self.daily_loss_limit_inr)
+                if idx_state.get("realized_pnl", 0.0) <= -loss_lim:
+                    return None
+
+                # Check trading hours (09:18 to 14:45)
+                if not force and (now_time_hms < self.entry_start_time or now_time_hms >= self.entry_end_time):
+                    return None
+
+                trade = self._enter_sum_signal_trade(underlying_key=underlying_key, side=side)
                 return trade
 
             return None
+
+    def _enter_sum_signal_trade(self, underlying_key: str, side: str) -> dict[str, Any] | None:
+        """Executes a market entry on confirmed Sum Signal for the selected index."""
+        idx_st = self.index_underlyings.get(underlying_key)
+        if not idx_st:
+            return None
+
+        # Select strike: tightest spread candidate among ITM / ATM basket
+        basket_keys = idx_st.get("ce_basket_keys" if side == "CE" else "pe_basket_keys") or idx_st.get("locked_keys")
+        winner = self._select_best_strike(side, locked_keys=basket_keys)
+        if not winner:
+            winner = self._select_atm_strike(side, underlying_key=underlying_key)
+        if not winner:
+            LOGGER.warning("No candidate strike found for %s %s trade", underlying_key, side)
+            return None
+
+        ask = float(winner.get("ask_price") or 0.0)
+        ltp = float(winner.get("ltp") or 0.0)
+        bid = float(winner.get("bid_price") or 0.0)
+        ref_price = ask if ask > 0 else (ltp if ltp > 0 else 0.0)
+        if ref_price <= 0.0:
+            LOGGER.warning("ORDER REJECTED: No live quotes for %s (%s)", winner.get("trading_symbol"), winner.get("instrument_key"))
+            return None
+
+        limit_price = round(round((ref_price + self.order_buffer) / 0.05) * 0.05, 2)
+        entry_price = ref_price if self.mode == "paper" else limit_price
+        sl_price = round(entry_price * 0.80, 2)   # -20% SL as per Dr. Bhilwade's document
+        tgt_price = round(entry_price * 1.40, 2)  # +40% Target
+
+        lots = self.index_lots.get(underlying_key, idx_st.get("lots", 1))
+        lot_sz = idx_st.get("lot_size") or self.index_lot_sizes.get(underlying_key, self.lot_size)
+        total_qty = lots * lot_sz
+
+        now_dt = datetime.now(IST)
+        trade_id = f"SUM-{now_dt.strftime('%m%d%H%M%S')}-{self._trade_counter}"
+        self._trade_counter += 1
+
+        trade = {
+            "trade_id": trade_id,
+            "trade_date": now_dt.strftime("%Y-%m-%d"),
+            "entry_path": "SUM_SIGNAL",
+            "stop_loss_price": sl_price,
+            "target_price": tgt_price,
+            "side": f"BUY_{side}",
+            "symbol": winner.get("trading_symbol") or f"{idx_st['name']} {winner.get('strike')} {side}",
+            "instrument_key": winner["instrument_key"],
+            "underlying_key": underlying_key,
+            "strike": winner.get("strike"),
+            "lots": lots,
+            "lot_size": total_qty,
+            "entry_time_ist": now_dt.strftime("%H:%M:%S.%f")[:-3],
+            "entry_price": entry_price,
+            "entry_timestamp_ms": int(time.time() * 1000),
+            "exit_time_ist": None,
+            "exit_price": None,
+            "exit_timestamp_ms": None,
+            "exit_reason": None,
+            "pnl_points": 0.0,
+            "net_pnl": 0.0,
+            "status": "OPEN",
+            "spot_price": idx_st.get("spot_price") or self.spot_price,
+            "atm_strike": winner.get("strike"),
+            "current_price": entry_price,
+            "score": idx_st.get("score", 0.0),
+            "ce_pct": idx_st.get("ce_pct", 0.0),
+            "pe_pct": idx_st.get("pe_pct", 0.0),
+            "decision": f"{side} Buy",
+            "highest_price": entry_price,
+            "trailing_active": False,
+            "bot_latency_ms": 0.25,
+            "network_latency_ms": 0.0,
+        }
+
+        idx_st["current_position"] = trade
+        idx_st["today_trades_count"] = idx_st.get("today_trades_count", 0) + 1
+        idx_st["state"] = "HOLDING"
+        if underlying_key == NIFTY_KEY:
+            self.current_position = trade
+            self.state = "HOLDING"
+            self.today_trades_count += 1
+
+        LOGGER.info(
+            "SUM SIGNAL TRADE EXECUTED for %s: %s at %.2f (SL: %.2f [-20%%], TGT: %.2f [+40%%], Score: %s)",
+            underlying_key, trade["symbol"], entry_price, sl_price, tgt_price, idx_st.get("score")
+        )
+        return trade
+
+    def evaluate_oi_buildup(
+        self,
+        underlying_key: str = NIFTY_KEY,
+        trigger_ms: int = 0,
+        force: bool = False,
+        require_consecutive: bool = False,
+    ) -> dict[str, Any] | None:
+        """Backwards compatibility wrapper forwarding to evaluate_sum_signal."""
+        return self.evaluate_sum_signal(underlying_key=underlying_key, trigger_ms=trigger_ms, force=force)
 
     def _select_atm_strike(self, side: str, underlying_key: str = NIFTY_KEY) -> dict[str, Any] | None:
         """Selects the ATM option contract of the chosen side closest to spot price."""
@@ -2417,10 +2366,16 @@ class GapEntryStrategyEngine:
         if not spot or spot <= 0:
             return self._select_best_strike(side)
 
-        target_keys = (idx_st.get("atm_plus_minus_keys") or []) + (idx_st.get("locked_keys") or [])
+        target_keys = (
+            (idx_st.get("atm_plus_minus_keys") or [])
+            + (idx_st.get("locked_keys") or [])
+            + (idx_st.get("ce_basket_keys" if side == "CE" else "pe_basket_keys") or [])
+        )
         candidates = [
             e for e in self.hot_cache.values()
-            if (not target_keys or e.get("instrument_key") in target_keys) and e.get("side") == side and e.get("underlying_key") == underlying_key
+            if (not target_keys or e.get("instrument_key") in target_keys)
+            and e.get("side") == side
+            and e.get("underlying_key") == underlying_key
         ]
         if not candidates:
             candidates = [e for e in self.hot_cache.values() if e.get("side") == side and e.get("underlying_key") == underlying_key]
@@ -2432,7 +2387,7 @@ class GapEntryStrategyEngine:
         return candidates[0]
 
     def evaluate_all_active_underlyings(self) -> list[dict[str, Any]]:
-        """Evaluates all enabled indices and stocks whose trade conditions are ready."""
+        """Evaluates all enabled indices for Sum Signal trades."""
         trades = []
         now_dt = datetime.now(IST)
         now_hms = now_dt.strftime("%H:%M:%S")
@@ -2444,15 +2399,8 @@ class GapEntryStrategyEngine:
                 if idx_st.get("enabled", True):
                     max_t = idx_st.get("max_trades_per_day", self.max_trades_per_day)
                     if idx_st.get("current_position") is None and idx_st.get("today_trades_count", 0) < max_t:
-                        t = self.evaluate_oi_buildup(underlying_key=ukey, require_consecutive=True)
-                        if t:
-                            trades.append(t)
-
-            for sym, st in self.stock_underlyings.items():
-                if st.get("enabled", True):
-                    if st.get("current_position") is None and st.get("today_trades_count", 0) < self.stock_max_trades_per_day:
-                        t = self.evaluate_stock_oi_buildup(sym, require_consecutive=True)
-                        if t:
+                        t = self.evaluate_sum_signal(underlying_key=ukey)
+                        if t and isinstance(t, dict) and t.get("status") == "OPEN":
                             trades.append(t)
         return trades
 
@@ -2799,7 +2747,14 @@ class GapEntryStrategyEngine:
                 return None
 
             # Check if this contract belongs to an index option underlying
-            idx_key = next((ukey for ukey, d in self.index_underlyings.items() if inst_key in d.get("locked_keys", []) or inst_key in d.get("atm_plus_minus_keys", [])), None)
+            idx_key = next(
+                (ukey for ukey, d in self.index_underlyings.items()
+                 if inst_key in d.get("locked_keys", [])
+                 or inst_key in d.get("atm_plus_minus_keys", [])
+                 or inst_key in d.get("ce_basket_keys", [])
+                 or inst_key in d.get("pe_basket_keys", [])),
+                None
+            )
             if not idx_key and inst_key in self.locked_keys:
                 idx_key = NIFTY_KEY
 
@@ -2823,35 +2778,55 @@ class GapEntryStrategyEngine:
                             pos["pnl_points"] = pts
                             pos["net_pnl"] = net
 
-                            # 1. Stop-Loss Check (25% below entry price, sold at live bid)
-                            sl_p = float(pos.get("stop_loss_price") or (entry_price * 0.75))
-                            if current_price <= sl_p:
-                                return self._exit_single_trade(pos, "STOP_LOSS_25PCT", idx_key)
+                            # Stepped Trailing Stop-Loss calculation (Dr. Vijay Bhilwade specification)
+                            # - Initial SL: -20% of entry price
+                            # - Target: +40% of entry price
+                            # - At +5% profit: SL moves to Cost (Break-even, 0% profit)
+                            # - For every further +3% profit (at +8%, +11%, +14%...): raise SL by +2%
+                            profit_pct = ((current_price - entry_price) / entry_price) * 100.0
+                            if profit_pct >= 5.0:
+                                steps = int((profit_pct - 5.0) // 3.0)
+                                trail_pct = steps * 2.0
+                                new_sl = round(entry_price * (1.0 + trail_pct / 100.0), 2)
+                                if new_sl > float(pos.get("stop_loss_price") or 0.0):
+                                    pos["stop_loss_price"] = new_sl
+                                    pos["trailing_active"] = True
+                                    LOGGER.info(
+                                        "Stepped Trailing SL RAISED for %s: new SL %.2f (+%.1f%% lock) at profit +%.2f%%",
+                                        pos.get("symbol"), new_sl, trail_pct, profit_pct
+                                    )
 
-                            # 2. Target Check (40% above entry price, sold at live bid)
+                            # 1. Stop-Loss Check (sold at live bid)
+                            sl_p = float(pos.get("stop_loss_price") or (entry_price * 0.80))
+                            if current_price <= sl_p:
+                                if pos.get("trailing_active"):
+                                    reason = "TRAILING_STOP_LOSS"
+                                elif pos.get("entry_path") == "PATH_1_0915":
+                                    reason = "STOP_LOSS_25PCT"
+                                else:
+                                    reason = "STOP_LOSS_20PCT"
+                                return self._exit_single_trade(pos, reason, idx_key)
+
+                            # 2. Target Check (+40% above entry price, sold at live bid)
                             tgt_p = float(pos.get("target_price") or (entry_price * 1.40))
                             if current_price >= tgt_p:
                                 return self._exit_single_trade(pos, "TARGET_40PCT", idx_key)
 
-                            # 3. Path 1 (09:15 entry) 09:45:00 Cutoff Exit (only for trades entered before 09:45)
+                            # 3. Path 1 (09:15 entry) 09:45:00 Cutoff Exit (only for trades entered under PATH_1_0915 before 09:45)
                             entry_time = str(pos.get("entry_time_ist") or "")
                             if self.re_eval_min_interval_sec > 0 and pos.get("entry_path") == "PATH_1_0915" and now_time_hms >= "09:45:00" and entry_time < "09:45:00":
                                 return self._exit_single_trade(pos, "TIME_EXIT_0945", idx_key)
 
-                            # 4. Futures Flip Check (NIFTY & BANK NIFTY: CE exit on SB/LU, PE exit on LB/SC)
-                            if idx_key != SENSEX_KEY:
-                                fut_bu = idx_st.get("futures_buildup", "Neutral")
-                                if "CE" in pos.get("side", "") and fut_bu in ("SB", "LU"):
-                                    return self._exit_single_trade(pos, "FUTURES_FLIP_BEARISH", idx_key)
-                                elif "PE" in pos.get("side", "") and fut_bu in ("LB", "SC"):
-                                    return self._exit_single_trade(pos, "FUTURES_FLIP_BULLISH", idx_key)
-
-                            # 5. Signal Reversal Check
-                            last_dec = idx_st.get("last_evaluation", {}).get("decision")
-                            if "CE" in pos.get("side", "") and last_dec == "PE Buy":
-                                return self._exit_single_trade(pos, "SIGNAL_REVERSAL_PE", idx_key)
-                            elif "PE" in pos.get("side", "") and last_dec == "CE Buy":
-                                return self._exit_single_trade(pos, "SIGNAL_REVERSAL_CE", idx_key)
+                            # 4. Confirmed Signal Reversal Check (Opposite signal confirmed after 5 minutes hold)
+                            confirmed_sig = idx_st.get("confirmed_signal")
+                            if "CE" in pos.get("side", "") and confirmed_sig == "PE Buy":
+                                exited_trade = self._exit_single_trade(pos, "SIGNAL_REVERSAL_PE", idx_key)
+                                self._enter_sum_signal_trade(underlying_key=idx_key, side="PE")
+                                return exited_trade
+                            elif "PE" in pos.get("side", "") and confirmed_sig == "CE Buy":
+                                exited_trade = self._exit_single_trade(pos, "SIGNAL_REVERSAL_CE", idx_key)
+                                self._enter_sum_signal_trade(underlying_key=idx_key, side="CE")
+                                return exited_trade
 
                 # Check daily limits: max 3 trades per index, daily loss limit, cutoff 14:45
                 max_t = idx_st.get("max_trades_per_day", self.max_trades_per_day)
@@ -2863,11 +2838,11 @@ class GapEntryStrategyEngine:
                     return None
 
                 # =========================================================================
-                # PATH 2: 09:18 OI BUILD-UP EVALUATION (From 09:18:00 onwards)
+                # PATH 2: SUM SIGNAL EVALUATION (From 09:18:00 onwards)
                 # =========================================================================
                 if now_time_hms >= self.entry_start_time:
-                    trade = self.evaluate_oi_buildup(underlying_key=idx_key, trigger_ms=ts_ms, require_consecutive=True)
-                    if trade:
+                    trade = self.evaluate_sum_signal(underlying_key=idx_key, trigger_ms=ts_ms)
+                    if trade and isinstance(trade, dict) and trade.get("status") == "OPEN":
                         return trade
 
                 # =========================================================================
@@ -3399,6 +3374,8 @@ class GapEntryStrategyEngine:
             idx_st = self.index_underlyings[underlying_key]
             idx_st["current_position"] = None
             idx_st["realized_pnl"] = round(idx_st.get("realized_pnl", 0.0) + net_pnl, 2)
+            idx_st["cooldown_until"] = now_dt + timedelta(minutes=15)
+            idx_st["last_closed_side"] = "CE" if "CE" in pos.get("side", "") else "PE"
             loss_lim = idx_st.get("daily_loss_limit_inr", self.daily_loss_limit_inr)
             max_t = idx_st.get("max_trades_per_day", self.max_trades_per_day)
 

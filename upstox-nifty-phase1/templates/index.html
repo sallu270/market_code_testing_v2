@@ -81,12 +81,12 @@
          ==================================================================== -->
     <div class="tab-pane active" id="tab-dashboard">
 
-      <!-- Section 1: Indices · ATM ±1 summed -->
+      <!-- Section 1: Indices · Sum Signal Strategy -->
       <section class="dash-section">
         <div class="section-header">
           <div class="section-title-wrap">
-            <h2 class="section-title">Indices &middot; ATM &plusmn;1 summed</h2>
-            <span class="section-meta">OI in lakh &middot; 09:15 baseline &middot; Futures = current month</span>
+            <h2 class="section-title">Indices &middot; Sum Signal Strategy (Score = CE % - PE %)</h2>
+            <span class="section-meta">ATM &plusmn; 5 strikes (22 options per index) &middot; 09:15 Baseline Sum &middot; 5-Min Confirmation</span>
           </div>
         </div>
         <div class="table-card">
@@ -94,36 +94,27 @@
             <thead>
               <tr>
                 <th class="col-inst text-left">INSTRUMENT<br><span class="th-sub">NAME &middot; SPOT &middot; ATM</span></th>
-                <th colspan="4" class="col-grp-ce text-center">CALLS (CE)</th>
-                <th colspan="4" class="col-grp-pe text-center">PUTS (PE)</th>
-                <th colspan="3" class="col-grp-sig text-center">OPTION SIGNAL</th>
-                <th colspan="4" class="col-grp-fut text-center">FUTURES</th>
-                <th colspan="3" class="col-grp-dec text-center">DECISION</th>
+                <th colspan="3" class="col-grp-ce text-center">CALLS (CE) BASKET &middot; ATM &plusmn; 5</th>
+                <th colspan="3" class="col-grp-pe text-center">PUTS (PE) BASKET &middot; ATM &plusmn; 5</th>
+                <th colspan="2" class="col-grp-sig text-center">SUM SIGNAL</th>
+                <th colspan="3" class="col-grp-dec text-center">CONFIRMATION &amp; DECISION</th>
               </tr>
               <tr class="sub-headers">
                 <th class="text-left"></th>
                 <!-- CE -->
-                <th class="text-right">&Delta;OI</th>
-                <th class="text-right">&Delta;OI %</th>
-                <th class="text-right">PRICE %</th>
-                <th class="text-center">BUILD-UP</th>
+                <th class="text-right">09:15 BASE</th>
+                <th class="text-right">LIVE SUM</th>
+                <th class="text-right">CE %</th>
                 <!-- PE -->
-                <th class="text-right">&Delta;OI</th>
-                <th class="text-right">&Delta;OI %</th>
-                <th class="text-right">PRICE %</th>
-                <th class="text-center">BUILD-UP</th>
-                <!-- OPTION SIGNAL -->
-                <th class="text-right">I</th>
-                <th class="text-center">COND</th>
-                <th class="text-center">SIGNAL</th>
-                <!-- FUTURES -->
-                <th class="text-right">PRICE %</th>
-                <th class="text-right">OI %</th>
-                <th class="text-center">BUILD-UP</th>
-                <th class="text-center">GATE</th>
-                <!-- DECISION -->
-                <th class="text-center">RANK &middot; LOTS</th>
-                <th class="text-center">HOLD</th>
+                <th class="text-right">09:15 BASE</th>
+                <th class="text-right">LIVE SUM</th>
+                <th class="text-right">PE %</th>
+                <!-- SUM SIGNAL -->
+                <th class="text-center">SCORE</th>
+                <th class="text-center">RAW SIGNAL</th>
+                <!-- CONFIRMATION & DECISION -->
+                <th class="text-center">5-MIN HOLD</th>
+                <th class="text-center">DECISION</th>
                 <th class="text-center">ACTION</th>
               </tr>
             </thead>

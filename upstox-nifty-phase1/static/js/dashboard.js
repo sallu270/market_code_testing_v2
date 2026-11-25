@@ -132,11 +132,11 @@
     return `<span class="act-badge act-no-trade">NO TRADE</span>`;
   }
 
-  // 1. Render Indices Table
+  // 1. Render Indices Table (Sum Signal Strategy)
   function renderIndices(indices) {
     if (!tbodyIndices) return;
     if (!indices || !indices.length) {
-      tbodyIndices.innerHTML = `<tr><td colspan="19" class="text-center text-muted">Awaiting index data...</td></tr>`;
+      tbodyIndices.innerHTML = `<tr><td colspan="12" class="text-center text-muted">Awaiting index data...</td></tr>`;
       return;
     }
 
@@ -149,6 +149,42 @@
       const spotCls = changePct >= 0 ? 'text-green' : 'text-red';
       const changeSign = changePct >= 0 ? '+' : '';
 
+      const ceBase = idx.ce_baseline_sum ? Number(idx.ce_baseline_sum).toFixed(2) : '-';
+      const ceCurr = idx.ce_current_sum ? Number(idx.ce_current_sum).toFixed(2) : '-';
+      const cePct = idx.ce_pct !== undefined ? idx.ce_pct : 0.0;
+
+      const peBase = idx.pe_baseline_sum ? Number(idx.pe_baseline_sum).toFixed(2) : '-';
+      const peCurr = idx.pe_current_sum ? Number(idx.pe_current_sum).toFixed(2) : '-';
+      const pePct = idx.pe_pct !== undefined ? idx.pe_pct : 0.0;
+
+      const score = idx.score !== undefined ? idx.score : (cePct - pePct);
+      const scoreSign = score > 0 ? '+' : '';
+      const scoreCls = score > 2.0 ? 'text-green font-bold' : (score < -2.0 ? 'text-red font-bold' : 'text-muted font-bold');
+
+      const rawSig = idx.raw_signal || 'Neutral';
+      let rawSigBadge = '<span class="text-dim">Neutral</span>';
+      if (rawSig === 'CE Buy') {
+        rawSigBadge = '<span class="bu-badge bu-lb font-bold">CE Buy</span>';
+      } else if (rawSig === 'PE Buy') {
+        rawSigBadge = '<span class="bu-badge bu-sb font-bold">PE Buy</span>';
+      }
+
+      let holdBadge = '<span class="text-dim">-</span>';
+      if (idx.confirmed_signal) {
+        holdBadge = `<span class="gate-pass font-bold">CONFIRMED (${Math.round(idx.whipsaw_sec || 300)}s)</span>`;
+      } else if (idx.hold_elapsed_sec > 0) {
+        holdBadge = `<span class="text-cyan font-bold">${Math.round(idx.hold_elapsed_sec)}s / ${Math.round(idx.whipsaw_sec || 300)}s</span>`;
+      }
+
+      let decBadge = '<span class="text-dim">No trade</span>';
+      if (idx.confirmed_signal === 'CE Buy' || idx.decision === 'CE Buy') {
+        decBadge = '<span class="text-green font-bold">CE Buy</span>';
+      } else if (idx.confirmed_signal === 'PE Buy' || idx.decision === 'PE Buy') {
+        decBadge = '<span class="text-red font-bold">PE Buy</span>';
+      } else if (rawSig !== 'Neutral') {
+        decBadge = `<span class="text-amber font-bold">${rawSig} (Holding)</span>`;
+      }
+
       html += `<tr>
         <td class="text-left">
           <strong class="font-bold text-bright">${name}</strong><br>
@@ -156,38 +192,23 @@
           <span class="text-dim font-bold">&middot; ATM ${atm}</span>
         </td>
         
-        <!-- CE -->
-        <td class="text-right">${fmtLakh(idx.delta_ce)}</td>
-        <td class="text-right">${fmtPct(idx.delta_ce_pct)}</td>
-        <td class="text-right">${fmtPct(idx.ce_price_pct)}</td>
-        <td class="text-center">${fmtBuildup(idx.ce_buildup)}</td>
+        <!-- CE BASKET -->
+        <td class="text-right">${ceBase}</td>
+        <td class="text-right font-bold text-bright">${ceCurr}</td>
+        <td class="text-right">${fmtPct(cePct)}</td>
 
-        <!-- PE -->
-        <td class="text-right">${fmtLakh(idx.delta_pe)}</td>
-        <td class="text-right">${fmtPct(idx.delta_pe_pct)}</td>
-        <td class="text-right">${fmtPct(idx.pe_price_pct)}</td>
-        <td class="text-center">${fmtBuildup(idx.pe_buildup)}</td>
+        <!-- PE BASKET -->
+        <td class="text-right">${peBase}</td>
+        <td class="text-right font-bold text-bright">${peCurr}</td>
+        <td class="text-right">${fmtPct(pePct)}</td>
 
-        <!-- OPTION SIGNAL -->
-        <td class="text-right">${fmtI(idx.oi_balance_i)}</td>
-        <td class="text-center font-bold text-bright">${idx.rule_number ? idx.rule_number : '-'}</td>
-        <td class="text-center">
-          ${idx.decision === 'CE Buy' ? '<span class="text-green font-bold">CE Buy</span>' :
-            idx.decision === 'PE Buy' ? '<span class="text-red font-bold">PE Buy</span>' :
-            '<span class="text-dim">No trade</span>'}
-        </td>
+        <!-- SUM SIGNAL -->
+        <td class="text-center"><span class="${scoreCls}">${scoreSign}${Number(score).toFixed(2)}%</span></td>
+        <td class="text-center">${rawSigBadge}</td>
 
-        <!-- FUTURES -->
-        <td class="text-right">${fmtPct(idx.futures_price_pct)}</td>
-        <td class="text-right">${fmtPct(idx.futures_oi_pct)}</td>
-        <td class="text-center">${fmtBuildup(idx.futures_buildup)}</td>
-        <td class="text-center">${fmtGate(idx.futures_gate)}</td>
-
-        <!-- DECISION -->
-        <td class="text-center font-bold">
-          ${idx.stars ? `<span class="text-gold">${idx.stars}</span> ` : ''}${idx.size || (idx.decision === 'No trade' ? 'No trade' : 'Normal')}
-        </td>
-        <td class="text-center text-muted font-bold">${idx.hold || '2/2'}</td>
+        <!-- CONFIRMATION & DECISION -->
+        <td class="text-center">${holdBadge}</td>
+        <td class="text-center">${decBadge}</td>
         <td class="text-center">${renderIndexAction(idx)}</td>
       </tr>`;
     });
