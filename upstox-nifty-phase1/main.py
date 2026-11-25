@@ -134,11 +134,9 @@ def handle_tick(tick: dict[str, Any]) -> None:
 # DualUpstoxFeed is kept intact but forced into single-feed mode by passing empty stock_keys and
 # a combined index_keys list that includes all 50 equity keys + index/futures keys.
 
+# Indices Only: Stream strictly index spot and index option instruments
 initial_index_keys = list(settings.instrument_keys)
-initial_stock_keys = [s["key"] for s in NIFTY_50_STOCKS if s.get("key")]
-
-# Combine all keys into one list (indices first, then stocks) for single WebSocket
-all_initial_keys = initial_index_keys + [k for k in initial_stock_keys if k not in initial_index_keys]
+all_initial_keys = initial_index_keys
 
 # Use a single UpstoxFeed instead of DualUpstoxFeed to avoid 403 from second connection
 feed = UpstoxFeed(
@@ -598,136 +596,9 @@ def api_dashboard_data() -> Response:
             "strikes": sorted_stks,
         })
 
-    # 2. Top stocks enriched with live engine evaluation and database state
-    wl = stock_screener.get_tomorrow_watchlist()
-    raw_bullish = wl.get("top_bullish", [])
-    raw_bearish = wl.get("top_bearish", [])
-
-    def _enrich_stock(s: dict[str, Any], direction_hint: str) -> dict[str, Any]:
-        sym = s.get("symbol", "")
-        stk_st = strategy_engine.stock_underlyings.get(sym, {})
-        last_eval = stk_st.get("last_evaluation") or {}
-
-        # 1. Live spot price & screening metrics
-        spot_price = float(stk_st.get("spot_price") or s.get("price") or 0.0)
-        prev_close = float(stk_st.get("prev_close") or s.get("prev_close") or spot_price or 1.0)
-        net_change_pct = round(((spot_price - prev_close) / prev_close) * 100.0, 2) if (prev_close > 0 and spot_price > 0) else float(s.get("change_pct") or 0.0)
-        gap_pct = float(stk_st.get("gap_pct") if stk_st.get("gap_pct") is not None else (s.get("gap_pct") or 0.0))
-        rvol = float(s.get("rvol") or 1.0)
-        step = float(stk_st.get("strike_step") or s.get("strike_step") or 10.0)
-        atm_strike = round(spot_price / step) * step if (spot_price > 0 and step > 0) else None
-
-        # 2. Ensure ATM contracts are planned & locked for Top watchlist stocks
-        if spot_price > 0 and not stk_st.get("locked_keys"):
-            try:
-                strategy_engine.plan_stock_contracts(sym, spot_price)
-                strategy_engine.lock_stock_contracts(sym)
-                l_keys = stk_st.get("locked_keys") or []
-                ce_sub = [k for k in l_keys if strategy_engine.hot_cache.get(k, {}).get("side") == "CE"][:1]
-                pe_sub = [k for k in l_keys if strategy_engine.hot_cache.get(k, {}).get("side") == "PE"][:1]
-                to_sub = ce_sub + pe_sub
-                if to_sub and feed and hasattr(feed, "subscribe"):
-                    feed.subscribe(to_sub)
-            except Exception as ex:
-                LOGGER.debug("Auto-plan ATM options failed for %s: %s", sym, ex)
-
-        # 3. Pull live ATM option metrics
-        delta_ce = float(last_eval.get("delta_ce") or 0.0)
-        delta_pe = float(last_eval.get("delta_pe") or 0.0)
-        ce_price_pct = float(last_eval.get("ce_price_pct") or 0.0)
-        pe_price_pct = float(last_eval.get("pe_price_pct") or 0.0)
-        ce_bu = last_eval.get("ce_type")
-        pe_bu = last_eval.get("pe_type")
-        rule_num = last_eval.get("rule")
-        decision = last_eval.get("decision") or "No trade"
-
-        locked_keys = stk_st.get("locked_keys") or []
-        ce_keys = [k for k in locked_keys if strategy_engine.hot_cache.get(k, {}).get("side") == "CE"]
-        pe_keys = [k for k in locked_keys if strategy_engine.hot_cache.get(k, {}).get("side") == "PE"]
-
-        if delta_ce == 0.0 and ce_keys:
-            ce_entry = strategy_engine.hot_cache.get(ce_keys[0], {})
-            ce_ref = float(ce_entry.get("ref_ltp") or ce_entry.get("prev_close") or 0.0)
-            ce_ltp = float(ce_entry.get("ltp") or ce_entry.get("bid_price") or 0.0)
-            if ce_ref > 0 and ce_ltp > 0:
-                ce_price_pct = round(((ce_ltp - ce_ref) / ce_ref) * 100.0, 2)
-            ce_oi = float(ce_entry.get("oi") or 0.0)
-            ce_prev_oi = float(ce_entry.get("prev_oi") or ce_oi or 0.0)
-            if ce_prev_oi > 0 and ce_oi > 0:
-                delta_ce = ce_oi - ce_prev_oi
-                ce_oi_pct = round((delta_ce / ce_prev_oi) * 100.0, 2)
-            ce_bu = ce_entry.get("build_up") or ce_bu or "NEU"
-
-        if delta_pe == 0.0 and pe_keys:
-            pe_entry = strategy_engine.hot_cache.get(pe_keys[0], {})
-            pe_ref = float(pe_entry.get("ref_ltp") or pe_entry.get("prev_close") or 0.0)
-            pe_ltp = float(pe_entry.get("ltp") or pe_entry.get("bid_price") or 0.0)
-            if pe_ref > 0 and pe_ltp > 0:
-                pe_price_pct = round(((pe_ltp - pe_ref) / pe_ref) * 100.0, 2)
-            pe_oi = float(pe_entry.get("oi") or 0.0)
-            pe_prev_oi = float(pe_entry.get("prev_oi") or pe_oi or 0.0)
-            if pe_prev_oi > 0 and pe_oi > 0:
-                delta_pe = pe_oi - pe_prev_oi
-                pe_oi_pct = round((delta_pe / pe_prev_oi) * 100.0, 2)
-            pe_bu = pe_entry.get("build_up") or pe_bu or "NEU"
-
-        tot_oi_abs = abs(delta_pe) + abs(delta_ce)
-        oi_i = round((delta_pe - delta_ce) / tot_oi_abs, 2) if tot_oi_abs > 0 else (0.0 if (delta_ce or delta_pe) else None)
-
-        fut_ltp = float(stk_st.get("futures_ltp") or 0.0)
-        fut_prev = float(stk_st.get("futures_prev_close") or fut_ltp or 1.0)
-        fut_price_pct = round(((fut_ltp - fut_prev) / fut_prev) * 100.0, 2) if (fut_prev > 0 and fut_ltp > 0) else float(s.get("change_pct") or 0.0)
-
-        fut_oi = float(stk_st.get("futures_oi") or 0.0)
-        fut_prev_oi = float(stk_st.get("futures_prev_oi") or fut_oi or 1.0)
-        fut_oi_pct = round(((fut_oi - fut_prev_oi) / fut_prev_oi) * 100.0, 2) if (fut_prev_oi > 0 and fut_oi > 0) else float(s.get("fut_oi_change_pct") or 0.0)
-        fut_bu = stk_st.get("futures_buildup") or s.get("fut_buildup") or "NEU"
-
-        if decision == "CE Buy":
-            action = "ENTER CE"
-        elif decision == "PE Buy":
-            action = "ENTER PE"
-        elif stk_st.get("current_position"):
-            action = "EXIT 1/2"
-        else:
-            action = "NO_TRADE"
-
-        clv = float(s.get("clv") if s.get("clv") is not None else 0.5)
-        score = round(clv * 100) if direction_hint == "BULLISH" else round((clv - 1.0) * 100)
-
-        return {
-            "symbol": sym,
-            "name": s.get("name", sym),
-            "spot_price": spot_price,
-            "prev_close": prev_close,
-            "net_change_pct": net_change_pct,
-            "gap_pct": gap_pct,
-            "rvol": rvol,
-            "atm_strike": atm_strike,
-            "score": score,
-            "rank": s.get("rank") or stk_st.get("watchlist_rank") or "★★",
-            "size": last_eval.get("size") or "Normal",
-            "delta_ce": delta_ce,
-            "ce_oi_pct": round(delta_ce / 100000.0, 2) if delta_ce else None,
-            "ce_price_pct": ce_price_pct if ce_price_pct != 0.0 else None,
-            "ce_buildup": ce_bu,
-            "delta_pe": delta_pe,
-            "pe_oi_pct": round(delta_pe / 100000.0, 2) if delta_pe else None,
-            "pe_price_pct": pe_price_pct if pe_price_pct != 0.0 else None,
-            "pe_buildup": pe_bu,
-            "oi_balance_i": oi_i,
-            "rule_number": rule_num,
-            "futures_price_pct": fut_price_pct,
-            "futures_oi_pct": fut_oi_pct,
-            "fut_buildup": fut_bu,
-            "decision": decision,
-            "action": action,
-        }
-
-    max_bull = getattr(strategy_engine, "max_bullish_stocks", 5)
-    max_bear = getattr(strategy_engine, "max_bearish_stocks", 5)
-    top_bullish = [_enrich_stock(s, "BULLISH") for s in raw_bullish[:max_bull]]
-    top_bearish = [_enrich_stock(s, "BEARISH") for s in raw_bearish[:max_bear]]
+    # 2. Platform in Indices-Only Mode: Stocks disabled
+    top_bullish: list[dict[str, Any]] = []
+    top_bearish: list[dict[str, Any]] = []
 
     # 3. Alerts
     recent_alerts = strategy_engine.get_alerts(limit=50)

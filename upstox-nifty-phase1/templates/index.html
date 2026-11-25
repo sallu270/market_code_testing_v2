@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OI Conditions Dashboard | NIFTY · BANK NIFTY · SENSEX · Stocks</title>
+  <title>Sum Signal &amp; Positive Tick Dashboard | NIFTY &middot; BANK NIFTY &middot; SENSEX</title>
   <link rel="stylesheet" href="/static/css/dashboard.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -119,110 +119,6 @@
               </tr>
             </thead>
             <tbody id="tbody-indices">
-              <!-- Dynamically populated via JS -->
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- Section 2: NIFTY 50 stocks · Top Bullish -->
-      <section class="dash-section">
-        <div class="section-header">
-          <div class="section-title-wrap">
-            <h2 class="section-title">NIFTY 50 stocks &middot; Top <span id="heading-count-bullish">5</span> Bullish</h2>
-            <span class="section-meta">Sorted by Power Score / CLV (highest score first) &middot; only tradeable rows (gate passed)</span>
-          </div>
-        </div>
-        <div class="table-card">
-          <table class="data-table" id="table-stocks-bullish">
-            <thead>
-              <tr>
-                <th class="col-idx text-center">#</th>
-                <th class="col-sym text-left">SYMBOL</th>
-                <th class="col-score text-right">SCORE</th>
-                <th colspan="3" class="col-grp-ce text-center">CALLS (CE)</th>
-                <th colspan="3" class="col-grp-pe text-center">PUTS (PE)</th>
-                <th colspan="2" class="col-grp-sig text-center">OPTION</th>
-                <th colspan="3" class="col-grp-fut text-center">FUTURES</th>
-                <th colspan="2" class="col-grp-dec text-center">DECISION</th>
-              </tr>
-              <tr class="sub-headers">
-                <th></th>
-                <th></th>
-                <th></th>
-                <!-- CE -->
-                <th class="text-right">&Delta;OI %</th>
-                <th class="text-right">PRICE %</th>
-                <th class="text-center">BUILD-UP</th>
-                <!-- PE -->
-                <th class="text-right">&Delta;OI %</th>
-                <th class="text-right">PRICE %</th>
-                <th class="text-center">BUILD-UP</th>
-                <!-- OPTION -->
-                <th class="text-right">I</th>
-                <th class="text-center">COND</th>
-                <!-- FUTURES -->
-                <th class="text-right">PRICE %</th>
-                <th class="text-right">OI %</th>
-                <th class="text-center">BUILD-UP</th>
-                <!-- DECISION -->
-                <th class="text-center">RANK &middot; LOTS</th>
-                <th class="text-center">ACTION</th>
-              </tr>
-            </thead>
-            <tbody id="tbody-stocks-bullish">
-              <!-- Dynamically populated via JS -->
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- Section 3: NIFTY 50 stocks · Top Bearish -->
-      <section class="dash-section">
-        <div class="section-header">
-          <div class="section-title-wrap">
-            <h2 class="section-title">NIFTY 50 stocks &middot; Top <span id="heading-count-bearish">5</span> Bearish</h2>
-            <span class="section-meta">Sorted by Power Score (most negative first)</span>
-          </div>
-        </div>
-        <div class="table-card">
-          <table class="data-table" id="table-stocks-bearish">
-            <thead>
-              <tr>
-                <th class="col-idx text-center">#</th>
-                <th class="col-sym text-left">SYMBOL</th>
-                <th class="col-score text-right">SCORE</th>
-                <th colspan="3" class="col-grp-ce text-center">CALLS (CE)</th>
-                <th colspan="3" class="col-grp-pe text-center">PUTS (PE)</th>
-                <th colspan="2" class="col-grp-sig text-center">OPTION</th>
-                <th colspan="3" class="col-grp-fut text-center">FUTURES</th>
-                <th colspan="2" class="col-grp-dec text-center">DECISION</th>
-              </tr>
-              <tr class="sub-headers">
-                <th></th>
-                <th></th>
-                <th></th>
-                <!-- CE -->
-                <th class="text-right">&Delta;OI %</th>
-                <th class="text-right">PRICE %</th>
-                <th class="text-center">BUILD-UP</th>
-                <!-- PE -->
-                <th class="text-right">&Delta;OI %</th>
-                <th class="text-right">PRICE %</th>
-                <th class="text-center">BUILD-UP</th>
-                <!-- OPTION -->
-                <th class="text-right">I</th>
-                <th class="text-center">COND</th>
-                <!-- FUTURES -->
-                <th class="text-right">PRICE %</th>
-                <th class="text-right">OI %</th>
-                <th class="text-center">BUILD-UP</th>
-                <!-- DECISION -->
-                <th class="text-center">RANK &middot; LOTS</th>
-                <th class="text-center">ACTION</th>
-              </tr>
-            </thead>
-            <tbody id="tbody-stocks-bearish">
               <!-- Dynamically populated via JS -->
             </tbody>
           </table>
@@ -376,7 +272,7 @@
         <div class="settings-header">
           <div class="settings-header-left">
             <h2 class="settings-title">⚙️ Bot Settings & Strategy Configuration</h2>
-            <p class="settings-subtitle">Manage pre-defined stock screener limits, lot sizing rules, index allocations, and strategy risk parameters. All changes auto-save instantly.</p>
+            <p class="settings-subtitle">Manage lot sizing rules and index allocations, and strategy risk parameters. All changes auto-save instantly.</p>
           </div>
           <div class="settings-header-right">
             <button class="btn btn-sm btn-outline" id="btn-back-to-dashboard" title="Switch back to Live Dashboard">← Return to Dashboard</button>
@@ -388,39 +284,11 @@
           <div class="qc-header">
             <div class="qc-header-left">
               <span class="qc-badge">PRE-DEFINED TRADING CONTROLS</span>
-              <span class="qc-sub">Click any pill to adjust today's stock screener limits and lot sizing (instant & auto-saved)</span>
+              <span class="qc-sub">Click any pill to adjust lot sizing rules and index allocations (instant & auto-saved)</span>
             </div>
             <div class="qc-header-right" id="qc-feedback">Ready</div>
           </div>
           <div class="qc-grid">
-            <!-- Bullish Stocks Limit -->
-            <div class="qc-group" data-param="max_bullish_stocks">
-              <div class="qc-label-wrap">
-                <span class="qc-label">BULLISH STOCKS TODAY</span>
-                <span class="qc-current-val text-green font-bold" id="lbl-val-bullish">5</span>
-              </div>
-              <div class="pill-group" id="pill-bullish-stocks">
-                <button class="pill-btn" data-param="max_bullish_stocks" data-val="1">1</button>
-                <button class="pill-btn" data-param="max_bullish_stocks" data-val="2">2</button>
-                <button class="pill-btn" data-param="max_bullish_stocks" data-val="3">3</button>
-                <button class="pill-btn active" data-param="max_bullish_stocks" data-val="5">5</button>
-              </div>
-            </div>
-
-            <!-- Bearish Stocks Limit -->
-            <div class="qc-group" data-param="max_bearish_stocks">
-              <div class="qc-label-wrap">
-                <span class="qc-label">BEARISH STOCKS TODAY</span>
-                <span class="qc-current-val text-red font-bold" id="lbl-val-bearish">5</span>
-              </div>
-              <div class="pill-group" id="pill-bearish-stocks">
-                <button class="pill-btn" data-param="max_bearish_stocks" data-val="1">1</button>
-                <button class="pill-btn" data-param="max_bearish_stocks" data-val="2">2</button>
-                <button class="pill-btn" data-param="max_bearish_stocks" data-val="3">3</button>
-                <button class="pill-btn active" data-param="max_bearish_stocks" data-val="5">5</button>
-              </div>
-            </div>
-
             <!-- Full Lots -->
             <div class="qc-group" data-param="lots_full">
               <div class="qc-label-wrap">

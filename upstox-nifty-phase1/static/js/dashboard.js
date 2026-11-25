@@ -25,8 +25,6 @@
   const elTradesCounter = document.getElementById('trades-counter-text');
 
   const tbodyIndices = document.getElementById('tbody-indices');
-  const tbodyBullish = document.getElementById('tbody-stocks-bullish');
-  const tbodyBearish = document.getElementById('tbody-stocks-bearish');
   const tbodyStrikes = document.getElementById('tbody-strikes') || document.getElementById('tbody-strike-detail');
   const elStrikeTitle = document.getElementById('strike-table-title') || document.getElementById('strike-detail-title');
   const alertsContainer = document.getElementById('alerts-container');
@@ -115,23 +113,6 @@
     return `<button class="btn-table-action act-arm" data-action="arm" data-key="${key}" title="Arm ${shortName} now">ARM ${shortName.toUpperCase()}</button>`;
   }
 
-  function renderStockAction(st) {
-    const sym = st.symbol || '';
-    const act = (st.action || '').toUpperCase();
-    const dec = (st.decision || '').toUpperCase();
-
-    if (act.includes('EXIT')) {
-      return `<button class="btn-table-action act-exit-half" data-action="exit" data-key="${sym}" title="Exit ${sym}">EXIT 1/2</button>`;
-    }
-    if (act.includes('ENTER CE') || dec.includes('CE BUY')) {
-      return `<button class="btn-table-action act-enter-ce" data-action="enter" data-key="${sym}" data-side="CE" title="Enter CE for ${sym}">ENTER CE</button>`;
-    }
-    if (act.includes('ENTER PE') || dec.includes('PE BUY')) {
-      return `<button class="btn-table-action act-enter-pe" data-action="enter" data-key="${sym}" data-side="PE" title="Enter PE for ${sym}">ENTER PE</button>`;
-    }
-    return `<span class="act-badge act-no-trade">NO TRADE</span>`;
-  }
-
   // 1. Render Indices Table (Sum Signal Strategy)
   function renderIndices(indices) {
     if (!tbodyIndices) return;
@@ -214,138 +195,6 @@
     });
 
     tbodyIndices.innerHTML = html;
-  }
-
-  // 2. Render Top Bullish Stocks (All Live Engine & Screener Bound)
-  function renderBullishStocks(stocks) {
-    if (!tbodyBullish) return;
-    const headingEl = document.getElementById('heading-count-bullish');
-    if (headingEl && stocks) headingEl.textContent = stocks.length;
-
-    if (!stocks || !stocks.length) {
-      tbodyBullish.innerHTML = `<tr><td colspan="15" class="text-center text-muted">Awaiting bullish screener data...</td></tr>`;
-      return;
-    }
-
-    let html = '';
-    stocks.forEach((st, i) => {
-      const sym = st.symbol || 'STOCK';
-      const score = st.score !== undefined && st.score !== null ? st.score : (st.clv !== undefined ? Math.round(st.clv * 100) : null);
-      const scoreDisp = score !== null ? (score > 0 ? `+${score}` : `${score}`) : '-';
-
-      const spot = (st.spot_price && Number(st.spot_price) > 0)
-        ? `₹${Number(st.spot_price).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
-        : '-';
-      const changePct = st.net_change_pct !== undefined && st.net_change_pct !== null ? Number(st.net_change_pct) : Number(st.change_pct || 0);
-      const spotCls = changePct >= 0 ? 'text-green font-mono' : 'text-red font-mono';
-      const changeSign = changePct >= 0 ? '+' : '';
-      const gapDisp = st.gap_pct !== undefined && st.gap_pct !== null ? `${st.gap_pct > 0 ? '+' : ''}${Number(st.gap_pct).toFixed(2)}%` : '-';
-      const rvolDisp = st.rvol ? `${Number(st.rvol).toFixed(1)}x` : '-';
-      const atmDisp = st.atm_strike ? `ATM ${Number(st.atm_strike).toLocaleString()}` : '';
-
-      html += `<tr>
-        <td class="text-center text-dim font-bold">${i + 1}</td>
-        <td class="text-left">
-          <strong class="font-bold text-bright">${sym}</strong><br>
-          <span class="${spotCls}">${spot} (${changeSign}${changePct.toFixed(2)}%)</span>
-          <span class="text-dim font-bold">&middot; Gap ${gapDisp} &middot; RVOL ${rvolDisp}${atmDisp ? ' &middot; ' + atmDisp : ''}</span>
-        </td>
-        <td class="text-right text-green font-bold">${scoreDisp}</td>
-        
-        <!-- CE -->
-        <td class="text-right">${fmtPct(st.ce_oi_pct !== undefined ? st.ce_oi_pct : st.delta_ce_pct)}</td>
-        <td class="text-right">${fmtPct(st.ce_price_pct)}</td>
-        <td class="text-center">${fmtBuildup(st.ce_buildup)}</td>
-
-        <!-- PE -->
-        <td class="text-right">${fmtPct(st.pe_oi_pct !== undefined ? st.pe_oi_pct : st.delta_pe_pct)}</td>
-        <td class="text-right">${fmtPct(st.pe_price_pct)}</td>
-        <td class="text-center">${fmtBuildup(st.pe_buildup)}</td>
-
-        <!-- OPTION -->
-        <td class="text-right">${fmtI(st.oi_balance_i)}</td>
-        <td class="text-center font-bold text-bright">${st.rule_number ? st.rule_number : '-'}</td>
-
-        <!-- FUTURES -->
-        <td class="text-right">${fmtPct(st.futures_price_pct !== undefined ? st.futures_price_pct : st.change_pct)}</td>
-        <td class="text-right">${fmtPct(st.futures_oi_pct !== undefined ? st.futures_oi_pct : st.fut_oi_change_pct)}</td>
-        <td class="text-center">${fmtBuildup(st.fut_buildup || st.futures_buildup)}</td>
-
-        <!-- DECISION -->
-        <td class="text-center font-bold">
-          <span class="text-gold">${st.rank || '★★'}</span> ${st.size || 'Normal'}
-        </td>
-        <td class="text-center">${renderStockAction(st)}</td>
-      </tr>`;
-    });
-
-    tbodyBullish.innerHTML = html;
-  }
-
-  // 3. Render Top Bearish Stocks (All Live Engine & Screener Bound)
-  function renderBearishStocks(stocks) {
-    if (!tbodyBearish) return;
-    const headingEl = document.getElementById('heading-count-bearish');
-    if (headingEl && stocks) headingEl.textContent = stocks.length;
-
-    if (!stocks || !stocks.length) {
-      tbodyBearish.innerHTML = `<tr><td colspan="15" class="text-center text-muted">Awaiting bearish screener data...</td></tr>`;
-      return;
-    }
-
-    let html = '';
-    stocks.forEach((st, i) => {
-      const sym = st.symbol || 'STOCK';
-      const score = st.score !== undefined && st.score !== null ? st.score : (st.clv !== undefined ? Math.round((st.clv - 1) * 100) : null);
-      const scoreDisp = score !== null ? (score > 0 ? `+${score}` : `${score}`) : '-';
-
-      const spot = (st.spot_price && Number(st.spot_price) > 0)
-        ? `₹${Number(st.spot_price).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
-        : '-';
-      const changePct = st.net_change_pct !== undefined && st.net_change_pct !== null ? Number(st.net_change_pct) : Number(st.change_pct || 0);
-      const spotCls = changePct >= 0 ? 'text-green font-mono' : 'text-red font-mono';
-      const changeSign = changePct >= 0 ? '+' : '';
-      const gapDisp = st.gap_pct !== undefined && st.gap_pct !== null ? `${st.gap_pct > 0 ? '+' : ''}${Number(st.gap_pct).toFixed(2)}%` : '-';
-      const rvolDisp = st.rvol ? `${Number(st.rvol).toFixed(1)}x` : '-';
-      const atmDisp = st.atm_strike ? `ATM ${Number(st.atm_strike).toLocaleString()}` : '';
-
-      html += `<tr>
-        <td class="text-center text-dim font-bold">${i + 1}</td>
-        <td class="text-left">
-          <strong class="font-bold text-bright">${sym}</strong><br>
-          <span class="${spotCls}">${spot} (${changeSign}${changePct.toFixed(2)}%)</span>
-          <span class="text-dim font-bold">&middot; Gap ${gapDisp} &middot; RVOL ${rvolDisp}${atmDisp ? ' &middot; ' + atmDisp : ''}</span>
-        </td>
-        <td class="text-right text-red font-bold">${scoreDisp}</td>
-        
-        <!-- CE -->
-        <td class="text-right">${fmtPct(st.ce_oi_pct !== undefined ? st.ce_oi_pct : st.delta_ce_pct)}</td>
-        <td class="text-right">${fmtPct(st.ce_price_pct)}</td>
-        <td class="text-center">${fmtBuildup(st.ce_buildup)}</td>
-
-        <!-- PE -->
-        <td class="text-right">${fmtPct(st.pe_oi_pct !== undefined ? st.pe_oi_pct : st.delta_pe_pct)}</td>
-        <td class="text-right">${fmtPct(st.pe_price_pct)}</td>
-        <td class="text-center">${fmtBuildup(st.pe_buildup)}</td>
-
-        <!-- OPTION -->
-        <td class="text-right">${fmtI(st.oi_balance_i)}</td>
-        <td class="text-center font-bold text-bright">${st.rule_number ? st.rule_number : '-'}</td>
-
-        <!-- FUTURES -->
-        <td class="text-right">${fmtPct(st.futures_price_pct !== undefined ? st.futures_price_pct : st.change_pct)}</td>
-        <td class="text-right">${fmtPct(st.futures_oi_pct !== undefined ? st.futures_oi_pct : st.fut_oi_change_pct)}</td>
-        <td class="text-center">${fmtBuildup(st.fut_buildup || st.futures_buildup)}</td>
-
-        <!-- DECISION -->
-        <td class="text-center font-bold">
-          <span class="text-gold">${st.rank || '★★'}</span> ${st.size || 'Normal'}
-        </td>
-        <td class="text-center">${renderStockAction(st)}</td>
-      </tr>`;
-    });
-
-    tbodyBearish.innerHTML = html;
   }
 
   // 4. Render Strike Detail (ATM ±1 or ATM ±3)
@@ -459,9 +308,7 @@
 
       // Render Tables
       renderIndices(data.indices || []);
-      renderBullishStocks(data.top_bullish || []);
-      renderBearishStocks(data.top_bearish || []);
-
+    
       // Selected Index Strike Detail
       const currentIdx = (data.indices || []).find(x => x.key === activeIndexKey) || (data.indices || [])[0];
       if (currentIdx) {
@@ -619,7 +466,7 @@
 
   function syncConfigPills(cfg) {
     if (!cfg) return;
-    ['max_bullish_stocks', 'max_bearish_stocks', 'lots_full', 'lots_normal', 'lots_scalp'].forEach(param => {
+    ['lots_full', 'lots_normal', 'lots_scalp'].forEach(param => {
       if (cfg[param] !== undefined) {
         const val = cfg[param];
         updatePillLabel(param, val);
