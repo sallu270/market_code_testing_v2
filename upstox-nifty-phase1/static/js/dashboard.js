@@ -1,1823 +1,1194 @@
-"use strict";
+/**
+ * OI Conditions Dashboard - Live Client Controller
+ * Renders indices (ATM ±1 summed), top 5 bullish stocks, top 5 bearish stocks,
+ * strike detail table, live alerts feed, and real-time clock.
+ */
 
-const IST_OFFSET_SEC = 19800; // 5 hours 30 minutes in seconds (IST = UTC + 5:30)
+(function () {
+  'use strict';
 
-const state = {
-    selectedInstrument: "NSE_INDEX|Nifty 50",
-    chart: null,
-    tvChart: null,
-    candleSeries: null,
-    areaSeries: null,
-    volumeSeries: null,
-    timeframe: "1m",
-    activeCandle: null,
-    lastTickTimeSec: 0,
-    candles: new Map(),
-    ticks: [],
-    latestIndexPrices: {
-        nifty: null,
-        banknifty: null,
-        sensex: null,
-    },
-    tickSnapshots: [],
-    eventSource: null,
-    activeView: "gchart",
-    optionExpiries: [],
-    selectedExpiry: "",
-    selectedOptionIndex: "NSE_INDEX|Nifty 50",
-    strikeRange: "15",
-    chainAutoRefresh: true,
-    chainData: null,
-    chainTimer: null,
-};
+  // State
+  let activeIndexKey = 'NSE_INDEX|Nifty 50';
+  let lastData = null;
+  let sseSource = null;
+  let updateCycle = 1;
+  let countdownSec = 180; // 3 minutes standard OI cycle
 
-const elements = {};
+  // Elements
+  const elClock = document.getElementById('clock-display');
+  const elFeedPill = document.getElementById('feed-status-pill');
+  const elFeedDot = document.getElementById('feed-status-dot');
+  const elFeedText = document.getElementById('feed-status-text');
+  const elBaseline = document.getElementById('baseline-display');
+  const elOiUpdate = document.getElementById('oi-update-display');
+  const elMode = document.getElementById('mode-display');
+  const elTradesCounter = document.getElementById('trades-counter-text');
 
-document.addEventListener("DOMContentLoaded", async () => {
-    mapElements();
-    initialiseChart();
-    bindEvents();
-    await loadInitialData();
-    connectEventStream();
-    window.setInterval(refreshHealth, 10000);
+  const tbodyIndices = document.getElementById('tbody-indices');
+  const tbodyBullish = document.getElementById('tbody-stocks-bullish');
+  const tbodyBearish = document.getElementById('tbody-stocks-bearish');
+  const tbodyStrikes = document.getElementById('tbody-strikes') || document.getElementById('tbody-strike-detail');
+  const elStrikeTitle = document.getElementById('strike-table-title') || document.getElementById('strike-detail-title');
+  const alertsContainer = document.getElementById('alerts-container');
 
-    // Initialise Option Chain structure (real-time streaming via WebSocket ticks)
-    loadOptionExpiries();
+  // Formatters
+  function fmtNum(n, dec = 2, prefix = '') {
+    if (n === null || n === undefined || isNaN(n)) return '<span class="text-dim">-</span>';
+    const num = Number(n);
+    const sign = prefix && num > 0 ? '+' : '';
+    return `<span class="font-bold text-bright">${sign}${num.toFixed(dec)}</span>`;
+  }
 
-    // Initialise GChart & Strategy live polling
-    loadStrategyStatus();
-    window.setInterval(() => {
-        if (!document.hidden) {
-            loadStrategyStatus();
-        }
-    }, 1500);
-});
+  function fmtI(n) {
+    if (n === null || n === undefined || isNaN(n)) return '<span class="text-dim">-</span>';
+    const num = Number(n);
+    const sign = num > 0 ? '+' : '';
+    const cls = num > 0 ? 'text-cyan font-bold' : (num < 0 ? 'text-amber font-bold' : 'text-muted font-bold');
+    return `<span class="${cls}">${sign}${num.toFixed(2)}</span>`;
+  }
 
-function mapElements() {
-    const ids = [
-        "statusDot",
-        "connectionState",
-        "connectionMessage",
-        "selectedInstrument",
-        "feedMode",
-        "lastPrice",
-        "lastPriceTime",
-        "bidAsk",
-        "spread",
-        "storedCounts",
-        "storedCandles",
-        "instrumentSelect",
-        "chartEmpty",
-        "candleState",
-        "openValue",
-        "highValue",
-        "lowValue",
-        "closeValue",
-        "volumeValue",
-        "tickCount",
-        "browserStream",
-        "lastEvent",
-        "feedLatency",
-        "upstoxStatus",
-        "ticksBody",
-        "priceChart",
-        // GChart Header & Ticker elements
-        "gchartClock",
-        "gchartSpot",
-        "gchartExpiry",
-        "btnToggleOptionChain",
-        "btnTqResult",
-        "btnTqTrades",
-        "btnTqSettings",
-        "tqPaneResult",
-        "tqPaneTrades",
-        "tqPaneSettings",
-        "tqPosSummary",
-        // Option chain elements
-        "tabOptionChain",
-        "tabStrategy",
-        "tabLiveFeed",
-        "viewOptionChain",
-        "viewStrategy",
-        "viewLiveFeed",
-        "chainSpotPrice",
-        "chainSpotTime",
-        "chainAtmStrike",
-        "chainAtmType",
-        "chainPcr",
-        "chainPcrSentiment",
-        "chainTotalOi",
-        "chainOiSplit",
-        "optionIndexSelect",
-        "optionExpirySelect",
-        "strikeRangeSelect",
-        "chainAutoRefresh",
-        "btnRefreshChain",
-        "btnRefreshChart",
-        "chainStatusMsg",
-        "optionChainBody",
-        // Strategy elements
-        "stratCurrentPosition",
-        "stratPositionDetail",
-        "stratTotalTrades",
-        "stratWinLossRatio",
-        "stratNetPnl",
-        "stratPnlPoints",
-        "stratStatusBadge",
-        "stratModeText",
-        "stratLots",
-        "stratOrderBuffer",
-        "stratMaxSpread",
-        "stratMode",
-        "btnSaveStratConfig",
-        "btnStratArmNow",
-        "btnStratReset",
-        "btnStratExit",
-        "stratConfigStatus",
-        "stratLockedBody",
-        "stratTradesBody",
-        "stratSignalsBody",
-    ];
+  function fmtPct(n) {
+    if (n === null || n === undefined || isNaN(n)) return '<span class="text-dim">-</span>';
+    const num = Number(n);
+    const sign = num > 0 ? '+' : '';
+    const cls = num > 0 ? 'text-green' : (num < 0 ? 'text-red' : 'text-muted');
+    return `<span class="${cls}">${sign}${num.toFixed(2)}%</span>`;
+  }
 
-    for (const id of ids) {
-        elements[id] = document.getElementById(id);
+  function fmtLakh(n) {
+    if (n === null || n === undefined || isNaN(n)) return '<span class="text-dim">-</span>';
+    const num = Number(n);
+    const lakh = num / 100000.0;
+    const sign = lakh > 0 ? '+' : '';
+    const cls = lakh > 0 ? 'text-green' : (lakh < 0 ? 'text-red' : 'text-muted');
+    return `<span class="${cls}">${sign}${lakh.toFixed(2)} L</span>`;
+  }
+
+  function fmtBuildup(bu) {
+    if (!bu || bu === 'Neutral') return `<span class="bu-badge bu-neu">NEU</span>`;
+    const b = String(bu).toUpperCase().trim();
+    if (b === 'LB') return `<span class="bu-badge bu-lb">LB</span>`;
+    if (b === 'SB') return `<span class="bu-badge bu-sb">SB</span>`;
+    if (b === 'SC') return `<span class="bu-badge bu-sc">SC</span>`;
+    if (b === 'LU') return `<span class="bu-badge bu-lu">LU</span>`;
+    return `<span class="bu-badge bu-neu">NEU</span>`;
+  }
+
+  function fmtGate(gate) {
+    if (!gate || gate === 'OFF') return `<span class="gate-off">OFF</span>`;
+    if (gate === 'Pass') return `<span class="gate-pass">Pass</span>`;
+    return `<span class="gate-block">Block</span>`;
+  }
+
+  function fmtAction(action, side) {
+    if (!action || action === 'NO_TRADE' || action === 'WAIT') {
+      return `<span class="act-badge act-no-trade">NO TRADE</span>`;
     }
-}
-
-function bindEvents() {
-    // Live GChart Clock
-    function updateClock() {
-        if (elements.gchartClock) {
-            const now = new Date();
-            const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour12: false });
-            elements.gchartClock.textContent = timeStr;
-        }
+    if (action.includes('ENTER CE') || side === 'CE' || side === 'BUY_CE') {
+      return `<span class="act-badge act-enter-ce">ENTER CE</span>`;
     }
-    updateClock();
-    window.setInterval(updateClock, 1000);
+    if (action.includes('ENTER PE') || side === 'PE' || side === 'BUY_PE') {
+      return `<span class="act-badge act-enter-pe">ENTER PE</span>`;
+    }
+    if (action.includes('EXIT 1/2') || action.includes('HALF')) {
+      return `<span class="act-badge act-exit-half">EXIT 1/2</span>`;
+    }
+    return `<span class="act-badge act-no-trade">${action}</span>`;
+  }
 
-    // Toggle Option Chain View
-    if (elements.btnToggleOptionChain) {
-        elements.btnToggleOptionChain.addEventListener("click", () => {
-            if (elements.viewOptionChain) {
-                elements.viewOptionChain.hidden = !elements.viewOptionChain.hidden;
-                if (!elements.viewOptionChain.hidden && !state.chainData) {
-                    loadOptionChain(true);
-                }
-            }
-        });
+  function renderIndexAction(idx) {
+    const key = idx.key || idx.name || '';
+    const rawName = idx.name || key || 'INDEX';
+    let shortName = rawName.replace(' 50', '').replace('NSE_INDEX|', '').replace('BSE_INDEX|', '').replace(' ', '');
+    const act = (idx.action || '').toUpperCase();
+    const dec = (idx.decision || '').toUpperCase();
+
+    if (act.includes('EXIT') || idx.current_position || (idx.hold && idx.hold !== '-' && idx.hold !== '')) {
+      return `<button class="btn-table-action act-exit-half" data-action="exit" data-key="${key}" title="Exit open position">EXIT 1/2</button>`;
+    }
+    if (act.includes('ENTER CE') || dec.includes('CE BUY')) {
+      return `<button class="btn-table-action act-enter-ce" data-action="enter" data-key="${key}" data-side="CE" title="Execute Strategy CE Entry">ENTER CE</button>`;
+    }
+    if (act.includes('ENTER PE') || dec.includes('PE BUY')) {
+      return `<button class="btn-table-action act-enter-pe" data-action="enter" data-key="${key}" data-side="PE" title="Execute Strategy PE Entry">ENTER PE</button>`;
+    }
+    return `<button class="btn-table-action act-arm" data-action="arm" data-key="${key}" title="Arm ${shortName} now">ARM ${shortName.toUpperCase()}</button>`;
+  }
+
+  function renderStockAction(st) {
+    const sym = st.symbol || '';
+    const act = (st.action || '').toUpperCase();
+    const dec = (st.decision || '').toUpperCase();
+
+    if (act.includes('EXIT')) {
+      return `<button class="btn-table-action act-exit-half" data-action="exit" data-key="${sym}" title="Exit ${sym}">EXIT 1/2</button>`;
+    }
+    if (act.includes('ENTER CE') || dec.includes('CE BUY')) {
+      return `<button class="btn-table-action act-enter-ce" data-action="enter" data-key="${sym}" data-side="CE" title="Enter CE for ${sym}">ENTER CE</button>`;
+    }
+    if (act.includes('ENTER PE') || dec.includes('PE BUY')) {
+      return `<button class="btn-table-action act-enter-pe" data-action="enter" data-key="${sym}" data-side="PE" title="Enter PE for ${sym}">ENTER PE</button>`;
+    }
+    return `<span class="act-badge act-no-trade">NO TRADE</span>`;
+  }
+
+  // 1. Render Indices Table
+  function renderIndices(indices) {
+    if (!tbodyIndices) return;
+    if (!indices || !indices.length) {
+      tbodyIndices.innerHTML = `<tr><td colspan="19" class="text-center text-muted">Awaiting index data...</td></tr>`;
+      return;
     }
 
-    // Tick Query Subtabs
-    const tqTabs = [
-        { btn: elements.btnTqResult, pane: elements.tqPaneResult },
-        { btn: elements.btnTqTrades, pane: elements.tqPaneTrades, onLoad: loadStrategyTrades },
-        { btn: elements.btnTqSettings, pane: elements.tqPaneSettings },
-    ];
-    tqTabs.forEach(t => {
-        if (t.btn && t.pane) {
-            t.btn.addEventListener("click", () => {
-                tqTabs.forEach(other => {
-                    if (other.btn) other.btn.classList.toggle("active", other === t);
-                    if (other.pane) other.pane.hidden = (other !== t);
-                });
-                if (t.onLoad) t.onLoad();
-            });
-        }
+    let html = '';
+    indices.forEach(idx => {
+      const name = idx.name || idx.key || 'INDEX';
+      const spot = idx.spot_price ? Number(idx.spot_price).toFixed(2) : '-';
+      const atm = idx.atm_strike ? Number(idx.atm_strike) : '-';
+      const changePct = idx.net_change_pct || 0.0;
+      const spotCls = changePct >= 0 ? 'text-green' : 'text-red';
+      const changeSign = changePct >= 0 ? '+' : '';
+
+      html += `<tr>
+        <td class="text-left">
+          <strong class="font-bold text-bright">${name}</strong><br>
+          <span class="${spotCls}">${spot} (${changeSign}${changePct.toFixed(2)}%)</span>
+          <span class="text-dim font-bold">&middot; ATM ${atm}</span>
+        </td>
+        
+        <!-- CE -->
+        <td class="text-right">${fmtLakh(idx.delta_ce)}</td>
+        <td class="text-right">${fmtPct(idx.delta_ce_pct)}</td>
+        <td class="text-right">${fmtPct(idx.ce_price_pct)}</td>
+        <td class="text-center">${fmtBuildup(idx.ce_buildup)}</td>
+
+        <!-- PE -->
+        <td class="text-right">${fmtLakh(idx.delta_pe)}</td>
+        <td class="text-right">${fmtPct(idx.delta_pe_pct)}</td>
+        <td class="text-right">${fmtPct(idx.pe_price_pct)}</td>
+        <td class="text-center">${fmtBuildup(idx.pe_buildup)}</td>
+
+        <!-- OPTION SIGNAL -->
+        <td class="text-right">${fmtI(idx.oi_balance_i)}</td>
+        <td class="text-center font-bold text-bright">${idx.rule_number ? idx.rule_number : '-'}</td>
+        <td class="text-center">
+          ${idx.decision === 'CE Buy' ? '<span class="text-green font-bold">CE Buy</span>' :
+            idx.decision === 'PE Buy' ? '<span class="text-red font-bold">PE Buy</span>' :
+            '<span class="text-dim">No trade</span>'}
+        </td>
+
+        <!-- FUTURES -->
+        <td class="text-right">${fmtPct(idx.futures_price_pct)}</td>
+        <td class="text-right">${fmtPct(idx.futures_oi_pct)}</td>
+        <td class="text-center">${fmtBuildup(idx.futures_buildup)}</td>
+        <td class="text-center">${fmtGate(idx.futures_gate)}</td>
+
+        <!-- DECISION -->
+        <td class="text-center font-bold">
+          ${idx.stars ? `<span class="text-gold">${idx.stars}</span> ` : ''}${idx.size || (idx.decision === 'No trade' ? 'No trade' : 'Normal')}
+        </td>
+        <td class="text-center text-muted font-bold">${idx.hold || '2/2'}</td>
+        <td class="text-center">${renderIndexAction(idx)}</td>
+      </tr>`;
     });
 
-    // Chart Timeframe Period Keypad
-    document.querySelectorAll(".gchart-key-btn, .tf-btn").forEach(btn => {
-        btn.addEventListener("click", () => {
-            const tf = btn.getAttribute("data-timeframe");
-            if (tf) {
-                switchTimeframe(tf);
-            }
-        });
+    tbodyIndices.innerHTML = html;
+  }
+
+  // 2. Render Top Bullish Stocks (All Live Engine & Screener Bound)
+  function renderBullishStocks(stocks) {
+    if (!tbodyBullish) return;
+    const headingEl = document.getElementById('heading-count-bullish');
+    if (headingEl && stocks) headingEl.textContent = stocks.length;
+
+    if (!stocks || !stocks.length) {
+      tbodyBullish.innerHTML = `<tr><td colspan="15" class="text-center text-muted">Awaiting bullish screener data...</td></tr>`;
+      return;
+    }
+
+    let html = '';
+    stocks.forEach((st, i) => {
+      const sym = st.symbol || 'STOCK';
+      const score = st.score !== undefined && st.score !== null ? st.score : (st.clv !== undefined ? Math.round(st.clv * 100) : null);
+      const scoreDisp = score !== null ? (score > 0 ? `+${score}` : `${score}`) : '-';
+
+      const spot = (st.spot_price && Number(st.spot_price) > 0)
+        ? `₹${Number(st.spot_price).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+        : '-';
+      const changePct = st.net_change_pct !== undefined && st.net_change_pct !== null ? Number(st.net_change_pct) : Number(st.change_pct || 0);
+      const spotCls = changePct >= 0 ? 'text-green font-mono' : 'text-red font-mono';
+      const changeSign = changePct >= 0 ? '+' : '';
+      const gapDisp = st.gap_pct !== undefined && st.gap_pct !== null ? `${st.gap_pct > 0 ? '+' : ''}${Number(st.gap_pct).toFixed(2)}%` : '-';
+      const rvolDisp = st.rvol ? `${Number(st.rvol).toFixed(1)}x` : '-';
+      const atmDisp = st.atm_strike ? `ATM ${Number(st.atm_strike).toLocaleString()}` : '';
+
+      html += `<tr>
+        <td class="text-center text-dim font-bold">${i + 1}</td>
+        <td class="text-left">
+          <strong class="font-bold text-bright">${sym}</strong><br>
+          <span class="${spotCls}">${spot} (${changeSign}${changePct.toFixed(2)}%)</span>
+          <span class="text-dim font-bold">&middot; Gap ${gapDisp} &middot; RVOL ${rvolDisp}${atmDisp ? ' &middot; ' + atmDisp : ''}</span>
+        </td>
+        <td class="text-right text-green font-bold">${scoreDisp}</td>
+        
+        <!-- CE -->
+        <td class="text-right">${fmtPct(st.ce_oi_pct !== undefined ? st.ce_oi_pct : st.delta_ce_pct)}</td>
+        <td class="text-right">${fmtPct(st.ce_price_pct)}</td>
+        <td class="text-center">${fmtBuildup(st.ce_buildup)}</td>
+
+        <!-- PE -->
+        <td class="text-right">${fmtPct(st.pe_oi_pct !== undefined ? st.pe_oi_pct : st.delta_pe_pct)}</td>
+        <td class="text-right">${fmtPct(st.pe_price_pct)}</td>
+        <td class="text-center">${fmtBuildup(st.pe_buildup)}</td>
+
+        <!-- OPTION -->
+        <td class="text-right">${fmtI(st.oi_balance_i)}</td>
+        <td class="text-center font-bold text-bright">${st.rule_number ? st.rule_number : '-'}</td>
+
+        <!-- FUTURES -->
+        <td class="text-right">${fmtPct(st.futures_price_pct !== undefined ? st.futures_price_pct : st.change_pct)}</td>
+        <td class="text-right">${fmtPct(st.futures_oi_pct !== undefined ? st.futures_oi_pct : st.fut_oi_change_pct)}</td>
+        <td class="text-center">${fmtBuildup(st.fut_buildup || st.futures_buildup)}</td>
+
+        <!-- DECISION -->
+        <td class="text-center font-bold">
+          <span class="text-gold">${st.rank || '★★'}</span> ${st.size || 'Normal'}
+        </td>
+        <td class="text-center">${renderStockAction(st)}</td>
+      </tr>`;
     });
 
-    // Chart Scale Reset
-    if (elements.btnRefreshChart) {
-        elements.btnRefreshChart.addEventListener("click", () => {
-            if (state.tvChart) {
-                state.tvChart.timeScale().resetTimeScale();
-                state.tvChart.timeScale().fitContent();
-            }
-        });
+    tbodyBullish.innerHTML = html;
+  }
+
+  // 3. Render Top Bearish Stocks (All Live Engine & Screener Bound)
+  function renderBearishStocks(stocks) {
+    if (!tbodyBearish) return;
+    const headingEl = document.getElementById('heading-count-bearish');
+    if (headingEl && stocks) headingEl.textContent = stocks.length;
+
+    if (!stocks || !stocks.length) {
+      tbodyBearish.innerHTML = `<tr><td colspan="15" class="text-center text-muted">Awaiting bearish screener data...</td></tr>`;
+      return;
     }
 
-    // Strategy configuration save button
-    if (elements.btnSaveStratConfig) {
-        elements.btnSaveStratConfig.addEventListener("click", saveStrategyConfig);
-    }
-    if (elements.btnStratArmNow) {
-        elements.btnStratArmNow.addEventListener("click", async () => {
-            if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Arming bot now...";
-            try {
-                const res = await fetch("/api/strategy/arm-now", { method: "POST" });
-                if (res.ok) {
-                    await loadStrategyStatus();
-                    if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "⚡ Bot ARMED!";
-                }
-            } catch (err) {
-                console.error("Arm bot error", err);
-            }
-        });
-    }
-    if (elements.btnStratReset) {
-        elements.btnStratReset.addEventListener("click", async () => {
-            if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Resetting bot...";
-            try {
-                const res = await fetch("/api/strategy/reset", { method: "POST" });
-                if (res.ok) {
-                    await loadStrategyStatus();
-                    if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Bot reset to PLANNING";
-                }
-            } catch (err) {
-                console.error("Reset bot error", err);
-            }
-        });
-    }
-    if (elements.btnStratExit) {
-        elements.btnStratExit.addEventListener("click", async () => {
-            if (!confirm("Are you sure you want to manually exit any open position now?")) return;
-            if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Exiting position...";
-            try {
-                const res = await fetch("/api/strategy/exit", { method: "POST" });
-                if (res.ok) {
-                    await loadStrategyStatus();
-                    await loadStrategyTrades();
-                    if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Position exited!";
-                }
-            } catch (err) {
-                console.error("Manual exit error", err);
-            }
-        });
-    }
+    let html = '';
+    stocks.forEach((st, i) => {
+      const sym = st.symbol || 'STOCK';
+      const score = st.score !== undefined && st.score !== null ? st.score : (st.clv !== undefined ? Math.round((st.clv - 1) * 100) : null);
+      const scoreDisp = score !== null ? (score > 0 ? `+${score}` : `${score}`) : '-';
 
-    // Option chain controls
-    if (elements.optionIndexSelect) {
-        elements.optionIndexSelect.addEventListener("change", async (e) => {
-            state.selectedOptionIndex = e.target.value;
-            state.selectedExpiry = "";
-            state.chainData = null;
-            await loadOptionExpiries();
-        });
-    }
+      const spot = (st.spot_price && Number(st.spot_price) > 0)
+        ? `₹${Number(st.spot_price).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+        : '-';
+      const changePct = st.net_change_pct !== undefined && st.net_change_pct !== null ? Number(st.net_change_pct) : Number(st.change_pct || 0);
+      const spotCls = changePct >= 0 ? 'text-green font-mono' : 'text-red font-mono';
+      const changeSign = changePct >= 0 ? '+' : '';
+      const gapDisp = st.gap_pct !== undefined && st.gap_pct !== null ? `${st.gap_pct > 0 ? '+' : ''}${Number(st.gap_pct).toFixed(2)}%` : '-';
+      const rvolDisp = st.rvol ? `${Number(st.rvol).toFixed(1)}x` : '-';
+      const atmDisp = st.atm_strike ? `ATM ${Number(st.atm_strike).toLocaleString()}` : '';
 
-    if (elements.optionExpirySelect) {
-        elements.optionExpirySelect.addEventListener("change", (e) => {
-            state.selectedExpiry = e.target.value;
-            loadOptionChain(true);
-        });
-    }
+      html += `<tr>
+        <td class="text-center text-dim font-bold">${i + 1}</td>
+        <td class="text-left">
+          <strong class="font-bold text-bright">${sym}</strong><br>
+          <span class="${spotCls}">${spot} (${changeSign}${changePct.toFixed(2)}%)</span>
+          <span class="text-dim font-bold">&middot; Gap ${gapDisp} &middot; RVOL ${rvolDisp}${atmDisp ? ' &middot; ' + atmDisp : ''}</span>
+        </td>
+        <td class="text-right text-red font-bold">${scoreDisp}</td>
+        
+        <!-- CE -->
+        <td class="text-right">${fmtPct(st.ce_oi_pct !== undefined ? st.ce_oi_pct : st.delta_ce_pct)}</td>
+        <td class="text-right">${fmtPct(st.ce_price_pct)}</td>
+        <td class="text-center">${fmtBuildup(st.ce_buildup)}</td>
 
-    if (elements.strikeRangeSelect) {
-        elements.strikeRangeSelect.addEventListener("change", (e) => {
-            state.strikeRange = e.target.value;
-            if (state.chainData) {
-                renderOptionChain(state.chainData);
-            }
-        });
-    }
+        <!-- PE -->
+        <td class="text-right">${fmtPct(st.pe_oi_pct !== undefined ? st.pe_oi_pct : st.delta_pe_pct)}</td>
+        <td class="text-right">${fmtPct(st.pe_price_pct)}</td>
+        <td class="text-center">${fmtBuildup(st.pe_buildup)}</td>
 
-    if (elements.chainAutoRefresh) {
-        elements.chainAutoRefresh.addEventListener("change", (e) => {
-            state.chainAutoRefresh = e.target.checked;
-        });
-    }
+        <!-- OPTION -->
+        <td class="text-right">${fmtI(st.oi_balance_i)}</td>
+        <td class="text-center font-bold text-bright">${st.rule_number ? st.rule_number : '-'}</td>
 
-    if (elements.btnRefreshChain) {
-        elements.btnRefreshChain.addEventListener("click", () => {
-            loadOptionChain(true);
-        });
-    }
+        <!-- FUTURES -->
+        <td class="text-right">${fmtPct(st.futures_price_pct !== undefined ? st.futures_price_pct : st.change_pct)}</td>
+        <td class="text-right">${fmtPct(st.futures_oi_pct !== undefined ? st.futures_oi_pct : st.fut_oi_change_pct)}</td>
+        <td class="text-center">${fmtBuildup(st.fut_buildup || st.futures_buildup)}</td>
 
-    // Instrument watchlist selection
-    if (elements.instrumentSelect) {
-        elements.instrumentSelect.addEventListener("change", async (event) => {
-            state.selectedInstrument = event.target.value;
-            if (elements.selectedInstrument) {
-                elements.selectedInstrument.textContent =
-                    state.selectedInstrument || "Waiting for data";
-            }
-
-            // Reset active candle, map, and chart series data to prevent price scale squish/collision
-            state.activeCandle = null;
-            state.lastTickTimeSec = 0;
-            state.candles.clear();
-            if (state.areaSeries) state.areaSeries.setData([]);
-            if (state.candleSeries) state.candleSeries.setData([]);
-            if (state.volumeSeries) state.volumeSeries.setData([]);
-            if (state.tvChart) {
-                state.tvChart.priceScale("right").applyOptions({ autoScale: true });
-            }
-
-            await loadCandles();
-            refreshVisibleTick();
-
-            if (state.tvChart) {
-                state.tvChart.timeScale().resetTimeScale();
-                state.tvChart.timeScale().fitContent();
-            }
-        });
-    }
-
-    // Refresh & Reset Chart button
-    if (elements.btnRefreshChart) {
-        elements.btnRefreshChart.addEventListener("click", async () => {
-            const icon = elements.btnRefreshChart.querySelector("svg");
-            if (icon) {
-                icon.style.transition = "transform 0.5s ease";
-                icon.style.transform = "rotate(360deg)";
-                setTimeout(() => { icon.style.transform = ""; }, 500);
-            }
-
-            state.activeCandle = null;
-            state.lastTickTimeSec = 0;
-            if (state.tvChart) {
-                state.tvChart.priceScale("right").applyOptions({ autoScale: true });
-            }
-
-            await loadCandles();
-            refreshVisibleTick();
-
-            if (state.tvChart) {
-                state.tvChart.timeScale().resetTimeScale();
-                state.tvChart.timeScale().fitContent();
-            }
-        });
-    }
-
-
-}
-
-function switchView(viewName) {
-    state.activeView = viewName;
-    const tabs = [
-        { name: "optionChain", btn: elements.tabOptionChain, view: elements.viewOptionChain },
-        { name: "strategy", btn: elements.tabStrategy, view: elements.viewStrategy },
-        { name: "liveFeed", btn: elements.tabLiveFeed, view: elements.viewLiveFeed },
-    ];
-
-    for (const t of tabs) {
-        if (!t.btn || !t.view) continue;
-        const isActive = t.name === viewName;
-        t.btn.classList.toggle("tab-button--active", isActive);
-        t.btn.setAttribute("aria-selected", isActive ? "true" : "false");
-        t.view.hidden = !isActive;
-    }
-
-    if (viewName === "optionChain" && !state.chainData) {
-        loadOptionChain(true);
-    } else if (viewName === "strategy") {
-        loadStrategyStatus();
-        loadStrategyTrades();
-        loadStrategySignals();
-    } else if (viewName === "liveFeed") {
-        if (state.tvChart) {
-            const container = document.getElementById("tvChartContainer");
-            if (container && container.clientWidth > 0) {
-                state.tvChart.applyOptions({
-                    width: container.clientWidth,
-                    height: container.clientHeight || 440,
-                });
-                state.tvChart.timeScale().fitContent();
-            }
-        }
-    }
-}
-
-function initialiseChart() {
-    const container = document.getElementById("tvChartContainer");
-    if (!container || !window.LightweightCharts) {
-        if (elements.chartEmpty) {
-            elements.chartEmpty.hidden = false;
-        }
-        return;
-    }
-
-    state.tvChart = LightweightCharts.createChart(container, {
-        width: container.clientWidth || 800,
-        height: container.clientHeight || 520,
-        layout: {
-            background: { type: "solid", color: "#131722" },
-            textColor: "#787b86",
-            fontSize: 12,
-            fontFamily: "-apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif",
-        },
-        localization: {
-            locale: "en-IN",
-            dateFormat: "dd MMM yyyy",
-        },
-        grid: {
-            vertLines: { color: "#1e222d", style: LightweightCharts.LineStyle.Solid },
-            horzLines: { color: "#1e222d", style: LightweightCharts.LineStyle.Solid },
-        },
-        crosshair: {
-            mode: LightweightCharts.CrosshairMode.Normal,
-            vertLine: {
-                color: "#758696",
-                width: 1,
-                style: LightweightCharts.LineStyle.Dashed,
-                labelBackgroundColor: "#2a2e39",
-            },
-            horzLine: {
-                color: "#758696",
-                width: 1,
-                style: LightweightCharts.LineStyle.Dashed,
-                labelBackgroundColor: "#2a2e39",
-            },
-        },
-        rightPriceScale: {
-            borderColor: "#2a2e39",
-            autoScale: true,
-            scaleMargins: {
-                top: 0.1,
-                bottom: 0.1,
-            },
-        },
-        timeScale: {
-            borderColor: "#2a2e39",
-            timeVisible: true,
-            secondsVisible: false,
-            barSpacing: 12,
-            minBarSpacing: 3,
-            rightOffset: 8,
-        },
+        <!-- DECISION -->
+        <td class="text-center font-bold">
+          <span class="text-gold">${st.rank || '★★'}</span> ${st.size || 'Normal'}
+        </td>
+        <td class="text-center">${renderStockAction(st)}</td>
+      </tr>`;
     });
 
-    state.candleSeries = state.tvChart.addCandlestickSeries({
-        upColor: "#089981",
-        downColor: "#f23645",
-        borderUpColor: "#089981",
-        borderDownColor: "#f23645",
-        wickUpColor: "#089981",
-        wickDownColor: "#f23645",
-        priceLineColor: "#089981",
-        priceLineWidth: 1,
-        priceLineStyle: LightweightCharts.LineStyle.Dashed,
-    });
+    tbodyBearish.innerHTML = html;
+  }
 
-    state.areaSeries = state.tvChart.addAreaSeries({
-        topColor: "rgba(41, 98, 255, 0.28)",
-        bottomColor: "rgba(41, 98, 255, 0.0)",
-        lineColor: "#2962ff",
-        lineWidth: 2,
-        priceLineVisible: true,
-        lastValueVisible: true,
-    });
-    state.areaSeries.applyOptions({ visible: false });
-
-    // TradingView Style Crosshair Legend Update
-    state.tvChart.subscribeCrosshairMove((param) => {
-        if (!param || !param.time || !param.seriesPrices) {
-            renderCurrentCandle();
-            return;
-        }
-        const data = param.seriesPrices.get(state.candleSeries);
-        if (data) {
-            updateOHLCLegend(data);
-        }
-    });
-
-    // Handle container resize
-    if (window.ResizeObserver) {
-        const resizeObserver = new ResizeObserver((entries) => {
-            if (!entries || !entries.length || !state.tvChart) return;
-            const entry = entries[0];
-            const { width, height } = entry.contentRect;
-            if (width > 0 && height > 0) {
-                state.tvChart.applyOptions({ width, height });
-            }
-        });
-        resizeObserver.observe(container);
-    }
-}
-
-async function switchTimeframe(tf) {
-    state.timeframe = tf;
-
-    document.querySelectorAll(".gchart-key-btn, .tf-btn").forEach((btn) => {
-        const matches = btn.getAttribute("data-timeframe") === tf;
-        btn.classList.toggle("active", matches);
-        btn.classList.toggle("tf-btn--active", matches);
-    });
-
-    state.activeCandle = null;
-    state.lastTickTimeSec = 0;
-
-    const isTick = tf === "tick" || tf === "0";
-
-    if (state.tvChart) {
-        state.tvChart.applyOptions({
-            timeScale: {
-                timeVisible: true,
-                secondsVisible: isTick,
-                barSpacing: isTick ? 6 : 14,
-                minBarSpacing: isTick ? 2 : 4,
-                rightOffset: isTick ? 4 : 8,
-            },
-        });
-        state.tvChart.priceScale("right").applyOptions({
-            autoScale: true,
-            scaleMargins: {
-                top: 0.08,
-                bottom: 0.08,
-            },
-        });
+  // 4. Render Strike Detail (ATM ±1 or ATM ±3)
+  function renderStrikeDetail(strikes, indexName, atmStrike) {
+    if (!tbodyStrikes) return;
+    if (!strikes || !strikes.length) {
+      tbodyStrikes.innerHTML = `<tr><td colspan="13" class="text-center text-muted">Awaiting strike detail for ${indexName}...</td></tr>`;
+      return;
     }
 
-    if (isTick) {
-        if (state.candleSeries) {
-            state.candleSeries.applyOptions({ visible: false });
-            state.candleSeries.setData([]);
-        }
-        if (state.areaSeries) {
-            state.areaSeries.applyOptions({ visible: true });
-        }
-    } else {
-        if (state.areaSeries) {
-            state.areaSeries.applyOptions({ visible: false });
-            state.areaSeries.setData([]);
-        }
-        if (state.candleSeries) {
-            state.candleSeries.applyOptions({ visible: true });
-        }
+    if (elStrikeTitle) {
+      elStrikeTitle.innerHTML = `${indexName} &middot; strike detail (ATM &plusmn;1)`;
     }
 
-    await loadCandles();
-    if (state.tvChart) {
-        state.tvChart.timeScale().resetTimeScale();
-        state.tvChart.timeScale().fitContent();
-    }
-}
+    let html = '';
+    strikes.forEach(s => {
+      const isAtm = Number(s.strike) === Number(atmStrike);
+      const atmBadge = isAtm ? `<span class="atm-strike-badge">ATM</span>` : '';
 
-async function loadInitialData() {
+      const ceLtp = (s.ce_ltp && Number(s.ce_ltp) > 0)
+        ? `<span class="font-mono font-bold text-bright">₹${Number(s.ce_ltp).toFixed(2)}</span>`
+        : '<span class="text-dim">-</span>';
+      const peLtp = (s.pe_ltp && Number(s.pe_ltp) > 0)
+        ? `<span class="font-mono font-bold text-bright">₹${Number(s.pe_ltp).toFixed(2)}</span>`
+        : '<span class="text-dim">-</span>';
+
+      html += `<tr class="${isAtm ? 'row-atm' : ''}">
+        <!-- CE -->
+        <td class="text-right">${fmtLakh(s.ce_oi)}</td>
+        <td class="text-right">${fmtLakh(s.ce_delta_oi)}</td>
+        <td class="text-right">${fmtPct(s.ce_delta_oi_pct)}</td>
+        <td class="text-right">${fmtPct(s.ce_price_pct)}</td>
+        <td class="text-right">${ceLtp}</td>
+        <td class="text-center">${fmtBuildup(s.ce_buildup)}</td>
+
+        <!-- STRIKE -->
+        <td class="text-center font-bold text-bright">${Number(s.strike).toLocaleString()} ${atmBadge}</td>
+
+        <!-- PE -->
+        <td class="text-center">${fmtBuildup(s.pe_buildup)}</td>
+        <td class="text-right">${peLtp}</td>
+        <td class="text-right">${fmtPct(s.pe_price_pct)}</td>
+        <td class="text-right">${fmtPct(s.pe_delta_oi_pct)}</td>
+        <td class="text-right">${fmtLakh(s.pe_delta_oi)}</td>
+        <td class="text-right">${fmtLakh(s.pe_oi)}</td>
+      </tr>`;
+    });
+
+    tbodyStrikes.innerHTML = html;
+  }
+
+  // 5. Append Alert
+  function appendAlert(alert) {
+    const empty = alertsContainer.querySelector('.alert-empty-state');
+    if (empty) empty.remove();
+
+    const div = document.createElement('div');
+    div.className = 'alert-item';
+
+    const timeStr = alert.time || alert.timestamp_ist || new Date().toTimeString().split(' ')[0];
+    const lvl = (alert.level || alert.action || 'DATA').toUpperCase();
+
+    let tagCls = 'tag-data';
+    if (lvl.includes('ENTRY')) tagCls = 'tag-entry';
+    else if (lvl.includes('EXIT')) tagCls = 'tag-exit';
+    else if (lvl.includes('BLOCK')) tagCls = 'tag-blocked';
+    else if (lvl.includes('UPGRADE')) tagCls = 'tag-upgrade';
+    else if (lvl.includes('WARN')) tagCls = 'tag-warning';
+
+    div.innerHTML = `
+      <span class="alert-time">${timeStr}</span>
+      <span class="alert-tag ${tagCls}">${lvl}</span>
+      <span class="alert-msg">${alert.message || alert.action_taken || alert.text || ''}</span>
+    `;
+
+    alertsContainer.prepend(div);
+
+    // Keep only last 50 alerts in DOM
+    while (alertsContainer.children.length > 50) {
+      alertsContainer.removeChild(alertsContainer.lastChild);
+    }
+  }
+
+  // 6. Main Dashboard Refresh
+  async function fetchDashboardData() {
     try {
-        const [instrumentsResult, ticksResult] = await Promise.all([
-            fetchJson("/api/instruments"),
-            fetchJson("/api/ticks?limit=150"),
-        ]);
+      const res = await fetch('/api/dashboard-data');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      lastData = data;
 
-        populateInstrumentSelect(instrumentsResult.instruments || []);
-        state.ticks = ticksResult.ticks || [];
-        rebuildTickSnapshots(state.ticks);
-        renderTicks();
-        refreshVisibleTick();
-        await loadCandles();
-        await refreshHealth();
-    } catch (error) {
-        setBrowserStream("Initial load failed", true);
-        setStatus("error", error.message);
-    }
-}
-
-async function loadCandles() {
-    if (!state.selectedInstrument) {
-        if (elements.chartEmpty) elements.chartEmpty.hidden = false;
-        renderCurrentCandle();
-        return;
-    }
-
-    if (state.timeframe === "tick") {
-        try {
-            const query = new URLSearchParams({
-                instrument_key: state.selectedInstrument,
-                limit: "300",
-            });
-            const res = await fetchJson(`/api/ticks?${query.toString()}`);
-            const ticks = res.ticks || [];
-
-            // Sort chronological ascending
-            const sortedTicks = [...ticks].sort((a, b) => {
-                const ta = Number(a.exchange_timestamp_ms || a.received_timestamp_ms || 0);
-                const tb = Number(b.exchange_timestamp_ms || b.received_timestamp_ms || 0);
-                return ta - tb;
-            });
-
-            const cleanPoints = [];
-            let lastSec = 0;
-
-            for (const t of sortedTicks) {
-                const tsMs = Number(t.exchange_timestamp_ms || t.received_timestamp_ms);
-                const ltp = toNumber(t.ltp);
-                if (ltp === null) continue;
-
-                let sec = Math.floor(tsMs / 1000) + IST_OFFSET_SEC;
-                if (sec <= lastSec) {
-                    sec = lastSec + 1;
-                }
-                cleanPoints.push({ time: sec, value: ltp });
-                lastSec = sec;
-            }
-
-            state.lastTickTimeSec = lastSec;
-
-            if (state.areaSeries) {
-                state.areaSeries.setData(cleanPoints);
-            }
-            if (elements.chartEmpty) elements.chartEmpty.hidden = cleanPoints.length > 0;
-            if (state.tvChart && cleanPoints.length > 0) {
-                state.tvChart.priceScale("right").applyOptions({ autoScale: true });
-                state.tvChart.timeScale().fitContent();
-            }
-        } catch (err) {
-            console.error("Failed to load tick data for chart", err);
+      // Update feed indicators
+      if (data.feed_connected) {
+        elFeedDot.className = 'status-dot dot-live';
+        elFeedText.textContent = `Feed live (${data.feed_instruments || 0} keys)`;
+        if (elFeedPill) elFeedPill.classList.remove('is-disconnected', 'is-error');
+      } else {
+        elFeedDot.className = 'status-dot dot-error';
+        elFeedText.textContent = 'Disconnected';
+        if (elFeedPill) {
+          elFeedPill.classList.add('is-disconnected');
+          elFeedPill.classList.remove('is-error');
         }
-        return;
-    }
+      }
+
+      if (data.mode) elMode.textContent = `${data.mode.toUpperCase()} MODE`;
+      if (data.baseline_time) elBaseline.textContent = `Baseline: ${data.baseline_time} snapshot`;
+      if (data.today_trades !== undefined) {
+        elTradesCounter.textContent = `Today's Trades: ${data.today_trades} | Net P&L: ₹${(data.today_net_pnl || 0).toFixed(2)}`;
+      }
+
+      // Render Tables
+      renderIndices(data.indices || []);
+      renderBullishStocks(data.top_bullish || []);
+      renderBearishStocks(data.top_bearish || []);
+
+      // Selected Index Strike Detail
+      const currentIdx = (data.indices || []).find(x => x.key === activeIndexKey) || (data.indices || [])[0];
+      if (currentIdx) {
+        renderStrikeDetail(currentIdx.strikes || [], currentIdx.name || 'NIFTY', currentIdx.atm_strike);
+      }
+
+      // Alerts
+      if (data.recent_alerts && data.recent_alerts.length) {
+        data.recent_alerts.reverse().forEach(a => appendAlert(a));
+      }
+
+      // Sync Pre-Defined Controls Pills
+      if (data.config) {
+        syncConfigPills(data.config);
+      }
 
-    // 1m or 5m Candlestick mode
-    const query = new URLSearchParams({
-        instrument_key: state.selectedInstrument,
-        timeframe: state.timeframe,
-        limit: "150",
-    });
-
-    try {
-        const result = await fetchJson(`/api/candles?${query.toString()}`);
-        state.candles.clear();
-
-        const candleList = [];
-        let lastTimeSec = 0;
-
-        for (const candle of result.candles || []) {
-            state.candles.set(Number(candle.candle_start_ms), candle);
-            const timeSec = Math.floor(Number(candle.candle_start_ms) / 1000) + IST_OFFSET_SEC;
-            if (timeSec <= lastTimeSec) continue;
-            lastTimeSec = timeSec;
-
-            const open = toNumber(candle.open);
-            const high = toNumber(candle.high);
-            const low = toNumber(candle.low);
-            const close = toNumber(candle.close);
-
-            candleList.push({ time: timeSec, open, high, low, close });
-        }
-
-        if (state.candleSeries) {
-            state.candleSeries.setData(candleList);
-        }
-
-        if (elements.chartEmpty) elements.chartEmpty.hidden = candleList.length > 0;
-        if (state.tvChart && candleList.length > 0) {
-            state.tvChart.priceScale("right").applyOptions({ autoScale: true });
-            state.tvChart.timeScale().fitContent();
-        }
-
-        renderCurrentCandle();
-    } catch (error) {
-        setStatus("error", `Candle load failed: ${error.message}`);
-    }
-}
-
-function connectEventStream() {
-    if (state.eventSource) {
-        state.eventSource.close();
-    }
-
-    setBrowserStream("Connecting", false);
-    state.eventSource = new EventSource("/api/stream");
-
-    state.eventSource.onopen = () => {
-        setBrowserStream("Connected", false);
-    };
-
-    state.eventSource.onerror = () => {
-        setBrowserStream("Reconnecting", true);
-    };
-
-    state.eventSource.onmessage = (event) => {
-        elements.lastEvent.textContent = formatTime(Date.now());
-
-        try {
-            const message = JSON.parse(event.data);
-            handleEvent(message);
-        } catch (error) {
-            console.error("Invalid server event", error);
-        }
-    };
-}
-
-function handleEvent(event) {
-    const payload = event.payload || {};
-
-    if (event.type === "status") {
-        setStatus(payload.state || "waiting", payload.message || "");
-        return;
-    }
-
-    if (event.type === "strategy_update") {
-        if (state.activeView === "strategy") {
-            loadStrategyStatus();
-        }
-        return;
-    }
-
-    if (event.type === "strategy_trade") {
-        if (state.activeView === "strategy") {
-            loadStrategyStatus();
-            loadStrategyTrades();
-        }
-        return;
-    }
-
-    if (event.type === "tick") {
-        handleTick(payload);
-        return;
-    }
-
-    if (event.type === "candle") {
-        handleCandle(payload);
-    }
-}
-
-function handleTick(tick) {
-    const instrumentKey = String(tick.instrument_key || "");
-
-    if (!state.selectedInstrument && instrumentKey) {
-        addInstrument(instrumentKey);
-        state.selectedInstrument = instrumentKey;
-        elements.instrumentSelect.value = instrumentKey;
-    } else {
-        addInstrument(instrumentKey);
-    }
-
-    state.ticks.unshift(tick);
-    state.ticks = state.ticks.slice(0, 100);
-
-    updateTickSnapshot(tick);
-    renderTicks();
-
-    // LIVE REAL-TIME WEBSOCKET UPDATES (OPTION CHAIN + 8 CANDIDATES TABLE)
-    updateChainSpotFromTick(tick);
-    updateChainRowFromTick(tick);
-    updateLockedCandidateRow(tick);
-
-    if (instrumentKey === state.selectedInstrument) {
-        renderLatestTick(tick);
-
-        const ltp = toNumber(tick.ltp);
-        if (ltp !== null && state.tvChart) {
-            if ((state.timeframe === "tick" || state.timeframe === "0") && state.areaSeries) {
-                const nowSec = Math.floor(Date.now() / 1000) + IST_OFFSET_SEC;
-                const tSec = Math.max(nowSec, (state.lastTickTimeSec || 0) + 1);
-                state.lastTickTimeSec = tSec;
-                state.areaSeries.update({ time: tSec, value: ltp });
-                if (elements.chartEmpty) elements.chartEmpty.hidden = true;
-            } else if (state.candleSeries && state.timeframe !== "tick" && state.timeframe !== "0") {
-                const tfDurations = {
-                    "1m": 60,
-                    "3m": 180,
-                    "5m": 300,
-                    "15m": 900,
-                    "1d": 86400,
-                    "d": 86400,
-                };
-                const bucketDurationSec = tfDurations[state.timeframe] || 60;
-                const tsMs = Number(tick.exchange_timestamp_ms || Date.now());
-                const rawBucketSec = Math.floor(tsMs / (bucketDurationSec * 1000)) * bucketDurationSec;
-                const chartBucketSec = rawBucketSec + IST_OFFSET_SEC;
-
-                let candle = state.activeCandle;
-                if (!candle || candle.time !== chartBucketSec || candle.instrumentKey !== instrumentKey) {
-                    const existing = state.candles.get(rawBucketSec * 1000);
-                    if (existing) {
-                        candle = {
-                            instrumentKey: instrumentKey,
-                            time: chartBucketSec,
-                            open: toNumber(existing.open),
-                            high: Math.max(toNumber(existing.high), ltp),
-                            low: Math.min(toNumber(existing.low), ltp),
-                            close: ltp,
-                        };
-                    } else {
-                        candle = {
-                            instrumentKey: instrumentKey,
-                            time: chartBucketSec,
-                            open: ltp,
-                            high: ltp,
-                            low: ltp,
-                            close: ltp,
-                        };
-                    }
-                } else {
-                    candle.high = Math.max(candle.high, ltp);
-                    candle.low = Math.min(candle.low, ltp);
-                    candle.close = ltp;
-                }
-                state.activeCandle = candle;
-                state.candleSeries.update({
-                    time: candle.time,
-                    open: candle.open,
-                    high: candle.high,
-                    low: candle.low,
-                    close: candle.close,
-                });
-                if (elements.chartEmpty) elements.chartEmpty.hidden = true;
-
-                // Live OHLC Bar text updates immediately on every tick
-                if (elements.closeValue) elements.closeValue.textContent = formatNumber(candle.close);
-                if (elements.highValue) elements.highValue.textContent = formatNumber(candle.high);
-                if (elements.lowValue) elements.lowValue.textContent = formatNumber(candle.low);
-                if (elements.openValue && (!elements.openValue.textContent || elements.openValue.textContent === "—")) {
-                    elements.openValue.textContent = formatNumber(candle.open);
-                }
-            }
-        }
-    }
-}
-
-function handleCandle(candle) {
-    if (String(candle.instrument_key) !== state.selectedInstrument) {
-        return;
-    }
-
-    state.candles.set(Number(candle.candle_start_ms), candle);
-
-    const orderedKeys = [...state.candles.keys()].sort((a, b) => a - b);
-    while (orderedKeys.length > 200) {
-        const oldest = orderedKeys.shift();
-        state.candles.delete(oldest);
-    }
-
-    if (state.candleSeries && state.timeframe === "1m") {
-        const timeSec = Math.floor(Number(candle.candle_start_ms) / 1000) + IST_OFFSET_SEC;
-        const open = toNumber(candle.open);
-        const high = toNumber(candle.high);
-        const low = toNumber(candle.low);
-        const close = toNumber(candle.close);
-
-        const cData = { time: timeSec, open, high, low, close };
-        state.candleSeries.update(cData);
-        if (elements.chartEmpty) elements.chartEmpty.hidden = true;
-    }
-
-    renderCurrentCandle();
-}
-
-function populateInstrumentSelect(instruments) {
-    const existing = new Set(
-        [...elements.instrumentSelect.options].map((option) => option.value)
-    );
-
-    for (const instrument of instruments) {
-        if (!existing.has(instrument)) {
-            const option = document.createElement("option");
-            option.value = instrument;
-            option.textContent = instrument;
-            elements.instrumentSelect.appendChild(option);
-            existing.add(instrument);
-        }
-    }
-
-    if (!state.selectedInstrument && elements.instrumentSelect.options.length) {
-        state.selectedInstrument = elements.instrumentSelect.options[0].value;
-        elements.instrumentSelect.value = state.selectedInstrument;
-    }
-
-    elements.selectedInstrument.textContent =
-        state.selectedInstrument || "Waiting for data";
-}
-
-function addInstrument(instrument) {
-    if (!instrument) {
-        return;
-    }
-
-    const exists = [...elements.instrumentSelect.options]
-        .some((option) => option.value === instrument);
-
-    if (!exists) {
-        const option = document.createElement("option");
-        option.value = instrument;
-        option.textContent = instrument;
-        elements.instrumentSelect.appendChild(option);
-    }
-}
-
-function renderLatestTick(tick) {
-    elements.selectedInstrument.textContent = tick.instrument_key || "—";
-    elements.lastPrice.textContent = formatNumber(tick.ltp);
-    elements.lastPriceTime.textContent =
-        `Exchange time: ${formatTime(tick.exchange_timestamp_ms)}`;
-
-    elements.bidAsk.textContent =
-        `${formatNumber(tick.bid_price)} / ${formatNumber(tick.ask_price)}`;
-
-    const bid = toNumber(tick.bid_price);
-    const ask = toNumber(tick.ask_price);
-    const spread = bid !== null && ask !== null ? ask - bid : null;
-    elements.spread.textContent = `Spread: ${formatNumber(spread)}`;
-
-    // Live Feed Latency Calculation (Exchange generation -> Localhost Browser)
-    const exTime = Number(tick.exchange_timestamp_ms);
-    if (exTime > 0 && elements.feedLatency) {
-        const lagMs = Math.max(0, Date.now() - exTime);
-        const lagSec = (lagMs / 1000).toFixed(2);
-        elements.feedLatency.textContent = `${lagMs} ms (${lagSec}s)`;
-        elements.feedLatency.style.color = lagMs < 750 ? "var(--primary)" : (lagMs < 1400 ? "var(--warning)" : "var(--danger)");
-    }
-}
-
-function refreshVisibleTick() {
-    const matchingTick = state.ticks.find(
-        (tick) => String(tick.instrument_key) === state.selectedInstrument
-    );
-
-    if (matchingTick) {
-        renderLatestTick(matchingTick);
-    } else {
-        elements.selectedInstrument.textContent =
-            state.selectedInstrument || "Waiting for data";
-        elements.lastPrice.textContent = "—";
-        elements.lastPriceTime.textContent = "No tick received";
-        elements.bidAsk.textContent = "— / —";
-        elements.spread.textContent = "Spread: —";
-    }
-}
-
-function updateOHLCLegend(candle) {
-    if (!candle) return;
-    const o = toNumber(candle.open);
-    const h = toNumber(candle.high);
-    const l = toNumber(candle.low);
-    const c = toNumber(candle.close);
-    const v = candle.volume !== undefined ? toNumber(candle.volume) : null;
-
-    if (elements.openValue) elements.openValue.textContent = formatNumber(o);
-    if (elements.highValue) elements.highValue.textContent = formatNumber(h);
-    if (elements.lowValue) elements.lowValue.textContent = formatNumber(l);
-    if (elements.closeValue) elements.closeValue.textContent = formatNumber(c);
-    if (elements.volumeValue && v !== null) elements.volumeValue.textContent = formatNumber(v, 0);
-
-    const changeEl = document.getElementById("ohlcChange");
-    if (changeEl && o !== null && c !== null) {
-        const diff = c - o;
-        const pct = o > 0 ? (diff / o) * 100 : 0;
-        const sign = diff >= 0 ? "+" : "";
-        changeEl.textContent = `${sign}${formatNumber(diff)} (${sign}${pct.toFixed(2)}%)`;
-        changeEl.style.color = diff >= 0 ? "#089981" : "#f23645";
-    }
-}
-
-function renderCurrentCandle() {
-    const candles = orderedCandles();
-    const candle = state.activeCandle || candles[candles.length - 1];
-
-    if (!candle) {
-        if (elements.candleState) {
-            elements.candleState.textContent = "Waiting";
-            elements.candleState.classList.remove("badge--closed");
-        }
-
-        for (const id of [
-            "openValue",
-            "highValue",
-            "lowValue",
-            "closeValue",
-            "volumeValue",
-            "tickCount",
-        ]) {
-            if (elements[id]) elements[id].textContent = "—";
-        }
-        return;
-    }
-
-    if (elements.candleState) {
-        elements.candleState.textContent =
-            Number(candle.is_closed) === 1 || candle.is_closed === true
-                ? "Closed"
-                : "Building";
-
-        elements.candleState.classList.toggle(
-            "badge--closed",
-            Number(candle.is_closed) === 1 || candle.is_closed === true
-        );
-    }
-
-    updateOHLCLegend(candle);
-    if (elements.tickCount) {
-        elements.tickCount.textContent = String(candle.tick_count ?? "—");
-    }
-}
-
-function renderChart() {
-    // Handled by TradingView Lightweight Charts
-}
-
-function orderedCandles() {
-    return [...state.candles.values()].sort(
-        (a, b) => Number(a.candle_start_ms) - Number(b.candle_start_ms)
-    );
-}
-
-function updateTickSnapshot(tick) {
-    const inst = String(tick.instrument_key || "");
-    const ltp = toNumber(tick.ltp);
-    if (ltp === null) return;
-
-    if (inst.includes("Nifty 50")) {
-        state.latestIndexPrices.nifty = ltp;
-    } else if (inst.includes("Bank")) {
-        state.latestIndexPrices.banknifty = ltp;
-    } else if (inst.includes("SENSEX") || inst.includes("Sensex")) {
-        state.latestIndexPrices.sensex = ltp;
-    }
-
-    const tsMs = Number(tick.exchange_timestamp_ms || tick.received_timestamp_ms || Date.now());
-    const sec = Math.floor(tsMs / 1000);
-
-    if (!state.tickSnapshots.length || state.tickSnapshots[0].sec !== sec) {
-        state.tickSnapshots.unshift({
-            sec: sec,
-            timeMs: tsMs,
-            nifty: state.latestIndexPrices.nifty,
-            banknifty: state.latestIndexPrices.banknifty,
-            sensex: state.latestIndexPrices.sensex,
-        });
-        if (state.tickSnapshots.length > 50) {
-            state.tickSnapshots.pop();
-        }
-    } else {
-        const current = state.tickSnapshots[0];
-        current.timeMs = tsMs;
-        if (inst.includes("Nifty 50")) current.nifty = ltp;
-        else if (inst.includes("Bank")) current.banknifty = ltp;
-        else if (inst.includes("SENSEX") || inst.includes("Sensex")) current.sensex = ltp;
-    }
-}
-
-function rebuildTickSnapshots(rawTicksDesc) {
-    state.tickSnapshots = [];
-    const ticksAsc = [...rawTicksDesc].reverse();
-    for (const tick of ticksAsc) {
-        updateTickSnapshot(tick);
-    }
-}
-
-function renderTicks() {
-    if (!state.tickSnapshots || !state.tickSnapshots.length) {
-        elements.ticksBody.innerHTML = `
-            <tr>
-                <td colspan="4" class="table-empty">
-                    No market ticks received yet.
-                </td>
-            </tr>
-        `;
-        return;
-    }
-
-    elements.ticksBody.innerHTML = state.tickSnapshots.map((snap) => `
-        <tr>
-            <td style="font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.8rem;">
-                ${escapeHtml(formatTime(snap.timeMs))}
-            </td>
-            <td style="font-variant-numeric: tabular-nums; font-weight: 600; color: #53e0c1; font-size: 0.85rem;">
-                ${snap.nifty !== null && snap.nifty !== undefined ? '₹' + escapeHtml(formatNumber(snap.nifty)) : '—'}
-            </td>
-            <td style="font-variant-numeric: tabular-nums; font-weight: 600; color: #60a5fa; font-size: 0.85rem;">
-                ${snap.banknifty !== null && snap.banknifty !== undefined ? '₹' + escapeHtml(formatNumber(snap.banknifty)) : '—'}
-            </td>
-            <td style="font-variant-numeric: tabular-nums; font-weight: 600; color: #f59e0b; font-size: 0.85rem;">
-                ${snap.sensex !== null && snap.sensex !== undefined ? '₹' + escapeHtml(formatNumber(snap.sensex)) : '—'}
-            </td>
-        </tr>
-    `).join("");
-}
-
-async function refreshHealth() {
-    try {
-        const result = await fetchJson("/api/health");
-        const counts = result.counts || {};
-
-        elements.storedCounts.textContent =
-            `${formatInteger(counts.ticks || 0)} ticks`;
-        elements.storedCandles.textContent =
-            `${formatInteger(counts.candles || 0)} one-minute candles`;
-        elements.feedMode.textContent = `Feed mode: ${result.feed_mode || "—"}`;
-
-        if (result.status) {
-            setStatus(result.status.state, result.status.message);
-        }
-    } catch (error) {
-        setBrowserStream("Health request failed", true);
-    }
-}
-
-function setStatus(stateName, message) {
-    const normalised = String(stateName || "waiting").toLowerCase();
-    const isConnected = normalised === "connected";
-    const isError = [
-        "error",
-        "message_error",
-        "configuration_required",
-        "disconnected",
-    ].includes(normalised);
-
-    elements.connectionState.textContent = humanise(normalised);
-    elements.connectionMessage.textContent = message || "No status message";
-    elements.upstoxStatus.textContent = humanise(normalised);
-
-    elements.statusDot.className = "connection__dot";
-
-    if (isConnected) {
-        elements.statusDot.classList.add("connection__dot--connected");
-    } else if (isError) {
-        elements.statusDot.classList.add("connection__dot--error");
-    } else {
-        elements.statusDot.classList.add("connection__dot--waiting");
-    }
-}
-
-function setBrowserStream(message, isError) {
-    elements.browserStream.textContent = message;
-    elements.browserStream.style.color = isError ? "#ff9aac" : "";
-}
-
-async function fetchJson(url) {
-    const response = await fetch(url, {
-        headers: {
-            "Accept": "application/json",
-        },
-    });
-
-    if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
-    }
-
-    return response.json();
-}
-
-function formatTime(timestamp) {
-    const number = Number(timestamp);
-    if (!Number.isFinite(number)) {
-        return "—";
-    }
-
-    return new Intl.DateTimeFormat("en-IN", {
-        timeZone: "Asia/Kolkata",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-    }).format(new Date(number));
-}
-
-function formatNumber(value, maximumFractionDigits = 2) {
-    const number = toNumber(value);
-    if (number === null) {
-        return "—";
-    }
-
-    return new Intl.NumberFormat("en-IN", {
-        minimumFractionDigits: 0,
-        maximumFractionDigits,
-    }).format(number);
-}
-
-function formatInteger(value) {
-    return new Intl.NumberFormat("en-IN", {
-        maximumFractionDigits: 0,
-    }).format(Number(value) || 0);
-}
-
-function toNumber(value) {
-    if (value === null || value === undefined || value === "") {
-        return null;
-    }
-
-    const number = Number(value);
-    return Number.isFinite(number) ? number : null;
-}
-
-function shortInstrument(value) {
-    const text = String(value || "");
-    return text.length > 30 ? `${text.slice(0, 27)}…` : text;
-}
-
-function humanise(value) {
-    return String(value || "")
-        .replaceAll("_", " ")
-        .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-function escapeHtml(value) {
-    return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-}
-
-/* ==========================================================================
-   OPTION CHAIN DATA FETCHER & RENDERER
-   ========================================================================== */
-
-async function loadOptionExpiries() {
-    try {
-        const idx = state.selectedOptionIndex || "NSE_INDEX|Nifty 50";
-        const response = await fetchJson(`/api/option-chain/expiries?instrument_key=${encodeURIComponent(idx)}`);
-        const expiries = response.expiries || [];
-        state.optionExpiries = expiries;
-
-        if (elements.optionExpirySelect) {
-            if (!expiries.length) {
-                elements.optionExpirySelect.innerHTML = `<option value="">No active expiries found</option>`;
-                return;
-            }
-
-            elements.optionExpirySelect.innerHTML = expiries.map((exp, index) => {
-                const label = formatExpiryLabel(exp, index === 0);
-                return `<option value="${escapeHtml(exp)}" ${index === 0 ? "selected" : ""}>${escapeHtml(label)}</option>`;
-            }).join("");
-
-            state.selectedExpiry = expiries[0];
-            await loadOptionChain(true);
-        }
     } catch (err) {
-        if (elements.chainStatusMsg) {
-            elements.chainStatusMsg.textContent = "Failed to load expiries";
-        }
+      console.warn('Dashboard poll error:', err);
+      elFeedDot.className = 'status-dot dot-error';
+      elFeedText.textContent = 'Reconnecting...';
+      if (elFeedPill) elFeedPill.classList.add('is-error');
     }
-}
+  }
 
-function formatExpiryLabel(dateStr, isNearest) {
+  // 7. Live SSE Connection
+  function setupSSE() {
     try {
-        const [year, month, day] = dateStr.split("-");
-        const date = new Date(year, month - 1, day);
-        const formatted = new Intl.DateTimeFormat("en-IN", {
-            day: "2-digit",
-            month: "short",
-            year: "numeric"
-        }).format(date);
-        return isNearest ? `${formatted} (Current Weekly)` : formatted;
-    } catch {
-        return dateStr;
-    }
-}
+      sseSource = new EventSource('/api/stream');
 
-async function loadOptionChain(force = false) {
-    if (!state.selectedExpiry) return;
+      sseSource.onopen = () => {
+        elFeedDot.className = 'status-dot dot-live';
+        if (elFeedPill) elFeedPill.classList.remove('is-error');
+      };
 
-    if (elements.chainStatusMsg) {
-        elements.chainStatusMsg.textContent = "Updating...";
+      sseSource.addEventListener('strategy_update', e => {
+        try {
+          const payload = JSON.parse(e.data);
+          // Trigger instant refresh
+          fetchDashboardData();
+        } catch (_) {}
+      });
+
+      sseSource.addEventListener('alert', e => {
+        try {
+          const alert = JSON.parse(e.data);
+          appendAlert(alert);
+        } catch (_) {}
+      });
+
+      sseSource.addEventListener('tick', () => {
+        // Feed is streaming ticks
+        elFeedDot.className = 'status-dot dot-live';
+        if (elFeedPill) elFeedPill.classList.remove('is-error', 'is-disconnected');
+      });
+
+      sseSource.onerror = () => {
+        elFeedDot.className = 'status-dot dot-error';
+        if (elFeedPill) elFeedPill.classList.add('is-error');
+      };
+    } catch (e) {
+      console.debug('SSE setup failed:', e);
     }
+  }
+
+  // 8. Clock & Live Market Interval Synchronizer
+  setInterval(() => {
+    const now = new Date();
+    elClock.textContent = now.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }) + ' IST';
+
+    // Market 3-minute interval calculation synchronized with exchange clock (Asia/Kolkata)
+    const istHours = (now.getUTCHours() + 5 + Math.floor((now.getUTCMinutes() + 30) / 60)) % 24;
+    const istMins = (now.getUTCMinutes() + 30) % 60;
+    const istSecs = now.getUTCSeconds();
+    const curTotalSec = istHours * 3600 + istMins * 60 + istSecs;
+    const openSec = 9 * 3600 + 15 * 60; // 09:15:00 IST
+    const closeSec = 15 * 3600 + 30 * 60; // 15:30:00 IST
+
+    if (curTotalSec < openSec) {
+      const waitSec = openSec - curTotalSec;
+      const m = Math.floor(waitSec / 60);
+      const s = waitSec % 60;
+      elOiUpdate.textContent = `Market opens in ${m}m ${s < 10 ? '0' : ''}${s}s`;
+    } else if (curTotalSec > closeSec) {
+      elOiUpdate.textContent = `Market closed · EOD`;
+    } else {
+      const elapsedSec = curTotalSec - openSec;
+      const cycleNum = Math.floor(elapsedSec / 180) + 1;
+      const nextInSec = 180 - (elapsedSec % 180);
+      const m = Math.floor(nextInSec / 60);
+      const s = nextInSec % 60;
+      elOiUpdate.textContent = `OI update: #${cycleNum} · next ~ ${m}:${s < 10 ? '0' : ''}${s}`;
+    }
+  }, 1000);
+
+  // 9. Feedback & Quick Control Helpers
+  const qcFeedback = document.getElementById('qc-feedback');
+  function showFeedback(msg, isError = false) {
+    if (!qcFeedback) return;
+    qcFeedback.textContent = msg;
+    qcFeedback.style.color = isError ? '#ef4444' : '#10b981';
+    qcFeedback.style.opacity = '1';
+    clearTimeout(qcFeedback._timer);
+    qcFeedback._timer = setTimeout(() => {
+      qcFeedback.textContent = 'Auto-Saved';
+      qcFeedback.style.color = '#94a3b8';
+    }, 3500);
+  }
+
+  function formatParamName(param) {
+    switch (param) {
+      case 'max_bullish_stocks': return 'Bullish Stocks';
+      case 'max_bearish_stocks': return 'Bearish Stocks';
+      case 'lots_full': return 'Full Lots';
+      case 'lots_normal': return 'Normal Lots';
+      case 'lots_scalp': return 'Scalp Lots';
+      default: return param;
+    }
+  }
+
+  function updatePillLabel(param, val) {
+    if (param === 'max_bullish_stocks') {
+      const el = document.getElementById('lbl-val-bullish');
+      if (el) el.textContent = val;
+      const titleEl = document.getElementById('heading-count-bullish');
+      if (titleEl) titleEl.textContent = val;
+    } else if (param === 'max_bearish_stocks') {
+      const el = document.getElementById('lbl-val-bearish');
+      if (el) el.textContent = val;
+      const titleEl = document.getElementById('heading-count-bearish');
+      if (titleEl) titleEl.textContent = val;
+    } else if (param === 'lots_full') {
+      const el = document.getElementById('lbl-val-full');
+      if (el) el.textContent = val;
+    } else if (param === 'lots_normal') {
+      const el = document.getElementById('lbl-val-normal');
+      if (el) el.textContent = val;
+    } else if (param === 'lots_scalp') {
+      const el = document.getElementById('lbl-val-scalp');
+      if (el) el.textContent = val;
+    }
+  }
+
+  function updateIndexLotBadge(key, val) {
+    const badge = document.getElementById(`badge-lots-${key}`);
+    if (!badge) return;
+    let lotSize = 1;
+    if (key.includes('Nifty 50')) lotSize = 65;
+    else if (key.includes('Bank')) lotSize = 15;
+    else if (key.includes('SENSEX')) lotSize = 10;
+
+    const totalQty = val * lotSize;
+    const lotWord = val === 1 ? '1 Lot' : `${val} Lots`;
+    badge.textContent = `${lotWord} (${totalQty} Qty)`;
+  }
+
+  function syncConfigPills(cfg) {
+    if (!cfg) return;
+    ['max_bullish_stocks', 'max_bearish_stocks', 'lots_full', 'lots_normal', 'lots_scalp'].forEach(param => {
+      if (cfg[param] !== undefined) {
+        const val = cfg[param];
+        updatePillLabel(param, val);
+        const group = document.querySelector(`.qc-group[data-param="${param}"] .pill-group`);
+        if (group) {
+          group.querySelectorAll('.pill-btn').forEach(btn => {
+            if (parseInt(btn.dataset.val, 10) === val) {
+              btn.classList.add('active');
+            } else {
+              btn.classList.remove('active');
+            }
+          });
+        }
+      }
+    });
+
+    if (cfg.index_lots && typeof cfg.index_lots === 'object') {
+      Object.entries(cfg.index_lots).forEach(([ukey, lotVal]) => {
+        const val = parseInt(lotVal, 10);
+        updateIndexLotBadge(ukey, val);
+        const group = document.querySelector(`.pill-group[data-idx-key="${ukey}"]`);
+        if (group) {
+          group.querySelectorAll('.btn-idx-lot').forEach(btn => {
+            if (parseInt(btn.dataset.val, 10) === val) {
+              btn.classList.add('active');
+            } else {
+              btn.classList.remove('active');
+            }
+          });
+        }
+      });
+    }
+  }
+
+  // 10. Event Listeners: Quick Control Pills
+  document.querySelectorAll('.pill-group').forEach(group => {
+    group.addEventListener('click', async e => {
+      const btn = e.target.closest('.pill-btn');
+      if (!btn) return;
+      const param = btn.dataset.param;
+      const val = parseInt(btn.dataset.val, 10);
+      if (!param || isNaN(val)) return;
+
+      group.querySelectorAll('.pill-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      updatePillLabel(param, val);
+
+      try {
+        const payload = {};
+        payload[param] = val;
+        await fetch('/api/strategy/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        showFeedback(`Set ${formatParamName(param)} to ${val}`);
+        fetchDashboardData();
+      } catch (err) {
+        showFeedback(`Failed to save: ${err.message}`, true);
+      }
+    });
+  });
+
+  // 11. Event Listeners: Dynamic Action Buttons (ENTER CE / ENTER PE / ARM / EXIT)
+  document.addEventListener('click', async e => {
+    const btn = e.target.closest('.btn-table-action');
+    if (!btn) return;
+
+    const action = btn.dataset.action;
+    const key = btn.dataset.key;
+    const side = btn.dataset.side || 'CE';
+
+    btn.disabled = true;
+    const origText = btn.textContent;
+    btn.textContent = '...';
+    btn.style.opacity = '0.7';
 
     try {
-        const idx = state.selectedOptionIndex || "NSE_INDEX|Nifty 50";
-        const url = `/api/option-chain?instrument_key=${encodeURIComponent(idx)}&expiry_date=${encodeURIComponent(state.selectedExpiry)}`;
-        const result = await fetchJson(url);
-
-        if (result.error) {
-            if (elements.chainStatusMsg) {
-                elements.chainStatusMsg.textContent = "Error: " + result.error;
-            }
-            return;
-        }
-
-        state.chainData = result;
-        renderOptionChain(result);
-
-        if (elements.chainStatusMsg) {
-            elements.chainStatusMsg.textContent = `Updated at ${formatTime(Date.now())}`;
-        }
-    } catch (err) {
-        if (elements.chainStatusMsg) {
-            elements.chainStatusMsg.textContent = "Failed to fetch option chain";
-        }
-    }
-}
-
-function renderOptionChain(data) {
-    if (!data || !Array.isArray(data.strikes) || !data.strikes.length) {
-        elements.optionChainBody.innerHTML = `
-            <tr>
-                <td colspan="15" class="table-empty">
-                    No strikes available for this expiry.
-                </td>
-            </tr>
-        `;
-        return;
-    }
-
-    const spotPrice = toNumber(data.spot_price);
-    const strikes = data.strikes;
-
-    // 1. Find ATM strike (closest to spotPrice)
-    let atmStrike = null;
-    let minDiff = Infinity;
-    if (spotPrice !== null) {
-        for (const item of strikes) {
-            const strike = toNumber(item.strike_price);
-            if (strike !== null) {
-                const diff = Math.abs(strike - spotPrice);
-                if (diff < minDiff) {
-                    minDiff = diff;
-                    atmStrike = strike;
-                }
-            }
-        }
-    }
-
-    // 2. Filter strikes based on state.strikeRange
-    let visibleStrikes = [...strikes].sort((a, b) => toNumber(a.strike_price) - toNumber(b.strike_price));
-    if (state.strikeRange !== "all" && atmStrike !== null) {
-        const count = parseInt(state.strikeRange, 10) || 15;
-        const atmIndex = visibleStrikes.findIndex(s => toNumber(s.strike_price) === atmStrike);
-        if (atmIndex !== -1) {
-            const start = Math.max(0, atmIndex - count);
-            const end = Math.min(visibleStrikes.length, atmIndex + count + 1);
-            visibleStrikes = visibleStrikes.slice(start, end);
-        }
-    }
-
-    // 3. Compute totals and max OI for bars
-    let totalCallOi = 0;
-    let totalPutOi = 0;
-    let maxCallOi = 1;
-    let maxPutOi = 1;
-
-    for (const item of strikes) {
-        const callData = item.call_options?.market_data || {};
-        const putData = item.put_options?.market_data || {};
-        const callOi = toNumber(callData.oi) || 0;
-        const putOi = toNumber(putData.oi) || 0;
-        totalCallOi += callOi;
-        totalPutOi += putOi;
-    }
-
-    for (const item of visibleStrikes) {
-        const callData = item.call_options?.market_data || {};
-        const putData = item.put_options?.market_data || {};
-        const callOi = toNumber(callData.oi) || 0;
-        const putOi = toNumber(putData.oi) || 0;
-        if (callOi > maxCallOi) maxCallOi = callOi;
-        if (putOi > maxPutOi) maxPutOi = putOi;
-    }
-
-    // 4. Update Header Metrics
-    if (elements.chainSpotPrice) {
-        elements.chainSpotPrice.textContent = spotPrice !== null ? formatNumber(spotPrice, 2) : "—";
-    }
-    if (elements.chainSpotTime) {
-        elements.chainSpotTime.textContent = "Live at " + formatTime(Date.now());
-    }
-    if (elements.chainAtmStrike) {
-        elements.chainAtmStrike.textContent = atmStrike !== null ? formatNumber(atmStrike, 0) : "—";
-    }
-
-    const pcr = totalCallOi > 0 ? (totalPutOi / totalCallOi) : null;
-    if (elements.chainPcr) {
-        elements.chainPcr.textContent = pcr !== null ? pcr.toFixed(2) : "—";
-    }
-    if (elements.chainPcrSentiment && pcr !== null) {
-        if (pcr > 1.2) {
-            elements.chainPcrSentiment.textContent = "Bullish Sentiment (>1.2)";
-            elements.chainPcrSentiment.className = "text--up";
-        } else if (pcr < 0.8) {
-            elements.chainPcrSentiment.textContent = "Bearish Sentiment (<0.8)";
-            elements.chainPcrSentiment.className = "text--down";
+      if (action === 'enter') {
+        const res = await fetch('/api/strategy/manual-enter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ underlying_key: key, side: side })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showFeedback(`MANUAL ENTRY: ${side} for ${key}`);
         } else {
-            elements.chainPcrSentiment.textContent = "Neutral Range (0.8 - 1.2)";
-            elements.chainPcrSentiment.className = "text--muted";
+          showFeedback(`Entry rejected: check spread/filters`, true);
         }
-    }
-
-    if (elements.chainTotalOi) {
-        elements.chainTotalOi.textContent = formatInteger(totalCallOi + totalPutOi);
-    }
-    if (elements.chainOiSplit) {
-        elements.chainOiSplit.textContent = `CE: ${formatInteger(totalCallOi)} | PE: ${formatInteger(totalPutOi)}`;
-    }
-
-    // 5. Build Table Rows
-    const rowsHtml = visibleStrikes.map(item => {
-        const strike = toNumber(item.strike_price);
-        const isAtm = strike === atmStrike;
-        const isCallItm = spotPrice !== null && strike < spotPrice;
-        const isPutItm = spotPrice !== null && strike > spotPrice;
-
-        const call = item.call_options || {};
-        const callMkt = call.market_data || {};
-        const callGreeks = call.option_greeks || {};
-
-        const put = item.put_options || {};
-        const putMkt = put.market_data || {};
-        const putGreeks = put.option_greeks || {};
-
-        // Call metrics
-        const callOi = toNumber(callMkt.oi);
-        const callPrevOi = toNumber(callMkt.prev_oi);
-        const callOiChg = (callOi !== null && callPrevOi !== null) ? (callOi - callPrevOi) : null;
-        const callVol = toNumber(callMkt.volume);
-        const callIv = toNumber(callGreeks.iv);
-        const callLtp = toNumber(callMkt.ltp);
-        const callClose = toNumber(callMkt.close_price);
-        const callChg = (callLtp !== null && callClose !== null && callClose > 0) ? (callLtp - callClose) : null;
-        const callChgPct = (callChg !== null && callClose > 0) ? ((callChg / callClose) * 100) : null;
-        const callBid = toNumber(callMkt.bid_price);
-        const callAsk = toNumber(callMkt.ask_price);
-
-        // Put metrics
-        const putOi = toNumber(putMkt.oi);
-        const putPrevOi = toNumber(putMkt.prev_oi);
-        const putOiChg = (putOi !== null && putPrevOi !== null) ? (putOi - putPrevOi) : null;
-        const putVol = toNumber(putMkt.volume);
-        const putIv = toNumber(putGreeks.iv);
-        const putLtp = toNumber(putMkt.ltp);
-        const putClose = toNumber(putMkt.close_price);
-        const putChg = (putLtp !== null && putClose !== null && putClose > 0) ? (putLtp - putClose) : null;
-        const putChgPct = (putChg !== null && putClose > 0) ? ((putChg / putClose) * 100) : null;
-        const putBid = toNumber(putMkt.bid_price);
-        const putAsk = toNumber(putMkt.ask_price);
-
-        const callOiBarWidth = callOi ? Math.min(100, Math.round((callOi / maxCallOi) * 100)) : 0;
-        const putOiBarWidth = putOi ? Math.min(100, Math.round((putOi / maxPutOi) * 100)) : 0;
-
-        const rowClass = isAtm ? "row--atm" : "";
-        const callCellClass = isCallItm ? "cell--itm-call" : "";
-        const putCellClass = isPutItm ? "cell--itm-put" : "";
-
-        return `
-            <tr class="${rowClass}" data-call-key="${escapeHtml(call.instrument_key || '')}" data-put-key="${escapeHtml(put.instrument_key || '')}">
-                <!-- CALLS (CE) -->
-                <td class="${callCellClass} oi-cell ce-oi">
-                    <div class="oi-bar oi-bar--call" style="width: ${callOiBarWidth}%"></div>
-                    <span class="val-text">${callOi !== null ? formatInteger(callOi) : "—"}</span>
-                </td>
-                <td class="${callCellClass} ${renderChgClass(callOiChg)}">
-                    ${renderChgVal(callOiChg, true)}
-                </td>
-                <td class="${callCellClass}">${callVol !== null ? formatInteger(callVol) : "—"}</td>
-                <td class="${callCellClass}">${callIv !== null && callIv > 0 ? callIv.toFixed(1) + "%" : "—"}</td>
-                <td class="${callCellClass}"><strong class="ce-ltp">${callLtp !== null ? formatNumber(callLtp, 2) : "—"}</strong></td>
-                <td class="${callCellClass} ${renderChgClass(callChg)}">
-                    ${renderChgVal(callChg)} ${callChgPct !== null ? `(${callChgPct >= 0 ? '+' : ''}${callChgPct.toFixed(1)}%)` : ''}
-                </td>
-                <td class="${callCellClass} ce-bidask">
-                    ${(callBid !== null && callAsk !== null) ? `${formatNumber(callBid, 1)} / ${formatNumber(callAsk, 1)}` : "— / —"}
-                </td>
-
-                <!-- STRIKE -->
-                <td class="td--strike">
-                    <span>${formatNumber(strike, 0)}</span>
-                    ${isAtm ? '<span class="badge--atm-strike">ATM</span>' : ''}
-                </td>
-
-                <!-- PUTS (PE) -->
-                <td class="${putCellClass} pe-bidask">
-                    ${(putBid !== null && putAsk !== null) ? `${formatNumber(putBid, 1)} / ${formatNumber(putAsk, 1)}` : "— / —"}
-                </td>
-                <td class="${putCellClass} ${renderChgClass(putChg)}">
-                    ${renderChgVal(putChg)} ${putChgPct !== null ? `(${putChgPct >= 0 ? '+' : ''}${putChgPct.toFixed(1)}%)` : ''}
-                </td>
-                <td class="${putCellClass}"><strong class="pe-ltp">${putLtp !== null ? formatNumber(putLtp, 2) : "—"}</strong></td>
-                <td class="${putCellClass}">${putIv !== null && putIv > 0 ? putIv.toFixed(1) + "%" : "—"}</td>
-                <td class="${putCellClass}">${putVol !== null ? formatInteger(putVol) : "—"}</td>
-                <td class="${putCellClass} ${renderChgClass(putOiChg)}">
-                    ${renderChgVal(putOiChg, true)}
-                </td>
-                <td class="${putCellClass} oi-cell pe-oi">
-                    <div class="oi-bar oi-bar--put" style="width: ${putOiBarWidth}%"></div>
-                    <span class="val-text">${putOi !== null ? formatInteger(putOi) : "—"}</span>
-                </td>
-            </tr>
-        `;
-    }).join("");
-
-    elements.optionChainBody.innerHTML = rowsHtml;
-}
-
-function renderChgClass(val) {
-    if (val === null || val === undefined) return "text--muted";
-    if (val > 0) return "text--up";
-    if (val < 0) return "text--down";
-    return "text--muted";
-}
-
-function renderChgVal(val, isInteger = false) {
-    if (val === null || val === undefined) return "—";
-    const prefix = val > 0 ? "+" : "";
-    return prefix + (isInteger ? formatInteger(val) : formatNumber(val, 2));
-}
-
-/* ==========================================================================
-   REAL-TIME MILLISECOND TICK DISPATCHERS
-   ========================================================================== */
-
-function updateChainSpotFromTick(tick) {
-    if (!elements.chainSpotPrice) return;
-    const newPrice = toNumber(tick.ltp);
-    if (newPrice === null) return;
-
-    const oldText = elements.chainSpotPrice.textContent.replace(/,/g, "");
-    const oldPrice = parseFloat(oldText);
-
-    elements.chainSpotPrice.textContent = formatNumber(newPrice, 2);
-    elements.chainSpotTime.textContent = `Live at ${formatTime(tick.exchange_timestamp_ms || Date.now())}`;
-
-    if (!isNaN(oldPrice) && oldPrice !== newPrice) {
-        flashElement(elements.chainSpotPrice, newPrice > oldPrice ? "flash-up" : "flash-down");
-    }
-}
-
-function updateChainRowFromTick(tick) {
-    const key = tick.instrument_key;
-    if (!key) return;
-
-    const callRow = document.querySelector(`[data-call-key="${key}"]`);
-    if (callRow) {
-        updateSingleOptionCell(callRow, tick, true);
-    }
-
-    const putRow = document.querySelector(`[data-put-key="${key}"]`);
-    if (putRow) {
-        updateSingleOptionCell(putRow, tick, false);
-    }
-}
-
-function updateSingleOptionCell(rowEl, tick, isCall) {
-    const ltpEl = rowEl.querySelector(isCall ? ".ce-ltp" : ".pe-ltp");
-    const bidAskEl = rowEl.querySelector(isCall ? ".ce-bidask" : ".pe-bidask");
-    const oiEl = rowEl.querySelector(isCall ? ".ce-oi .val-text" : ".pe-oi .val-text");
-
-    if (ltpEl && tick.ltp !== undefined && tick.ltp !== null) {
-        const oldLtp = parseFloat(ltpEl.textContent.replace(/,/g, ""));
-        const newLtp = parseFloat(tick.ltp);
-        ltpEl.textContent = formatNumber(newLtp, 2);
-        if (!isNaN(oldLtp) && oldLtp !== newLtp) {
-            flashElement(ltpEl, newLtp > oldLtp ? "flash-up" : "flash-down");
-        }
-    }
-
-    if (bidAskEl && tick.bid_price !== undefined && tick.ask_price !== undefined) {
-        bidAskEl.textContent = `${formatNumber(tick.bid_price, 1)} / ${formatNumber(tick.ask_price, 1)}`;
-    }
-
-    if (oiEl && tick.open_interest !== undefined && tick.open_interest !== null) {
-        oiEl.textContent = formatInteger(tick.open_interest);
-    }
-}
-
-function updateLockedCandidateRow(tick) {
-    if (!tick.instrument_key || !elements.stratLockedBody) return;
-    const row = elements.stratLockedBody.querySelector(`[data-key="${tick.instrument_key}"]`);
-    if (!row) return;
-
-    const ltp = toNumber(tick.ltp);
-    if (ltp === null) return;
-
-    const ref = toNumber(row.getAttribute("data-ref"));
-    const timeEl = row.querySelector(".tq-time");
-    const rateEl = row.querySelector(".tq-rate");
-    const diffEl = row.querySelector(".tq-diff");
-    const qtyEl = row.querySelector(".tq-qty");
-    const spreadEl = row.querySelector(".tq-spread");
-
-    if (timeEl) timeEl.textContent = formatTime(tick.exchange_timestamp_ms || Date.now());
-    if (rateEl) {
-        const oldLtp = parseFloat(rateEl.textContent.replace(/,/g, ""));
-        rateEl.textContent = formatNumber(ltp, 2);
-        if (!isNaN(oldLtp) && oldLtp !== ltp) {
-            flashElement(rateEl, ltp > oldLtp ? "flash-up" : "flash-down");
-        }
-    }
-    if (diffEl && ref !== null) {
-        const diff = ltp - ref;
-        diffEl.textContent = (diff > 0 ? "+" : "") + formatNumber(diff, 2);
-        diffEl.className = "tq-diff " + (diff > 0.001 ? "diff-positive" : (diff < -0.001 ? "diff-negative" : "diff-zero"));
-    }
-    if (qtyEl && (tick.bid_quantity || tick.ask_quantity)) {
-        qtyEl.textContent = tick.bid_quantity || tick.ask_quantity;
-    }
-    const bid = toNumber(tick.bid_price);
-    const ask = toNumber(tick.ask_price);
-    if (spreadEl && bid !== null && ask !== null && ltp > 0) {
-        const spreadPct = ((ask - bid) / ltp) * 100;
-        spreadEl.textContent = formatNumber(spreadPct, 2) + "%";
-    }
-}
-
-function flashElement(el, flashClass) {
-    el.classList.remove("flash-up", "flash-down");
-    void el.offsetWidth;
-    el.classList.add(flashClass);
-    setTimeout(() => {
-        el.classList.remove(flashClass);
-    }, 750);
-}
-
-/* ==========================================================================
-   OPENING GAP ENTRY BOT DATA FETCHER & RENDERER (NIFTY 50)
-   ========================================================================== */
-
-async function loadStrategyStatus() {
-    try {
-        const res = await fetchJson("/api/strategy/status");
-        if (!res) return;
-
-        // 1. Bot State Badge & Mode
-        const stateStr = res.state || "SETUP";
-        if (elements.stratStatusBadge) {
-            elements.stratStatusBadge.textContent = stateStr;
-            elements.stratStatusBadge.className = 'gchart-state-badge state-' + stateStr.toLowerCase();
-        }
-        if (elements.gchartSpot && res.spot_price) {
-            elements.gchartSpot.textContent = `NC=${formatNumber(res.spot_price, 2)}`;
-        }
-        if (elements.gchartExpiry && res.active_expiry) {
-            elements.gchartExpiry.textContent = `EXP: ${res.active_expiry}`;
-        }
-
-        // 2. Active Position (Only 1 active position for NIFTY 50)
-        const pos = res.current_position;
-        if (elements.stratCurrentPosition) {
-            if (pos && pos.status === "OPEN") {
-                const isCe = (pos.side || "").includes("CE");
-                const pts = toNumber(pos.pnl_points) || 0;
-                const net = toNumber(pos.net_pnl) || 0;
-                elements.stratCurrentPosition.innerHTML = `
-                    <span style="color: ${isCe ? '#00ff66' : '#ff3344'}; font-weight: 700;">
-                        ${escapeHtml(pos.side)}: ${escapeHtml(pos.symbol)}
-                    </span>
-                `;
-                if (elements.stratPositionDetail) {
-                    elements.stratPositionDetail.textContent = `@ ${formatNumber(pos.entry_price, 2)} (${pos.entry_time_ist}) | Cur: @ ${formatNumber(pos.current_price || pos.entry_price, 2)}`;
-                }
-                if (elements.stratNetPnl) {
-                    elements.stratNetPnl.textContent = `${net >= 0 ? '+' : ''}₹${formatNumber(net, 2)}`;
-                    elements.stratNetPnl.className = net >= 0 ? "diff-positive" : "diff-negative";
-                }
-                if (elements.stratPnlPoints) {
-                    elements.stratPnlPoints.textContent = `(${pts >= 0 ? '+' : ''}${formatNumber(pts, 2)} pts)`;
-                }
-                if (elements.tqPosSummary) {
-                    elements.tqPosSummary.innerHTML = `<strong style="color: #53e0c1;">ACTIVE:</strong> ${escapeHtml(pos.symbol)} @ ${formatNumber(pos.entry_price, 2)} | P&L: ₹${formatNumber(net, 2)}`;
-                }
-            } else {
-                elements.stratCurrentPosition.textContent = "FLAT (NO POSITION)";
-                elements.stratCurrentPosition.style.color = "#94a3b8";
-                if (elements.stratPositionDetail) {
-                    elements.stratPositionDetail.textContent = 
-                        stateStr === "HOLDING" ? "Managing position" :
-                        stateStr === "ARMED" ? "Armed! Watching 1st positive tick at 09:15" :
-                        stateStr === "LOCKED" ? "8 ITM candidates locked with Ref LTP at 09:14:55" :
-                        stateStr === "CLOSED" ? "Daily trade completed for today" :
-                        stateStr === "NO_TRADE" ? "Entry window expired. No trade today." :
-                        "Watching 8 ITM candidates at 09:15:00";
-                }
-                if (elements.stratNetPnl) {
-                    const todayPnl = Number(res.today_net_pnl_inr || 0);
-                    elements.stratNetPnl.textContent = `${todayPnl >= 0 ? '+' : ''}₹${formatNumber(todayPnl, 2)}`;
-                    elements.stratNetPnl.className = todayPnl >= 0 ? "diff-positive" : "diff-negative";
-                }
-                if (elements.stratPnlPoints) {
-                    const todayPts = Number(res.today_pnl_points || 0);
-                    elements.stratPnlPoints.textContent = `(${todayPts >= 0 ? '+' : ''}${formatNumber(todayPts, 2)} pts)`;
-                }
-                if (elements.tqPosSummary) {
-                    elements.tqPosSummary.textContent = "Watching 8 ITM Candidates at 09:15:00";
-                }
-            }
-        }
-
-        // 3. Today & Lifetime Performance
-        const todayTrades = res.today_trades || 0;
-        if (elements.stratTotalTrades) {
-            elements.stratTotalTrades.textContent = `${todayTrades} / 1 Traded`;
-        }
-
-        // 4. Config Inputs
-        const cfg = res.config || {};
-        if (elements.stratLots && document.activeElement !== elements.stratLots) {
-            elements.stratLots.value = cfg.lots || 1;
-        }
-        if (elements.stratOrderBuffer && document.activeElement !== elements.stratOrderBuffer) {
-            elements.stratOrderBuffer.value = cfg.order_buffer || 0.50;
-        }
-        if (elements.stratMaxSpread && document.activeElement !== elements.stratMaxSpread) {
-            elements.stratMaxSpread.value = cfg.max_spread_pct || 3.0;
-        }
-        if (elements.stratMode && document.activeElement !== elements.stratMode) {
-            elements.stratMode.value = cfg.mode || "paper";
-        }
-
-        // 5. 8 Locked ITM Candidates Table (GChart Table format matching user screenshot)
-        const lockedList = res.locked_contracts || [];
-        if (elements.stratLockedBody) {
-            if (!lockedList.length) {
-                elements.stratLockedBody.innerHTML = `
-                    <tr>
-                        <td colspan="6" style="text-align: center; color: var(--muted); padding: 30px;">
-                            Awaiting spot tick to plan 8 ITM candidates (4 CE below spot, 4 PE above spot)...
-                        </td>
-                    </tr>
-                `;
-            } else {
-                elements.stratLockedBody.innerHTML = lockedList.map(c => {
-                    const ltp = toNumber(c.ltp);
-                    const ref = toNumber(c.ref_ltp);
-                    const diff = (ltp !== null && ref !== null) ? (ltp - ref) : null;
-                    const diffClass = (diff !== null && diff > 0.001) ? "diff-positive" :
-                                      (diff !== null && diff < -0.001) ? "diff-negative" : "diff-zero";
-                    const diffText = (diff !== null) ? ((diff > 0 ? "+" : "") + formatNumber(diff, 2)) : "—";
-                    const isWinner = res.last_decision && res.last_decision.chosen_strike === c.strike && res.last_decision.side === c.side;
-                    const timeStr = formatTime(c.last_trade_ms || Date.now());
-
-                    return `
-                        <tr data-key="${escapeHtml(c.instrument_key || '')}" data-ref="${ref !== null ? ref : ''}" class="${isWinner ? 'winner-row' : ''}">
-                            <td class="tq-time" style="color: #94a3b8; font-size: 0.8em;">${escapeHtml(timeStr)}</td>
-                            <td>
-                                <span style="font-weight: 700; color: #fff;">${escapeHtml(c.symbol || '')}</span>
-                                <span style="color: #f59e0b; font-size: 0.8em; margin-left: 4px;">[${ref !== null ? formatNumber(ref, 1) : '—'}]</span>
-                            </td>
-                            <td class="tq-rate" style="font-weight: 700; color: #fff;">${ltp !== null ? formatNumber(ltp, 2) : '—'}</td>
-                            <td class="tq-diff ${diffClass}">${diffText}</td>
-                            <td class="tq-qty" style="color: #94a3b8;">${c.bid_qty || c.ask_qty || 65}</td>
-                            <td class="tq-spread" style="color: #38bdf8; font-weight: 600;">${c.spread_pct != null ? formatNumber(c.spread_pct, 2) + '%' : '—'}</td>
-                        </tr>
-                    `;
-                }).join("");
-            }
-        }
-
-    } catch (err) {
-        console.error("Opening Gap Strategy status failed", err);
-    }
-}
-
-async function loadStrategyTrades() {
-    try {
-        const res = await fetchJson("/api/strategy/trades?limit=50");
-        const trades = res.trades || [];
-        if (!elements.stratTradesBody) return;
-
-        if (!trades.length) {
-            elements.stratTradesBody.innerHTML = `
-                <tr>
-                    <td colspan="7" style="text-align: center; color: var(--muted); padding: 25px;">
-                        No trades executed today. Opening gap entry triggers on first positive tick at 09:15.
-                    </td>
-                </tr>
-            `;
-            return;
-        }
-
-        elements.stratTradesBody.innerHTML = trades.map(t => {
-            const isCe = (t.side || "").includes("CE");
-            const pnl = toNumber(t.net_pnl);
-            const isOpen = t.status === "OPEN";
-
-            return `
-                <tr>
-                    <td style="font-weight: 600; color: #cbd5e1;">${escapeHtml(t.trade_id)}</td>
-                    <td style="text-align: center;">
-                        <span class="badge ${isCe ? 'badge--atm' : 'badge--closed'}">${escapeHtml(t.side)}</span>
-                    </td>
-                    <td style="font-weight: 700; color: #fff;">${escapeHtml(t.symbol)}</td>
-                    <td style="font-weight: 700;">${formatNumber(t.entry_price, 2)}</td>
-                    <td style="font-weight: 700;">${t.exit_price ? formatNumber(t.exit_price, 2) : '—'}</td>
-                    <td class="${pnl !== null && pnl >= 0 ? 'diff-positive' : 'diff-negative'}">
-                        <strong>${pnl !== null ? `${pnl >= 0 ? '+' : ''}₹${formatNumber(pnl, 2)}` : '—'}</strong>
-                    </td>
-                    <td style="text-align: center;">
-                        <span class="badge ${isOpen ? 'badge--atm' : 'badge--closed'}">${isOpen ? 'OPEN' : 'CLOSED'}</span>
-                    </td>
-                </tr>
-            `;
-        }).join("");
-    } catch (err) {
-        console.error("Failed to load strategy trades", err);
-    }
-}
-
-async function saveStrategyConfig() {
-    const body = {
-        lots: parseInt(elements.stratLots?.value || 1, 10),
-        order_buffer: parseFloat(elements.stratOrderBuffer?.value || 0.50),
-        max_spread_pct: parseFloat(elements.stratMaxSpread?.value || 3.0),
-        mode: elements.stratMode?.value || "paper",
-    };
-
-    if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Saving rules...";
-
-    try {
-        const res = await fetch("/api/strategy/config", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
+      } else if (action === 'arm') {
+        await fetch('/api/strategy/arm-now', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ underlying_key: key })
         });
-        if (res.ok) {
-            if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Parameters saved!";
-            await loadStrategyStatus();
-            setTimeout(() => {
-                if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Opening gap engine ready";
-            }, 2500);
-        }
+        showFeedback(`Armed ${key} immediately`);
+      } else if (action === 'exit') {
+        await fetch('/api/strategy/exit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ underlying_key: key })
+        });
+        showFeedback(`Exited position for ${key}`);
+      }
+      fetchDashboardData();
     } catch (err) {
-        if (elements.stratConfigStatus) elements.stratConfigStatus.textContent = "Failed to save";
+      showFeedback(`Action failed: ${err.message}`, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+      btn.style.opacity = '1.0';
     }
-}
+  });
+
+  // 12. Top Header Buttons
+  document.querySelectorAll('.btn-arm-idx').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const key = btn.dataset.key;
+      btn.disabled = true;
+      try {
+        await fetch('/api/strategy/arm-now', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ underlying_key: key })
+        });
+        showFeedback(`Armed ${btn.textContent}`);
+        fetchDashboardData();
+      } catch (err) {
+        showFeedback(`Arm error: ${err.message}`, true);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  const btnArmAll = document.getElementById('btn-arm-all');
+  if (btnArmAll) {
+    btnArmAll.addEventListener('click', async () => {
+      btnArmAll.disabled = true;
+      try {
+        await fetch('/api/strategy/arm-now', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ underlying_key: 'INDICES' })
+        });
+        showFeedback('Armed ALL 3 Indices');
+        fetchDashboardData();
+      } catch (err) {
+        showFeedback(`Arm all error: ${err.message}`, true);
+      } finally {
+        btnArmAll.disabled = false;
+      }
+    });
+  }
+
+  // 13. Other Header / Tab Event Listeners
+  document.getElementById('strike-index-tabs').addEventListener('click', e => {
+    const btn = e.target.closest('.tab-btn');
+    if (!btn) return;
+    document.querySelectorAll('#strike-index-tabs .tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeIndexKey = btn.dataset.index;
+    if (lastData && lastData.indices) {
+      const idx = lastData.indices.find(x => x.key === activeIndexKey);
+      if (idx) {
+        renderStrikeDetail(idx.strikes || [], idx.name || 'INDEX', idx.atm_strike);
+      }
+    }
+  });
+
+  document.getElementById('btn-clear-alerts').addEventListener('click', () => {
+    alertsContainer.innerHTML = '<div class="alert-empty-state">Alerts cleared. Listening for new events...</div>';
+  });
+
+  document.getElementById('btn-re-eval').addEventListener('click', () => {
+    fetchDashboardData();
+  });
+
+  document.getElementById('btn-emergency-exit').addEventListener('click', async () => {
+    if (!confirm('Are you sure you want to emergency squareoff all open positions?')) return;
+    try {
+      await fetch('/api/strategy/exit?scope=ALL', { method: 'POST' });
+      showFeedback('Emergency Squareoff Sent');
+      fetchDashboardData();
+    } catch (err) {
+      showFeedback('Exit error: ' + err.message, true);
+    }
+  });
+
+  // 14. Top-level Application Tabs (Live Dashboard vs Trade Book vs Activity Logs vs Bot Settings)
+  const navBtnDash = document.getElementById('nav-btn-dashboard');
+  const navBtnTrades = document.getElementById('nav-btn-trades');
+  const navBtnLogs = document.getElementById('nav-btn-logs');
+  const navBtnSettings = document.getElementById('nav-btn-settings');
+  const paneDash = document.getElementById('tab-dashboard');
+  const paneTrades = document.getElementById('tab-trades');
+  const paneLogs = document.getElementById('tab-logs');
+  const paneSettings = document.getElementById('tab-settings');
+  const navCurrentText = document.getElementById('nav-current-tab-text');
+  const btnBackToDash = document.getElementById('btn-back-to-dashboard');
+  const badgeTradesCount = document.getElementById('badge-trades-count');
+  const badgeLogsCount = document.getElementById('badge-logs-count');
+
+  // Trade Book Elements
+  const selectTradeDate = document.getElementById('select-trade-date');
+  const btnExportCsv = document.getElementById('btn-export-trades-csv');
+  const btnRefreshTrades = document.getElementById('btn-refresh-trades');
+  const tbodyTradesJournal = document.getElementById('tbody-trades-journal');
+  const summaryTotalTrades = document.getElementById('summary-total-trades');
+  const summaryWinTrades = document.getElementById('summary-win-trades');
+  const summaryLossTrades = document.getElementById('summary-loss-trades');
+  const summaryWinRate = document.getElementById('summary-win-rate');
+  const summaryDayPnl = document.getElementById('summary-day-pnl');
+
+  // Activity Logs Elements
+  const selectLogDate = document.getElementById('select-log-date');
+  const selectLogLevel = document.getElementById('select-log-level');
+  const btnExportLogsCsv = document.getElementById('btn-export-logs-csv');
+  const btnRefreshLogs = document.getElementById('btn-refresh-logs');
+  const tbodyLogsJournal = document.getElementById('tbody-logs-journal');
+  const summaryTotalLogs = document.getElementById('summary-total-logs');
+  const summaryEntriesCount = document.getElementById('summary-entries-count');
+  const summaryExitsCount = document.getElementById('summary-exits-count');
+  const summaryBlocksCount = document.getElementById('summary-blocks-count');
+  const summaryWarningsCount = document.getElementById('summary-warnings-count');
+
+  function switchTab(target) {
+    [navBtnDash, navBtnTrades, navBtnLogs, navBtnSettings].forEach(b => { if (b) b.classList.remove('active'); });
+    [paneDash, paneTrades, paneLogs, paneSettings].forEach(p => { if (p) p.style.display = 'none'; });
+
+    if (target === 'settings') {
+      if (navBtnSettings) navBtnSettings.classList.add('active');
+      if (paneSettings) paneSettings.style.display = 'block';
+      if (navCurrentText) navCurrentText.textContent = 'BOT SETTINGS';
+    } else if (target === 'trades') {
+      if (navBtnTrades) navBtnTrades.classList.add('active');
+      if (paneTrades) paneTrades.style.display = 'block';
+      if (navCurrentText) navCurrentText.textContent = 'TRADE BOOK';
+      loadTradesJournal();
+    } else if (target === 'logs') {
+      if (navBtnLogs) navBtnLogs.classList.add('active');
+      if (paneLogs) paneLogs.style.display = 'block';
+      if (navCurrentText) navCurrentText.textContent = 'ACTIVITY LOGS';
+      loadAlertsJournal();
+    } else {
+      if (navBtnDash) navBtnDash.classList.add('active');
+      if (paneDash) paneDash.style.display = 'block';
+      if (navCurrentText) navCurrentText.textContent = 'LIVE DASHBOARD';
+    }
+  }
+
+  if (navBtnDash) navBtnDash.addEventListener('click', () => switchTab('dashboard'));
+  if (navBtnTrades) navBtnTrades.addEventListener('click', () => switchTab('trades'));
+  if (navBtnLogs) navBtnLogs.addEventListener('click', () => switchTab('logs'));
+  if (navBtnSettings) navBtnSettings.addEventListener('click', () => switchTab('settings'));
+  if (btnBackToDash) btnBackToDash.addEventListener('click', () => switchTab('dashboard'));
+
+  // 15. Trade Book & Journal Manager (Day-by-Day + Millisecond Timestamps + CSV Export)
+  let currentSelectedDate = 'today';
+
+  async function loadTradeDates() {
+    if (!selectTradeDate) return;
+    try {
+      const res = await fetch('/api/strategy/trade-dates');
+      if (!res.ok) return;
+      const data = await res.json();
+      const dates = data.dates || [];
+      const today = data.today || new Date().toISOString().split('T')[0];
+
+      const prevVal = selectTradeDate.value || 'today';
+      let html = `<option value="today">Today (${today})</option>`;
+      dates.forEach(d => {
+        if (d !== today) {
+          html += `<option value="${d}">${d}</option>`;
+        }
+      });
+      html += `<option value="all">All Dates</option>`;
+      selectTradeDate.innerHTML = html;
+      selectTradeDate.value = prevVal;
+    } catch (err) {
+      console.warn('Error loading trade dates:', err);
+    }
+  }
+
+  function formatTimeWithMs(timeStr, tsMs) {
+    if (timeStr && timeStr.includes('.')) return timeStr;
+    if (tsMs) {
+      const d = new Date(Number(tsMs));
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      const ms = String(d.getMilliseconds()).padStart(3, '0');
+      return `${hh}:${mm}:${ss}.${ms}`;
+    }
+    return timeStr || '-';
+  }
+
+  function formatExitBadge(reason) {
+    if (!reason) return '<span class="badge-exit">-</span>';
+    const r = String(reason).toUpperCase();
+    if (r.includes('STOP_LOSS') || r.includes('SL')) {
+      return '<span class="badge-exit badge-exit-sl">SL 25%</span>';
+    }
+    if (r.includes('TARGET') || r.includes('PROFIT')) {
+      return '<span class="badge-exit badge-exit-target">TARGET 40%</span>';
+    }
+    if (r.includes('MANUAL')) {
+      return '<span class="badge-exit badge-exit-manual">MANUAL</span>';
+    }
+    if (r.includes('15:15') || r.includes('EOD') || r.includes('SQUAREOFF')) {
+      return '<span class="badge-exit badge-exit-eod">EOD 15:15</span>';
+    }
+    return `<span class="badge-exit">${reason}</span>`;
+  }
+
+  async function loadTradesJournal() {
+    if (!tbodyTradesJournal) return;
+    const selectedDate = selectTradeDate ? selectTradeDate.value : 'today';
+    currentSelectedDate = selectedDate;
+
+    try {
+      const res = await fetch(`/api/strategy/trades?date=${encodeURIComponent(selectedDate)}&limit=1000`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const trades = data.trades || [];
+
+      if (badgeTradesCount) {
+        badgeTradesCount.textContent = trades.length;
+      }
+
+      // Calculate Day Summary Metrics
+      let winCount = 0;
+      let lossCount = 0;
+      let totalPnl = 0.0;
+
+      if (!trades.length) {
+        tbodyTradesJournal.innerHTML = `<tr><td colspan="12" class="text-center text-muted font-mono" style="padding: 24px;">No trades recorded for ${selectedDate}.</td></tr>`;
+      } else {
+        let html = '';
+        trades.forEach((t, i) => {
+          const pnl = Number(t.net_pnl || 0.0);
+          totalPnl += pnl;
+          if (pnl > 0) winCount++;
+          else if (pnl < 0) lossCount++;
+
+          const pnlSign = pnl > 0 ? '+' : '';
+          const pnlCls = pnl > 0 ? 'text-green font-bold' : (pnl < 0 ? 'text-red font-bold' : 'text-muted font-bold');
+
+          const entryTime = formatTimeWithMs(t.entry_time_ist, t.entry_timestamp_ms);
+          const exitTime = t.status === 'OPEN' ? '<span class="text-cyan font-bold font-mono">ACTIVE</span>' : formatTimeWithMs(t.exit_time_ist, t.exit_timestamp_ms);
+
+          const exitPriceDisp = t.status === 'OPEN'
+            ? `<span class="text-cyan font-mono font-bold">₹${Number(t.current_price || t.exit_price || t.entry_price || 0).toFixed(2)} (Live)</span>`
+            : (t.exit_price !== null && t.exit_price !== undefined ? `<span class="font-mono text-bright font-bold">₹${Number(t.exit_price).toFixed(2)}</span>` : '<span class="text-dim">-</span>');
+
+          const sideBadge = (t.side || '').toUpperCase().includes('CE')
+            ? '<span class="act-badge act-enter-ce">BUY CE</span>'
+            : '<span class="act-badge act-enter-pe">BUY PE</span>';
+
+          const statusBadge = t.status === 'OPEN'
+            ? '<span class="badge-status-open">OPEN</span>'
+            : '<span class="badge-status-closed">CLOSED</span>';
+
+          const ptsVal = Number(t.pnl_points || 0.0);
+          const ptsSign = ptsVal > 0 ? '+' : '';
+          const ptsCls = ptsVal > 0 ? 'text-green font-mono' : (ptsVal < 0 ? 'text-red font-mono' : 'text-muted font-mono');
+
+          html += `<tr>
+            <td class="text-center text-dim font-bold font-mono">${trades.length - i}</td>
+            <td class="text-left font-bold text-bright font-mono">${t.symbol || t.underlying_key || '-'}</td>
+            <td class="text-center">${sideBadge}</td>
+            <td class="text-right font-mono text-bright font-bold">${Number(t.strike || 0).toLocaleString()}</td>
+            <td class="text-right font-mono text-bright font-bold">₹${Number(t.entry_price || 0).toFixed(2)}</td>
+            <td class="text-center font-mono text-bright font-bold">${entryTime}</td>
+            <td class="text-right font-mono">${exitPriceDisp}</td>
+            <td class="text-center font-mono font-bold">${exitTime}</td>
+            <td class="text-right ${ptsCls} font-bold">${ptsSign}${ptsVal.toFixed(2)}</td>
+            <td class="text-right font-mono ${pnlCls}">${pnlSign}₹${pnl.toFixed(2)}</td>
+            <td class="text-center">${formatExitBadge(t.exit_reason)}</td>
+            <td class="text-center">${statusBadge}</td>
+          </tr>`;
+        });
+
+        tbodyTradesJournal.innerHTML = html;
+      }
+
+      // Update Summary KPI Cards
+      if (summaryTotalTrades) summaryTotalTrades.textContent = trades.length;
+      if (summaryWinTrades) summaryWinTrades.textContent = `${winCount} W`;
+      if (summaryLossTrades) summaryLossTrades.textContent = `${lossCount} L`;
+
+      const completedTrades = winCount + lossCount;
+      const winRatePct = completedTrades > 0 ? ((winCount / completedTrades) * 100).toFixed(1) : '0.0';
+      if (summaryWinRate) summaryWinRate.textContent = `${winRatePct}%`;
+
+      if (summaryDayPnl) {
+        const sign = totalPnl > 0 ? '+' : '';
+        const pnlCls = totalPnl > 0 ? 'text-green' : (totalPnl < 0 ? 'text-red' : 'text-bright');
+        summaryDayPnl.className = `summary-val font-mono ${pnlCls}`;
+        summaryDayPnl.textContent = `${sign}₹${totalPnl.toFixed(2)}`;
+      }
+
+    } catch (err) {
+      console.warn('Error loading trades journal:', err);
+      if (tbodyTradesJournal) {
+        tbodyTradesJournal.innerHTML = `<tr><td colspan="12" class="text-center text-red">Error loading trades: ${err.message}</td></tr>`;
+      }
+    }
+  }
+
+  // Date picker change & refresh events
+  if (selectTradeDate) {
+    selectTradeDate.addEventListener('change', () => {
+      loadTradesJournal();
+    });
+  }
+
+  if (btnRefreshTrades) {
+    btnRefreshTrades.addEventListener('click', () => {
+      loadTradesJournal();
+    });
+  }
+
+  if (btnExportCsv) {
+    btnExportCsv.addEventListener('click', () => {
+      const selectedDate = selectTradeDate ? selectTradeDate.value : 'today';
+      window.location.href = `/api/strategy/trades/export.csv?date=${encodeURIComponent(selectedDate)}`;
+    });
+  }
+
+  // 16. Activity Logs Manager (Day-by-Day + Level Filter + CSV Export)
+  async function loadAlertDates() {
+    if (!selectLogDate) return;
+    try {
+      const res = await fetch('/api/strategy/alert-dates');
+      if (!res.ok) return;
+      const data = await res.json();
+      const dates = data.dates || [];
+      const today = data.today || new Date().toISOString().split('T')[0];
+
+      const prevVal = selectLogDate.value || 'today';
+      let html = `<option value="today">Today (${today})</option>`;
+      dates.forEach(d => {
+        if (d !== today) {
+          html += `<option value="${d}">${d}</option>`;
+        }
+      });
+      html += `<option value="all">All Dates</option>`;
+      selectLogDate.innerHTML = html;
+      selectLogDate.value = prevVal;
+    } catch (err) {
+      console.warn('Error loading alert dates:', err);
+    }
+  }
+
+  async function loadAlertsJournal() {
+    if (!tbodyLogsJournal) return;
+    try {
+      const selectedDate = selectLogDate ? selectLogDate.value : 'today';
+      const selectedLevel = selectLogLevel ? selectLogLevel.value : 'ALL';
+      let url = `/api/strategy/alerts?limit=500&date=${encodeURIComponent(selectedDate)}`;
+      if (selectedLevel && selectedLevel !== 'ALL') {
+        url += `&level=${encodeURIComponent(selectedLevel)}`;
+      }
+
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const alerts = data.alerts || [];
+
+      if (badgeLogsCount) badgeLogsCount.textContent = alerts.length;
+
+      if (!alerts.length) {
+        tbodyLogsJournal.innerHTML = `<tr><td colspan="6" class="text-center text-muted">No activity logs recorded for ${selectedDate}.</td></tr>`;
+        if (summaryTotalLogs) summaryTotalLogs.textContent = '0';
+        if (summaryEntriesCount) summaryEntriesCount.textContent = '0 Entries';
+        if (summaryExitsCount) summaryExitsCount.textContent = '0 Exits';
+        if (summaryBlocksCount) summaryBlocksCount.textContent = '0';
+        if (summaryWarningsCount) summaryWarningsCount.textContent = '0';
+      } else {
+        let html = '';
+        let entriesCount = 0;
+        let exitsCount = 0;
+        let blocksCount = 0;
+        let warningsCount = 0;
+
+        alerts.forEach((a, i) => {
+          const typeStr = (a.alert_type || a.type || 'EVENT').toUpperCase();
+          const lvl = (a.level || 'INFO').toUpperCase();
+
+          if (typeStr.includes('ENTRY')) entriesCount++;
+          else if (typeStr.includes('EXIT')) exitsCount++;
+          else if (typeStr.includes('BLOCK') || typeStr.includes('GUARD') || typeStr.includes('REJECT')) blocksCount++;
+          else if (lvl.includes('WARN') || lvl.includes('ERR')) warningsCount++;
+
+          let tagCls = 'tag-data';
+          if (typeStr.includes('ENTRY')) tagCls = 'tag-entry';
+          else if (typeStr.includes('EXIT')) tagCls = 'tag-exit';
+          else if (typeStr.includes('BLOCK') || typeStr.includes('GUARD') || typeStr.includes('REJECT')) tagCls = 'tag-blocked';
+          else if (lvl.includes('WARN')) tagCls = 'tag-warning';
+          else if (lvl.includes('ERR')) tagCls = 'tag-exit';
+
+          let lvlBadgeCls = 'badge-level-info';
+          if (lvl.includes('WARN')) lvlBadgeCls = 'badge-level-warning';
+          else if (lvl.includes('ERR')) lvlBadgeCls = 'badge-level-error';
+
+          html += `<tr>
+            <td class="text-center text-dim font-bold font-mono">${alerts.length - i}</td>
+            <td class="text-center font-mono text-bright font-bold">${a.timestamp_ist || '-'}</td>
+            <td class="text-center"><span class="badge-level ${lvlBadgeCls}">${lvl}</span></td>
+            <td class="text-center"><span class="alert-tag ${tagCls}">${typeStr}</span></td>
+            <td class="text-left font-bold text-bright font-mono">${a.symbol || '-'}</td>
+            <td class="text-left text-dim font-mono">${a.message || ''}</td>
+          </tr>`;
+        });
+
+        tbodyLogsJournal.innerHTML = html;
+
+        if (summaryTotalLogs) summaryTotalLogs.textContent = alerts.length;
+        if (summaryEntriesCount) summaryEntriesCount.textContent = `${entriesCount} Entries`;
+        if (summaryExitsCount) summaryExitsCount.textContent = `${exitsCount} Exits`;
+        if (summaryBlocksCount) summaryBlocksCount.textContent = blocksCount;
+        if (summaryWarningsCount) summaryWarningsCount.textContent = warningsCount;
+      }
+    } catch (err) {
+      console.warn('Error loading alerts journal:', err);
+      if (tbodyLogsJournal) {
+        tbodyLogsJournal.innerHTML = `<tr><td colspan="6" class="text-center text-red">Error loading logs: ${err.message}</td></tr>`;
+      }
+    }
+  }
+
+  if (selectLogDate) selectLogDate.addEventListener('change', () => loadAlertsJournal());
+  if (selectLogLevel) selectLogLevel.addEventListener('change', () => loadAlertsJournal());
+  if (btnRefreshLogs) btnRefreshLogs.addEventListener('click', () => loadAlertsJournal());
+  if (btnExportLogsCsv) {
+    btnExportLogsCsv.addEventListener('click', () => {
+      const selectedDate = selectLogDate ? selectLogDate.value : 'today';
+      const selectedLevel = selectLogLevel ? selectLogLevel.value : 'ALL';
+      window.location.href = `/api/strategy/alerts/export.csv?date=${encodeURIComponent(selectedDate)}&level=${encodeURIComponent(selectedLevel)}`;
+    });
+  }
+
+  // Index specific lot pills handler
+  document.querySelectorAll('.btn-idx-lot').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const key = btn.dataset.key;
+      const val = parseInt(btn.dataset.val, 10);
+      if (!key || isNaN(val)) return;
+
+      const parentGroup = btn.closest('.pill-group');
+      if (parentGroup) {
+        parentGroup.querySelectorAll('.btn-idx-lot').forEach(b => b.classList.remove('active'));
+      }
+      btn.classList.add('active');
+      updateIndexLotBadge(key, val);
+
+      try {
+        const payload = { index_lots: {} };
+        payload.index_lots[key] = val;
+        await fetch('/api/strategy/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        showFeedback(`Set ${key.split('|')[1] || key} to ${val} lots`);
+        fetchDashboardData();
+      } catch (err) {
+        showFeedback(`Failed to update index lot: ${err.message}`, true);
+      }
+    });
+  });
+
+  // Initial Boot
+  fetchDashboardData();
+  loadTradeDates();
+  loadTradesJournal();
+  loadAlertDates();
+  loadAlertsJournal();
+  setupSSE();
+  // Continuous fallback polling every 2 seconds
+  setInterval(() => {
+    fetchDashboardData();
+    if (paneTrades && paneTrades.style.display !== 'none') {
+      loadTradesJournal();
+    }
+    if (paneLogs && paneLogs.style.display !== 'none') {
+      loadAlertsJournal();
+    }
+  }, 2000);
+
+})();

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,8 @@ class MarketDatabase:
             timeout=30,
         )
         self._connection.row_factory = sqlite3.Row
+        self._tick_count: int = 0
+        self._last_commit_time: float = time.time()
         self._configure()
         self._create_schema()
 
@@ -96,7 +99,10 @@ class MarketDatabase:
                     net_pnl REAL,
                     status TEXT NOT NULL,
                     spot_price REAL,
-                    atm_strike REAL
+                    atm_strike REAL,
+                    bot_latency_ms REAL,
+                    network_latency_ms REAL,
+                    build_up TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS strategy_signals (
@@ -120,6 +126,21 @@ class MarketDatabase:
                     oi_change REAL,
                     confidence TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS strategy_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    alert_date TEXT NOT NULL,
+                    timestamp_ist TEXT NOT NULL,
+                    timestamp_ms INTEGER NOT NULL,
+                    level TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    symbol TEXT,
+                    message TEXT NOT NULL,
+                    details_json TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_alerts_date_time
+                    ON strategy_alerts(alert_date, timestamp_ms DESC);
                 """
             )
             self._connection.commit()
@@ -226,7 +247,18 @@ class MarketDatabase:
                     json.dumps(tick.get("raw", {}), separators=(",", ":")),
                 ),
             )
+            self._tick_count += 1
+            if self._tick_count >= 50 or (time.time() - self._last_commit_time) > 2.0:
+                self._connection.commit()
+                self._tick_count = 0
+                self._last_commit_time = time.time()
+
+    def flush(self) -> None:
+        """Commit any pending tick writes to disk."""
+        with self._lock:
             self._connection.commit()
+            self._tick_count = 0
+            self._last_commit_time = time.time()
 
     def upsert_candle(self, candle: dict[str, Any]) -> None:
         with self._lock:
@@ -254,7 +286,10 @@ class MarketDatabase:
                     END,
                     high = MAX(candles_1m.high, excluded.high),
                     low = MIN(candles_1m.low, excluded.low),
-                    close = excluded.close,
+                    close = CASE 
+                        WHEN candles_1m.is_closed = 1 AND excluded.is_closed = 0 THEN candles_1m.close 
+                        ELSE excluded.close 
+                    END,
                     volume = MAX(candles_1m.volume, excluded.volume),
                     open_interest = COALESCE(excluded.open_interest, candles_1m.open_interest),
                     tick_count = CASE 
@@ -279,6 +314,18 @@ class MarketDatabase:
                 ),
             )
             self._connection.commit()
+
+    def get_candle(self, instrument_key: str, candle_start_ms: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT *
+                FROM candles_1m
+                WHERE instrument_key = ? AND candle_start_ms = ?
+                """,
+                (instrument_key, candle_start_ms),
+            ).fetchone()
+            return dict(row) if row else None
 
     def mark_candle_closed(
         self,
@@ -396,25 +443,42 @@ class MarketDatabase:
 
     def counts(self) -> dict[str, int]:
         with self._lock:
-            ticks = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM ticks"
-            ).fetchone()["count"]
-            candles = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM candles_1m"
-            ).fetchone()["count"]
+            # Instant indexed rowid lookup instead of multi-gigabyte full-table scan
+            try:
+                row_t = self._connection.execute("SELECT rowid FROM ticks ORDER BY rowid DESC LIMIT 1").fetchone()
+                ticks_cnt = int(row_t["rowid"]) if row_t and row_t["rowid"] else 0
+            except Exception:
+                ticks_cnt = 0
+            try:
+                row_c = self._connection.execute("SELECT rowid FROM candles_1m ORDER BY rowid DESC LIMIT 1").fetchone()
+                candles_cnt = int(row_c["rowid"]) if row_c and row_c["rowid"] else 0
+            except Exception:
+                candles_cnt = 0
 
-        return {"ticks": int(ticks), "candles": int(candles)}
+        return {"ticks": ticks_cnt, "candles": candles_cnt}
 
     def insert_strategy_trade(self, trade: dict[str, Any]) -> None:
         with self._lock:
+            # Ensure migration columns exist
+            for col_name, col_type in [
+                ("bot_latency_ms", "REAL"),
+                ("network_latency_ms", "REAL"),
+                ("build_up", "TEXT"),
+            ]:
+                try:
+                    self._connection.execute(f"ALTER TABLE strategy_trades ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
+
             self._connection.execute(
                 """
                 INSERT OR REPLACE INTO strategy_trades (
                     trade_id, trade_date, side, symbol, instrument_key, underlying_key,
                     strike, lot_size, entry_time_ist, entry_price, entry_timestamp_ms,
                     exit_time_ist, exit_price, exit_timestamp_ms, exit_reason,
-                    pnl_points, net_pnl, status, spot_price, atm_strike
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    pnl_points, net_pnl, status, spot_price, atm_strike,
+                    bot_latency_ms, network_latency_ms, build_up
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade["trade_id"],
@@ -437,6 +501,9 @@ class MarketDatabase:
                     trade["status"],
                     trade.get("spot_price"),
                     trade.get("atm_strike"),
+                    trade.get("bot_latency_ms"),
+                    trade.get("network_latency_ms"),
+                    trade.get("build_up"),
                 ),
             )
             self._connection.commit()
@@ -489,17 +556,39 @@ class MarketDatabase:
             "status": "CLOSED",
         })
 
-    def get_strategy_trades(self, limit: int = 100) -> list[dict[str, Any]]:
+    def get_strategy_trades(self, limit: int = 100, trade_date: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if trade_date and trade_date.lower() != "all":
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM strategy_trades
+                    WHERE trade_date = ?
+                    ORDER BY entry_timestamp_ms DESC
+                    LIMIT ?
+                    """,
+                    (trade_date, limit),
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM strategy_trades
+                    ORDER BY entry_timestamp_ms DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_strategy_trade_dates(self) -> list[str]:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT * FROM strategy_trades
-                ORDER BY entry_timestamp_ms DESC
-                LIMIT ?
-                """,
-                (limit,),
+                SELECT DISTINCT trade_date FROM strategy_trades
+                WHERE trade_date IS NOT NULL AND trade_date != ''
+                ORDER BY trade_date DESC
+                """
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [r[0] for r in rows if r[0]]
 
     def insert_strategy_signal(self, sig: dict[str, Any]) -> None:
         with self._lock:
@@ -547,6 +636,136 @@ class MarketDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def insert_strategy_alert(self, alert: dict[str, Any]) -> int:
+        with self._lock:
+            cur = self._connection.execute(
+                """
+                INSERT INTO strategy_alerts (
+                    alert_date, timestamp_ist, timestamp_ms, level,
+                    alert_type, symbol, message, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    alert["alert_date"],
+                    alert["timestamp_ist"],
+                    alert["timestamp_ms"],
+                    alert.get("level", "INFO"),
+                    alert.get("alert_type", "GENERAL"),
+                    alert.get("symbol", ""),
+                    alert["message"],
+                    alert.get("details_json", "{}"),
+                ),
+            )
+            self._connection.commit()
+            return int(cur.lastrowid or 0)
+
+    def get_strategy_alerts(
+        self,
+        limit: int = 500,
+        alert_date: str | None = None,
+        level: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            clauses: list[str] = []
+            params: list[Any] = []
+            if alert_date:
+                clauses.append("alert_date = ?")
+                params.append(alert_date)
+            if level and level.upper() not in ("ALL", ""):
+                if level.upper() in ("ENTRY", "EXIT"):
+                    clauses.append("alert_type LIKE ?")
+                    params.append(f"%{level.upper()}%")
+                else:
+                    clauses.append("(level = ? OR alert_type LIKE ?)")
+                    params.extend([level.upper(), f"%{level.upper()}%"])
+
+            where_str = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            params.append(limit)
+            query = f"""
+                SELECT * FROM strategy_alerts
+                {where_str}
+                ORDER BY timestamp_ms DESC
+                LIMIT ?
+            """
+            rows = self._connection.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_strategy_alert_dates(self) -> list[str]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT DISTINCT alert_date FROM strategy_alerts
+                WHERE alert_date IS NOT NULL AND alert_date != ''
+                ORDER BY alert_date DESC
+                """
+            ).fetchall()
+        return [r[0] for r in rows if r[0]]
+
+    def get_db_stats(self) -> dict[str, Any]:
+        """Returns database size, row counts, and disk statistics."""
+        with self._lock:
+            size_bytes = self.path.stat().st_size if self.path.exists() else 0
+            size_mb = round(size_bytes / (1024 * 1024), 2)
+            size_gb = round(size_bytes / (1024 * 1024 * 1024), 2)
+
+            tick_count = self._connection.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+            candle_count = self._connection.execute("SELECT COUNT(*) FROM candles_1m").fetchone()[0]
+            trade_count = self._connection.execute("SELECT COUNT(*) FROM strategy_trades").fetchone()[0]
+
+            oldest_tick = self._connection.execute("SELECT MIN(exchange_timestamp_ms) FROM ticks").fetchone()[0]
+            newest_tick = self._connection.execute("SELECT MAX(exchange_timestamp_ms) FROM ticks").fetchone()[0]
+
+            return {
+                "file_path": str(self.path),
+                "size_bytes": size_bytes,
+                "size_mb": size_mb,
+                "size_gb": size_gb,
+                "tick_count": tick_count,
+                "candle_count": candle_count,
+                "trade_count": trade_count,
+                "oldest_tick_ms": oldest_tick,
+                "newest_tick_ms": newest_tick,
+            }
+
+    def prune_old_ticks(self, days_to_keep: int = 3, run_vacuum: bool = False) -> dict[str, Any]:
+        """
+        Deletes raw ticks older than `days_to_keep` days to reclaim storage.
+        Preserves all 1-minute candles and strategy trade records permanently!
+        """
+        import time
+        with self._lock:
+            cutoff_ms = int((time.time() - (days_to_keep * 86400)) * 1000)
+            initial_size = self.path.stat().st_size if self.path.exists() else 0
+
+            cur = self._connection.cursor()
+            cur.execute("DELETE FROM ticks WHERE exchange_timestamp_ms < ?", (cutoff_ms,))
+            deleted_ticks = cur.rowcount
+            self._connection.commit()
+
+            # Checkpoint WAL file to release pages
+            try:
+                self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                self._connection.commit()
+            except Exception:
+                pass
+
+            if run_vacuum:
+                try:
+                    self._connection.execute("VACUUM;")
+                    self._connection.commit()
+                except Exception:
+                    pass
+
+            final_size = self.path.stat().st_size if self.path.exists() else 0
+            return {
+                "deleted_ticks": deleted_ticks,
+                "cutoff_ms": cutoff_ms,
+                "initial_size_mb": round(initial_size / (1024 * 1024), 2),
+                "final_size_mb": round(final_size / (1024 * 1024), 2),
+                "space_saved_mb": round(max(0, initial_size - final_size) / (1024 * 1024), 2),
+            }
+
     def close(self) -> None:
         with self._lock:
+            self._connection.commit()
             self._connection.close()
