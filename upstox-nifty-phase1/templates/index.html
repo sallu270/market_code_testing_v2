@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sum Signal &amp; Positive Tick Dashboard | NIFTY &middot; BANK NIFTY &middot; SENSEX</title>
+  <title>Sum Signal &amp; Positive Tick Dashboard | 3 Indices + 50 NIFTY Stocks</title>
   <link rel="stylesheet" href="/static/css/dashboard.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -15,8 +15,8 @@
     <!-- Top Header -->
     <header class="dashboard-header">
       <div class="header-left">
-        <h1 class="dashboard-title">OI Conditions Dashboard</h1>
-        <p class="dashboard-subtitle">CE/PE change in OI &middot; option premium change &middot; futures price and OI change &middot; 16 conditions + futures gate</p>
+        <h1 class="dashboard-title">Sum Signal &amp; Positive Tick Dashboard</h1>
+        <p class="dashboard-subtitle">53 Underlyings (3 Indices ATM &plusmn; 10 [42 Options] + 50 NIFTY Stocks ATM &plusmn; 5 [22 Options]) &middot; Score = CE % &minus; PE % &middot; 09:15 Baseline</p>
       </div>
       <div class="header-right">
         <div class="status-pill status-feed" id="feed-status-pill">
@@ -24,15 +24,11 @@
           <span id="feed-status-text">Feed live</span>
         </div>
         <div class="status-pill status-time" id="clock-display">--:--:-- IST</div>
-        <div class="status-pill status-baseline" id="baseline-display">Baseline: 09:15 snapshot</div>
-        <div class="status-pill status-update" id="oi-update-display">OI update: #1 &middot; next ~ 3m</div>
+        <div class="status-pill status-baseline" id="baseline-display">Baseline: 09:15:00 Locked</div>
         <div class="status-pill status-mode" id="mode-display">PAPER MODE</div>
         
         <div class="header-actions">
-          <button class="btn btn-sm btn-outline btn-arm-idx" data-key="NSE_INDEX|Nifty 50" id="btn-arm-nifty" title="Force lock & arm Nifty 50">Arm Nifty</button>
-          <button class="btn btn-sm btn-outline btn-arm-idx" data-key="NSE_INDEX|Nifty Bank" id="btn-arm-banknifty" title="Force lock & arm Bank Nifty">Arm BankNifty</button>
-          <button class="btn btn-sm btn-outline btn-arm-idx" data-key="BSE_INDEX|SENSEX" id="btn-arm-sensex" title="Force lock & arm Sensex">Arm Sensex</button>
-          <button class="btn btn-sm btn-outline" id="btn-arm-all" title="Force lock & arm all indices">Arm All</button>
+          <button class="btn btn-sm btn-outline" id="btn-export-baseline-proof" title="Download 09:16 Baseline Proof CSV">📥 09:16 Proof CSV</button>
           <button class="btn btn-sm btn-outline" id="btn-re-eval" title="Trigger instant evaluation">Evaluate</button>
           <button class="btn btn-sm btn-danger" id="btn-emergency-exit" title="Emergency squareoff all positions">Exit All</button>
         </div>
@@ -41,7 +37,7 @@
 
     <!-- Sub-header Notice / Reference Info -->
     <div class="system-bar">
-      <span>Layout reference for the developer. All live values, buildup, condition, gate, rank, and action are calculated dynamically from Upstox feed ticks.</span>
+      <span>3 Indices + 50 NIFTY Stocks &middot; Dr. Vijay Bhilwade Sum Signal (Score = CE % &minus; PE %) &middot; ITM 2 Selection &middot; Multi-Socket WebSocket Feed</span>
       <div class="system-bar-right">
         <span id="trades-counter-text">Today's Trades: 0 | P&L: ₹0.00</span>
       </div>
@@ -60,8 +56,8 @@
           <span class="nav-tab-badge" id="badge-trades-count">0</span>
         </button>
         <button class="nav-tab" data-tab="tab-logs" id="nav-btn-logs">
-          <span class="nav-tab-icon">📜</span>
-          <span class="nav-tab-title">Activity Logs</span>
+          <span class="nav-tab-icon">⏱️</span>
+          <span class="nav-tab-title">Momentum Feed</span>
           <span class="nav-tab-badge" id="badge-logs-count">0</span>
         </button>
         <button class="nav-tab" data-tab="tab-settings" id="nav-btn-settings">
@@ -86,7 +82,7 @@
         <div class="section-header">
           <div class="section-title-wrap">
             <h2 class="section-title">Indices &middot; Sum Signal Strategy (Score = CE % - PE %)</h2>
-            <span class="section-meta">ATM &plusmn; 5 strikes (22 options per index) &middot; 09:15 Baseline Sum &middot; 5-Min Confirmation</span>
+            <span class="section-meta">ATM &plusmn; 10 strikes (42 options per index) &middot; 09:15 Baseline Sum &middot; 5-Min Confirmation</span>
           </div>
         </div>
         <div class="table-card">
@@ -94,9 +90,9 @@
             <thead>
               <tr>
                 <th class="col-inst text-left">INSTRUMENT<br><span class="th-sub">NAME &middot; SPOT &middot; ATM</span></th>
-                <th colspan="3" class="col-grp-ce text-center">CALLS (CE) BASKET &middot; ATM &plusmn; 5</th>
-                <th colspan="3" class="col-grp-pe text-center">PUTS (PE) BASKET &middot; ATM &plusmn; 5</th>
-                <th colspan="2" class="col-grp-sig text-center">SUM SIGNAL</th>
+                <th colspan="3" class="col-grp-ce text-center">CALLS (CE) &middot; 21 STRIKES (ATM &plusmn; 10)</th>
+                <th colspan="3" class="col-grp-pe text-center">PUTS (PE) &middot; 21 STRIKES (ATM &plusmn; 10)</th>
+                <th class="col-grp-sig text-center">SIGNAL &amp; SCORE</th>
                 <th colspan="3" class="col-grp-dec text-center">CONFIRMATION &amp; DECISION</th>
               </tr>
               <tr class="sub-headers">
@@ -109,9 +105,8 @@
                 <th class="text-right">09:15 BASE</th>
                 <th class="text-right">LIVE SUM</th>
                 <th class="text-right">PE %</th>
-                <!-- SUM SIGNAL -->
-                <th class="text-center">SCORE</th>
-                <th class="text-center">RAW SIGNAL</th>
+                <!-- SIGNAL -->
+                <th class="text-center">SIGNAL</th>
                 <!-- CONFIRMATION & DECISION -->
                 <th class="text-center">5-MIN HOLD</th>
                 <th class="text-center">DECISION</th>
@@ -125,15 +120,54 @@
         </div>
       </section>
 
-      <!-- Section 4: Split Grid: Strike Detail (ATM ±1) + Alerts -->
+      <!-- Section 2: Live Percentage Momentum Feed (Second-by-Second Timeline) -->
+      <section class="dash-section section-momentum-feed">
+        <div class="card card-momentum" style="border: 1px solid #1e2b45; background: #0c1424; border-radius: 8px; margin-bottom: 20px;">
+          <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #1a273f;">
+            <div class="card-title-wrap">
+              <h3 class="card-title" style="font-size: 15px; font-weight: 800; color: #ffffff; margin: 0;">⏱️ Live Percentage Momentum Feed &middot; Second-by-Second</h3>
+              <span class="card-meta" style="font-size: 11px; color: #94a3b8;">Real-time percentage change tracker for CE Basket %, PE Basket % &amp; Sum Score over time</span>
+            </div>
+            <div class="card-header-actions" style="display: flex; align-items: center; gap: 8px;">
+              <div class="index-tabs" id="momentum-index-tabs">
+                <button class="tab-btn active" data-filter="ALL">ALL</button>
+                <button class="tab-btn" data-filter="NSE_INDEX|Nifty 50">NIFTY</button>
+                <button class="tab-btn" data-filter="NSE_INDEX|Nifty Bank">BANK NIFTY</button>
+                <button class="tab-btn" data-filter="BSE_INDEX|SENSEX">SENSEX</button>
+              </div>
+              <button class="btn btn-xs btn-outline" id="btn-pause-momentum" title="Pause or resume auto scroll">Pause</button>
+              <button class="btn btn-xs btn-outline" id="btn-clear-momentum" title="Clear current momentum feed">Clear</button>
+            </div>
+          </div>
+          <div class="momentum-table-wrap" style="max-height: 260px; overflow-y: auto;">
+            <table class="data-table" id="table-momentum">
+              <thead>
+                <tr class="sub-headers">
+                  <th class="text-left" style="width: 105px;">TIME (IST)</th>
+                  <th class="text-left" style="width: 125px;">INDEX</th>
+                  <th class="text-right">CE BASKET % (PREV &rarr; NOW)</th>
+                  <th class="text-right">PE BASKET % (PREV &rarr; NOW)</th>
+                  <th class="text-center">CE % vs PE % MOMENTUM</th>
+                  <th class="text-center">SIGNAL &amp; 5-MIN HOLD</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-momentum">
+                <tr><td colspan="6" class="text-center text-muted" style="padding: 22px;">Awaiting live price percentage changes...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 3: Split Grid: Strike Detail (ATM ±5) + Alerts -->
       <div class="grid-split-2">
 
-        <!-- Left: Strike Detail Table (ATM ±1) -->
+        <!-- Left: Strike Detail Table (ATM ±5) -->
         <div class="card card-strike-detail">
           <div class="card-header">
             <div class="card-title-wrap">
-              <h3 class="card-title" id="strike-table-title">NIFTY 50 &middot; strike detail (ATM &plusmn;1)</h3>
-              <span class="card-meta">Live ATM &plusmn;1 contracts for selected index</span>
+              <h3 class="card-title" id="strike-table-title">NIFTY 50 &middot; ATM &plusmn; 5 Strike Basket (11 CE + 11 PE = 22 Strikes)</h3>
+              <span class="card-meta">Unified 09:15:00 Baseline (ATM &plusmn; 5: 5 ITM, 1 ATM, 5 OTM) &middot; Exact Match to Basket Sum</span>
             </div>
             <div class="index-tabs" id="strike-index-tabs">
               <button class="tab-btn active" data-index="NSE_INDEX|Nifty 50">NIFTY</button>
@@ -145,24 +179,18 @@
             <table class="data-table" id="table-strikes">
               <thead>
                 <tr>
-                  <th colspan="6" class="col-grp-ce text-center">CALLS (CE)</th>
+                  <th colspan="3" class="col-grp-ce text-center">CALLS (CE) &middot; 11 STRIKES (ATM &plusmn; 5)</th>
                   <th class="col-strike text-center">STRIKE</th>
-                  <th colspan="6" class="col-grp-pe text-center">PUTS (PE)</th>
+                  <th colspan="3" class="col-grp-pe text-center">PUTS (PE) &middot; 11 STRIKES (ATM &plusmn; 5)</th>
                 </tr>
                 <tr class="sub-headers">
-                  <th class="text-right">OI (L)</th>
-                  <th class="text-right">&Delta;OI (L)</th>
-                  <th class="text-right">&Delta;OI %</th>
-                  <th class="text-right">PRICE %</th>
-                  <th class="text-right">LTP (₹)</th>
-                  <th class="text-center">BU</th>
+                  <th class="text-right">09:15 BASE (₹)</th>
+                  <th class="text-right">LIVE LTP (₹)</th>
+                  <th class="text-right">CE %</th>
                   <th class="text-center font-bold">ATM</th>
-                  <th class="text-center">BU</th>
-                  <th class="text-right">LTP (₹)</th>
-                  <th class="text-right">PRICE %</th>
-                  <th class="text-right">&Delta;OI %</th>
-                  <th class="text-right">&Delta;OI (L)</th>
-                  <th class="text-right">OI (L)</th>
+                  <th class="text-right">PE %</th>
+                  <th class="text-right">LIVE LTP (₹)</th>
+                  <th class="text-right">09:15 BASE (₹)</th>
                 </tr>
               </thead>
               <tbody id="tbody-strikes">
@@ -188,72 +216,104 @@
 
       </div>
 
-      <!-- Section 5: Strategy Reference: 16 OI Buildup Conditions & Futures Gate -->
+      <!-- Section 4B: 50 NIFTY Stocks Live Ranking & Confirmed Top Bullish/Bearish -->
+      <section class="dash-section" style="margin-top: 20px;">
+        <div class="section-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+          <div class="section-title-wrap">
+            <h2 class="section-title">NIFTY 50 Stocks &middot; Live Score Ranking (Rank 1&ndash;50 &middot; Score = CE % &minus; PE %)</h2>
+            <span class="section-meta" id="stock-ranking-meta">Evaluated every second using Mid-Price (Bid+Ask)/2 &middot; Illiquid strikes (&gt;5% spread / &lt;₹5) skipped</span>
+          </div>
+          <div class="index-tabs" id="stock-rank-filter-tabs">
+            <button class="tab-btn active" data-filter="ALL">ALL (<span id="lbl-stock-count">0</span>)</button>
+            <button class="tab-btn" data-filter="BULLISH">BULLISH</button>
+            <button class="tab-btn" data-filter="BEARISH">BEARISH</button>
+            <button class="tab-btn" data-filter="CONFIRMED">CONFIRMED</button>
+          </div>
+        </div>
+
+        <div class="grid-split-2" style="margin-bottom: 14px;">
+          <div class="card" style="padding: 12px 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <strong class="text-green font-bold">📈 Confirmed Top <span id="heading-count-bullish">3</span> Bullish Stocks (Rank &rarr; CE Buy)</strong>
+            </div>
+            <div id="top-bullish-list" class="text-dim font-mono text-xs">Awaiting 300s confirmed bullish stocks...</div>
+          </div>
+          <div class="card" style="padding: 12px 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <strong class="text-red font-bold">📉 Confirmed Top <span id="heading-count-bearish">3</span> Bearish Stocks (Rank &rarr; PE Buy)</strong>
+            </div>
+            <div id="top-bearish-list" class="text-dim font-mono text-xs">Awaiting 300s confirmed bearish stocks...</div>
+          </div>
+        </div>
+
+        <div class="table-card" style="max-height: 360px; overflow-y: auto;">
+          <table class="data-table" id="table-stock-rankings">
+            <thead>
+              <tr class="sub-headers">
+                <th class="text-center" style="width: 56px;">RANK</th>
+                <th class="text-left">STOCK &middot; SPOT &middot; ATM</th>
+                <th class="text-right">CE 09:15 / LIVE</th>
+                <th class="text-right">CE %</th>
+                <th class="text-right">PE 09:15 / LIVE</th>
+                <th class="text-right">PE %</th>
+                <th class="text-right">SCORE</th>
+                <th class="text-center">SIGNAL &amp; HOLD</th>
+                <th class="text-center">STATUS</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-stock-rankings">
+              <tr><td colspan="9" class="text-center text-muted" style="padding: 20px;">Initializing 50 NIFTY stocks live basket &amp; ranking...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Section 5: Strategy Reference: Dual Strategy Architecture & Risk Rules -->
       <section class="rules-section">
         <div class="section-header">
           <div class="section-title-wrap">
-            <h3 class="section-title">Strategy Reference &middot; 16 OI Buildup Conditions &amp; Futures Gate</h3>
-            <span class="section-meta">Complete deterministic decision matrix for Phase 1</span>
+            <h3 class="section-title">Strategy Reference &middot; Dual Strategy Execution (53 Underlyings &middot; Indices ATM &plusmn; 10 &middot; Stocks ATM &plusmn; 5)</h3>
+            <span class="section-meta">Path 1 (09:15 Positive Tick) &amp; Path 2 (09:15 Sum Signal Score = CE % &minus; PE %)</span>
           </div>
         </div>
         <div class="rules-grid">
 
-          <!-- Card 1: 16 Conditions -->
+          <!-- Card 1: Basket & Score Ranking -->
           <div class="rule-card">
-            <h4 class="rule-card-title">16 Conditions (CE vs PE Buildup)</h4>
+            <h4 class="rule-card-title">Indices ATM &plusmn; 10 &amp; Stocks ATM &plusmn; 5 Basket</h4>
             <div class="rules-list">
-              <div class="rule-item rule-ce"><span>1. SC + SB &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;&starf;</span></div>
-              <div class="rule-item rule-ce"><span>2. SC + LU &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;</span></div>
-              <div class="rule-item rule-ce"><span>3. LB + SB &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;&starf;</span></div>
-              <div class="rule-item rule-ce"><span>4. LB + LU &rarr; <strong>CE Buy</strong></span> <span class="rule-badge badge-ce">&starf;&starf;&starf;</span></div>
-              <div class="rule-item rule-pe"><span>5. SB + SC &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;&starf;</span></div>
-              <div class="rule-item rule-pe"><span>6. SB + LB &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;&starf;</span></div>
-              <div class="rule-item rule-pe"><span>7. LU + SC &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;</span></div>
-              <div class="rule-item rule-pe"><span>8. LU + LB &rarr; <strong>PE Buy</strong></span> <span class="rule-badge badge-pe">&starf;&starf;&starf;</span></div>
-              <div class="rule-item text-muted"><span>9&ndash;16. All other combinations</span> <span class="rule-badge">No trade</span></div>
+              <div class="rule-item"><span>Indices Basket: <strong>21 CE + 21 PE = 42 Options (ATM &plusmn; 10)</strong></span></div>
+              <div class="rule-item"><span>Stocks Basket: <strong>11 CE + 11 PE = 22 Options (ATM &plusmn; 5)</strong></span></div>
+              <div class="rule-item text-cyan"><span>Stocks Quote: <strong>Mid-Price (Bid+Ask)/2 &middot; Skip &gt;5% Spread / &lt;₹5</strong></span></div>
+              <div class="rule-item"><span>CE % = ((&Sigma;CE_live &minus; &Sigma;CE_0915) / &Sigma;CE_0915) &times; 100</span></div>
+              <div class="rule-item"><span>PE % = ((&Sigma;PE_live &minus; &Sigma;PE_0915) / &Sigma;PE_0915) &times; 100</span></div>
+              <div class="rule-item font-bold text-bright"><span>Score = CE % &minus; PE % (50 Stocks Ranked 1&ndash;50 Every Second)</span></div>
             </div>
           </div>
 
-          <!-- Card 2: Buildup Classification -->
+          <!-- Card 2: Strategy 1: Path 1 (09:15 Morning Positive Tick) -->
           <div class="rule-card">
-            <h4 class="rule-card-title">Buildup Classification</h4>
-            <div class="buildup-defs">
-              <div class="bu-def-item">
-                <span class="bu-badge bu-lb">LB</span>
-                <div><strong>Long Buildup:</strong> &Delta;OI &gt; +0.10% &amp; Price &ge; +0.50%</div>
-              </div>
-              <div class="bu-def-item">
-                <span class="bu-badge bu-sc">SC</span>
-                <div><strong>Short Covering:</strong> &Delta;OI &le; -0.10% &amp; Price &ge; +0.50%</div>
-              </div>
-              <div class="bu-def-item">
-                <span class="bu-badge bu-sb">SB</span>
-                <div><strong>Short Buildup:</strong> &Delta;OI &gt; +0.10% &amp; Price &le; -0.50%</div>
-              </div>
-              <div class="bu-def-item">
-                <span class="bu-badge bu-lu">LU</span>
-                <div><strong>Long Unwinding:</strong> &Delta;OI &le; -0.10% &amp; Price &le; -0.50%</div>
-              </div>
+            <h4 class="rule-card-title">Path 1: 09:15 Positive Tick (Decoupled)</h4>
+            <div class="rules-list">
+              <div class="rule-item"><span>09:00 &ndash; 09:14:55: <strong>Pre-market ATM &plusmn; 5 snapshot monitor</strong></span></div>
+              <div class="rule-item text-cyan"><span>09:14:55: <strong>Strict non-zero live reference locked (No prev_close)</strong></span></div>
+              <div class="rule-item text-green font-bold"><span>09:15:00: <strong>First positive tick triggers entry &lt;200ms</strong></span></div>
+              <div class="rule-item text-gold"><span>Entry Selection: <strong>ITM 2 (Configurable) &middot; ₹50&ndash;₹2,500 Filter</strong></span></div>
+              <div class="rule-item font-bold"><span>Stop-Loss: <strong>-20%</strong> | Profit Target: <strong>+40%</strong></span></div>
+              <div class="rule-footer-note">09:14:55 prices verified non-zero or flagged MISSING_091455.</div>
             </div>
           </div>
 
-          <!-- Card 3: Futures gate and final rank -->
+          <!-- Card 3: Strategy 2: Path 2 (Sum Signal Live % Momentum) -->
           <div class="rule-card">
-            <h4 class="rule-card-title">Futures gate and final rank</h4>
-            <div class="gate-rule-box">
-              <span><strong>CE Buy</strong> needs futures <span class="bu-badge bu-lb">LB</span> or <span class="bu-badge bu-sc">SC</span></span><br>
-              <span><strong>PE Buy</strong> needs futures <span class="bu-badge bu-sb">SB</span> or <span class="bu-badge bu-lu">LU</span></span><br>
-              <span class="text-muted">Else blocked by Futures Gate</span>
-            </div>
-            <div class="rank-sizing-matrix">
-              <div><span class="text-gold">&starf;&starf;&starf;&starf;</span> LB/SB &rarr; &starf;&starf;&starf;&starf; Full lots</div>
-              <div><span class="text-gold">&starf;&starf;&starf;</span> SC/LU &rarr; &starf;&starf;&starf; Full lots</div>
-              <div><span class="text-gold">&starf;&starf;</span> LB/SB &rarr; &starf;&starf; Normal lots</div>
-              <div><span class="text-gold">&starf;&starf;</span> SC/LU &rarr; &starf;&starf; Half lots</div>
-            </div>
-            <div class="rule-footer-note">
-              Signal must hold 2 consecutive OI updates.<br>
-              <strong>SENSEX:</strong> futures gate OFF, &starf;&starf;&starf; signals only.
+            <h4 class="rule-card-title">Path 2: Live % Momentum &amp; Trailing SL</h4>
+            <div class="rules-list">
+              <div class="rule-item rule-ce"><span>CE % &gt; +2.0% &amp; PE % &lt; -2.0% &rarr; <strong>CE Buy</strong></span></div>
+              <div class="rule-item rule-pe"><span>PE % &gt; +2.0% &amp; CE % &lt; -2.0% &rarr; <strong>PE Buy</strong></span></div>
+              <div class="rule-item text-green"><span>Filter: <strong>Independent per-symbol 300s Continuous Hold</strong></span></div>
+              <div class="rule-item text-gold"><span>Strike Selection: <strong>ITM 2 (Default) &middot; ₹50&ndash;₹2,500 Filter</strong></span></div>
+              <div class="rule-item text-cyan"><span>Trailing SL: <strong>Cost @ +5% | +2% Trail per +3% Gain</strong></span></div>
+              <div class="rule-item text-red font-bold"><span>Cutoff: <strong>14:45 IST</strong> | Squareoff: <strong>15:15:00 IST</strong></span></div>
             </div>
           </div>
 
@@ -274,65 +334,9 @@
             <h2 class="settings-title">⚙️ Bot Settings & Strategy Configuration</h2>
             <p class="settings-subtitle">Manage lot sizing rules and index allocations, and strategy risk parameters. All changes auto-save instantly.</p>
           </div>
-          <div class="settings-header-right">
+          <div class="settings-header-right" style="display: flex; align-items: center; gap: 12px;">
+            <span class="qc-sub font-mono font-bold" id="qc-feedback" style="color: #10b981;">Ready</span>
             <button class="btn btn-sm btn-outline" id="btn-back-to-dashboard" title="Switch back to Live Dashboard">← Return to Dashboard</button>
-          </div>
-        </div>
-
-        <!-- Pre-Defined Trading Controls Bar (Moved into Bot Settings) -->
-        <div class="quick-controls-card settings-qc-card">
-          <div class="qc-header">
-            <div class="qc-header-left">
-              <span class="qc-badge">PRE-DEFINED TRADING CONTROLS</span>
-              <span class="qc-sub">Click any pill to adjust lot sizing rules and index allocations (instant & auto-saved)</span>
-            </div>
-            <div class="qc-header-right" id="qc-feedback">Ready</div>
-          </div>
-          <div class="qc-grid">
-            <!-- Full Lots -->
-            <div class="qc-group" data-param="lots_full">
-              <div class="qc-label-wrap">
-                <span class="qc-label">FULL LOT (★★★ / ★★★★)</span>
-                <span class="qc-current-val text-gold font-bold" id="lbl-val-full">1</span>
-              </div>
-              <div class="pill-group" id="pill-lots-full">
-                <button class="pill-btn active" data-param="lots_full" data-val="1">1</button>
-                <button class="pill-btn" data-param="lots_full" data-val="2">2</button>
-                <button class="pill-btn" data-param="lots_full" data-val="3">3</button>
-                <button class="pill-btn" data-param="lots_full" data-val="4">4</button>
-                <button class="pill-btn" data-param="lots_full" data-val="5">5</button>
-              </div>
-            </div>
-
-            <!-- Normal Lots -->
-            <div class="qc-group" data-param="lots_normal">
-              <div class="qc-label-wrap">
-                <span class="qc-label">NORMAL LOT (★★)</span>
-                <span class="qc-current-val text-blue font-bold" id="lbl-val-normal">1</span>
-              </div>
-              <div class="pill-group" id="pill-lots-normal">
-                <button class="pill-btn active" data-param="lots_normal" data-val="1">1</button>
-                <button class="pill-btn" data-param="lots_normal" data-val="2">2</button>
-                <button class="pill-btn" data-param="lots_normal" data-val="3">3</button>
-                <button class="pill-btn" data-param="lots_normal" data-val="4">4</button>
-                <button class="pill-btn" data-param="lots_normal" data-val="5">5</button>
-              </div>
-            </div>
-
-            <!-- Scalp Lots -->
-            <div class="qc-group" data-param="lots_scalp">
-              <div class="qc-label-wrap">
-                <span class="qc-label">SCALP / HALF LOT</span>
-                <span class="qc-current-val text-purple font-bold" id="lbl-val-scalp">1</span>
-              </div>
-              <div class="pill-group" id="pill-lots-scalp">
-                <button class="pill-btn active" data-param="lots_scalp" data-val="1">1</button>
-                <button class="pill-btn" data-param="lots_scalp" data-val="2">2</button>
-                <button class="pill-btn" data-param="lots_scalp" data-val="3">3</button>
-                <button class="pill-btn" data-param="lots_scalp" data-val="4">4</button>
-                <button class="pill-btn" data-param="lots_scalp" data-val="5">5</button>
-              </div>
-            </div>
           </div>
         </div>
 
@@ -348,7 +352,7 @@
                   <span class="idx-color-dot dot-nifty"></span>
                   <div>
                     <strong class="font-bold text-bright idx-name">NIFTY 50</strong>
-                    <span class="text-dim font-mono text-xs">(Lot Size: 65)</span>
+                    <span class="text-dim font-mono text-xs" id="lbl-lotsize-nifty">(Lot Size: 65)</span>
                   </div>
                 </div>
                 <div class="row-right">
@@ -367,11 +371,11 @@
                   <span class="idx-color-dot dot-banknifty"></span>
                   <div>
                     <strong class="font-bold text-bright idx-name">BANK NIFTY</strong>
-                    <span class="text-dim font-mono text-xs">(Lot Size: 15)</span>
+                    <span class="text-dim font-mono text-xs" id="lbl-lotsize-banknifty">(Lot Size: 30)</span>
                   </div>
                 </div>
                 <div class="row-right">
-                  <div class="idx-selected-badge badge-banknifty" id="badge-lots-NSE_INDEX|Nifty Bank">3 Lots (45 Qty)</div>
+                  <div class="idx-selected-badge badge-banknifty" id="badge-lots-NSE_INDEX|Nifty Bank">3 Lots (90 Qty)</div>
                   <div class="pill-group idx-pill-group pill-group-banknifty" data-idx-key="NSE_INDEX|Nifty Bank">
                     <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty Bank" data-val="1">1</button>
                     <button class="pill-btn btn-idx-lot" data-key="NSE_INDEX|Nifty Bank" data-val="2">2</button>
@@ -386,11 +390,11 @@
                   <span class="idx-color-dot dot-sensex"></span>
                   <div>
                     <strong class="font-bold text-bright idx-name">SENSEX</strong>
-                    <span class="text-dim font-mono text-xs">(Lot Size: 10)</span>
+                    <span class="text-dim font-mono text-xs" id="lbl-lotsize-sensex">(Lot Size: 20)</span>
                   </div>
                 </div>
                 <div class="row-right">
-                  <div class="idx-selected-badge badge-sensex" id="badge-lots-BSE_INDEX|SENSEX">1 Lot (10 Qty)</div>
+                  <div class="idx-selected-badge badge-sensex" id="badge-lots-BSE_INDEX|SENSEX">1 Lot (20 Qty)</div>
                   <div class="pill-group idx-pill-group pill-group-sensex" data-idx-key="BSE_INDEX|SENSEX">
                     <button class="pill-btn btn-idx-lot active" data-key="BSE_INDEX|SENSEX" data-val="1">1</button>
                     <button class="pill-btn btn-idx-lot" data-key="BSE_INDEX|SENSEX" data-val="2">2</button>
@@ -408,26 +412,155 @@
             <p class="settings-card-sub">Active safety parameters governing automatic execution.</p>
             <div class="guard-list">
               <div class="guard-item">
-                <span class="guard-label">Max Spread Filter:</span>
-                <span class="guard-val text-green font-mono font-bold">3.0% (Orders rejected if spread &gt; 3%)</span>
+                <span class="guard-label">Strategy Type:</span>
+                <span class="guard-val text-green font-mono font-bold">Path 1 (09:15 Positive Tick) &amp; Path 2 (09:15 Sum Signal Live % Momentum)</span>
               </div>
               <div class="guard-item">
-                <span class="guard-label">Futures Buildup Gate:</span>
-                <span class="guard-val text-green font-mono font-bold">Enforced (CE: LB/SC &middot; PE: SB/LU)</span>
+                <span class="guard-label">Instruments:</span>
+                <span class="guard-val text-cyan font-mono font-bold">53 Underlyings (3 Indices + 50 NIFTY Stocks)</span>
               </div>
               <div class="guard-item">
-                <span class="guard-label">Persistence Rule:</span>
-                <span class="guard-val text-green font-mono font-bold">2 Consecutive OI updates required</span>
+                <span class="guard-label">Basket Coverage:</span>
+                <span class="guard-val text-blue font-mono font-bold">Indices: 42 Options (ATM &plusmn; 10) &middot; Stocks: 22 Options (ATM &plusmn; 5)</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Strike &amp; Premium Filter:</span>
+                <span class="guard-val text-gold font-mono font-bold" id="guard-strike-filter">ITM 2 (Default) &middot; ₹50 &ndash; ₹2,500 Premium Band</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Whipsaw Filter:</span>
+                <span class="guard-val text-green font-mono font-bold" id="guard-whipsaw">300s (5-Min Continuous Hold per Underlying)</span>
               </div>
               <div class="guard-item">
                 <span class="guard-label">Stop-Loss &amp; Target:</span>
-                <span class="guard-val text-gold font-mono font-bold">SL: 25% | Target: 40%</span>
+                <span class="guard-val text-gold font-mono font-bold">Initial SL: -20% | Target: +40%</span>
+              </div>
+              <div class="guard-item">
+                <span class="guard-label">Trailing Stop-Loss:</span>
+                <span class="guard-val text-purple font-mono font-bold">Cost @ +5% | +2% Trail per +3% Gain</span>
               </div>
               <div class="guard-item">
                 <span class="guard-label">Trading Window:</span>
-                <span class="guard-val text-blue font-mono font-bold">09:18 &ndash; 14:45 IST | Squareoff: 15:15 IST</span>
+                <span class="guard-val text-dim font-mono font-bold">09:14:55 Lock &rarr; 09:15:00 Entry &ndash; 15:15 IST Squareoff</span>
               </div>
             </div>
+          </div>
+        </div>
+
+        <!-- Card: Configurable Strategy Parameters & Filters -->
+        <div class="settings-card" style="margin-top: 20px;">
+          <h3 class="settings-card-title">🎯 Strategy Execution Controls (ITM Depth, Premium Filter, Whipsaw, Top N Stocks)</h3>
+          <p class="settings-card-sub">Configure ITM strike selection (default ITM 2), premium band (₹50–₹2,500), whipsaw hold window, and Top N bullish/bearish stock trades.</p>
+          <div class="settings-rows">
+            <div class="settings-row">
+              <div class="row-info">
+                <div>
+                  <strong class="font-bold text-bright">Entry Strike Selection</strong>
+                  <span class="text-dim font-mono text-xs">(ITM Depth from ATM)</span>
+                </div>
+              </div>
+              <div class="row-right">
+                <div class="pill-group" id="pill-group-itm-depth">
+                  <button class="pill-btn btn-cfg-pill" data-cfg="entry_itm_depth" data-val="1">ITM 1</button>
+                  <button class="pill-btn btn-cfg-pill active" data-cfg="entry_itm_depth" data-val="2">ITM 2</button>
+                  <button class="pill-btn btn-cfg-pill" data-cfg="entry_itm_depth" data-val="3">ITM 3</button>
+                  <button class="pill-btn btn-cfg-pill" data-cfg="entry_itm_depth" data-val="4">ITM 4</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-row">
+              <div class="row-info">
+                <div>
+                  <strong class="font-bold text-bright">Whipsaw Confirmation Timer</strong>
+                  <span class="text-dim font-mono text-xs">(Independent Per Symbol)</span>
+                </div>
+              </div>
+              <div class="row-right">
+                <div class="pill-group" id="pill-group-whipsaw">
+                  <button class="pill-btn btn-cfg-pill" data-cfg="whipsaw_sec" data-val="180">180s (3m)</button>
+                  <button class="pill-btn btn-cfg-pill active" data-cfg="whipsaw_sec" data-val="300">300s (5m)</button>
+                  <button class="pill-btn btn-cfg-pill" data-cfg="whipsaw_sec" data-val="600">600s (10m)</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-row">
+              <div class="row-info">
+                <div>
+                  <strong class="font-bold text-bright">Option Premium Band (₹)</strong>
+                  <span class="text-dim font-mono text-xs">(Default ₹50 &ndash; ₹2,500)</span>
+                </div>
+              </div>
+              <div class="row-right" style="display: flex; align-items: center; gap: 8px;">
+                <input type="number" id="inp-min-premium" class="select-trade-date" style="width: 82px;" value="50" min="0" step="10" title="Minimum option premium (₹)">
+                <span class="text-dim">to</span>
+                <input type="number" id="inp-max-premium" class="select-trade-date" style="width: 92px;" value="2500" min="50" step="50" title="Maximum option premium (₹)">
+                <button class="btn btn-xs btn-outline" id="btn-save-premium-band">Apply</button>
+              </div>
+            </div>
+
+            <div class="settings-row">
+              <div class="row-info">
+                <div>
+                  <strong class="font-bold text-bright">Top N Bullish / Bearish Stocks</strong>
+                  <span class="text-dim font-mono text-xs">(Max Concurrent Stock Trades per Side)</span>
+                </div>
+              </div>
+              <div class="row-right" style="display: flex; align-items: center; gap: 10px;">
+                <span class="text-green font-mono text-xs">Bullish:</span>
+                <div class="pill-group" id="pill-group-max-bullish">
+                  <button class="pill-btn btn-cfg-pill" data-cfg="max_bullish_stocks" data-val="1">1</button>
+                  <button class="pill-btn btn-cfg-pill active" data-cfg="max_bullish_stocks" data-val="3">3</button>
+                  <button class="pill-btn btn-cfg-pill" data-cfg="max_bullish_stocks" data-val="5">5</button>
+                </div>
+                <span class="text-red font-mono text-xs">Bearish:</span>
+                <div class="pill-group" id="pill-group-max-bearish">
+                  <button class="pill-btn btn-cfg-pill" data-cfg="max_bearish_stocks" data-val="1">1</button>
+                  <button class="pill-btn btn-cfg-pill active" data-cfg="max_bearish_stocks" data-val="3">3</button>
+                  <button class="pill-btn btn-cfg-pill" data-cfg="max_bearish_stocks" data-val="5">5</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card: 09:14:55 Pre-Market Locked Baseline Basket -->
+        <div class="settings-card" style="margin-top: 24px;">
+          <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <div>
+              <h3 class="settings-card-title">🔒 09:14:55 Pre-Market Locked Baseline &amp; 09:16 Proof (ATM &plusmn; 10 &middot; 42 Options)</h3>
+              <p class="settings-card-sub">Exact snapshot of ATM &plusmn; 10 options (21 CE + 21 PE = 42 contracts) locked at 09:14:55 IST and unified 09:15:00 baseline (strictly non-zero).</p>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <button class="btn btn-sm btn-outline" id="btn-download-baseline-proof" title="Download full 09:16 Baseline Proof CSV for all 53 underlyings">📥 Download 09:16 Proof CSV</button>
+              <span id="locked-status-badge" class="badge-status-open" style="font-size: 11px; padding: 4px 10px;">LOCKED AT 09:14:55</span>
+              <div class="index-tabs" id="locked-baseline-tabs">
+                <button class="tab-btn active" data-index="NSE_INDEX|Nifty 50">NIFTY 50</button>
+                <button class="tab-btn" data-index="NSE_INDEX|Nifty Bank">BANK NIFTY</button>
+                <button class="tab-btn" data-index="BSE_INDEX|SENSEX">SENSEX</button>
+              </div>
+            </div>
+          </div>
+          <div class="table-card">
+            <table class="data-table" id="table-locked-baseline">
+              <thead>
+                <tr>
+                  <th class="text-center">#</th>
+                  <th class="text-left">SYMBOL / CONTRACT</th>
+                  <th class="text-center">SIDE</th>
+                  <th class="text-center">TYPE</th>
+                  <th class="text-right">STRIKE</th>
+                  <th class="text-right">LOCKED REF PRICE (₹)</th>
+                  <th class="text-center">REF SOURCE</th>
+                  <th class="text-center">LOCK TIME</th>
+                  <th class="text-center">STATUS</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-locked-baseline">
+                <tr><td colspan="9" class="text-center text-muted" style="padding: 20px;">Awaiting 09:14:55 locked baseline snapshot...</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
@@ -462,6 +595,13 @@
           </div>
         </div>
 
+        <!-- Strategy Filter Tabs -->
+        <div class="index-tabs" id="trades-strategy-tabs" style="margin-top: 14px; margin-bottom: 14px;">
+          <button class="tab-btn active" data-strategy="ALL">ALL TRADES</button>
+          <button class="tab-btn" data-strategy="PATH_1_0915">PATH 1: 09:15 FIRST TICK (DECOUPLED)</button>
+          <button class="tab-btn" data-strategy="SUM_SIGNAL">PATH 2: LIVE % MOMENTUM (SUM SIGNAL)</button>
+        </div>
+
         <!-- Day's Key Metrics Overview -->
         <div class="trades-summary-grid">
           <div class="trade-summary-card">
@@ -492,6 +632,7 @@
             <thead>
               <tr>
                 <th class="col-idx text-center">#</th>
+                <th class="text-center">STRATEGY</th>
                 <th class="text-left">TRADE NAME / SYMBOL</th>
                 <th class="text-center">SIDE</th>
                 <th class="text-right">STRIKE</th>
@@ -507,7 +648,7 @@
             </thead>
             <tbody id="tbody-trades-journal">
               <tr>
-                <td colspan="12" class="text-center text-muted">Select a date or wait for trades to load...</td>
+                <td colspan="13" class="text-center text-muted">Select a date or wait for trades to load...</td>
               </tr>
             </tbody>
           </table>
@@ -517,83 +658,82 @@
     </div> <!-- /tab-trades -->
 
     <!-- ====================================================================
-         TAB 4: ACTIVITY LOGS / AUDIT TRAIL (Per-Day Logs + CSV Export)
+         TAB 4: PERCENTAGE MOMENTUM JOURNAL (Second-by-Second Timeline + CSV Export)
          ==================================================================== -->
     <div class="tab-pane" id="tab-logs" style="display: none;">
       <section class="dash-section">
         
-        <!-- Controls Bar: Day Selector, Event Filter & Export CSV -->
+        <!-- Controls Bar: Day Selector, Index Filter Tabs & Export CSV -->
         <div class="trades-control-bar">
           <div class="trades-bar-left">
-            <h2 class="section-title">Activity Logs &middot; Strategy Audit Trail</h2>
-            <span class="section-meta">All algorithmic signals, gate evaluations, entries, exits, risk guards, and clock events</span>
+            <h2 class="section-title">⏱️ Percentage Momentum Journal &middot; Second-by-Second Timeline</h2>
+            <span class="section-meta">Persistent historical timeline of live percentage momentum, basket movements, signals &amp; hold timers</span>
           </div>
           <div class="trades-bar-right">
             <div class="trade-date-picker-wrap">
-              <label for="select-log-date" class="label-date-picker">Date:</label>
-              <select id="select-log-date" class="select-trade-date">
+              <label for="select-momentum-date" class="label-date-picker">Date:</label>
+              <select id="select-momentum-date" class="select-trade-date">
                 <!-- Dynamically populated -->
               </select>
             </div>
-            <div class="trade-date-picker-wrap">
-              <label for="select-log-level" class="label-date-picker">Filter:</label>
-              <select id="select-log-level" class="select-trade-date">
-                <option value="ALL">All Events</option>
-                <option value="ENTRY">Entries Only</option>
-                <option value="EXIT">Exits Only</option>
-                <option value="WARNING">Warnings</option>
-                <option value="ERROR">Errors / Feed</option>
-              </select>
-            </div>
-            <button id="btn-export-logs-csv" class="btn btn-sm btn-outline btn-export-csv" title="Download logs as CSV">
+            <button id="btn-export-momentum-csv" class="btn btn-sm btn-outline btn-export-csv" title="Download selected index momentum data as CSV">
               <span class="btn-icon">📥</span> Export CSV
             </button>
-            <button id="btn-refresh-logs" class="btn btn-sm btn-outline" title="Refresh logs">
+            <button id="btn-refresh-momentum" class="btn btn-sm btn-outline" title="Refresh momentum journal">
               <span class="btn-icon">🔄</span> Refresh
             </button>
           </div>
         </div>
 
+        <!-- Index Filter Tabs (NIFTY alag, BANK NIFTY alag, SENSEX alag) -->
+        <div class="index-tabs" id="momentum-journal-index-tabs" style="margin-top: 14px; margin-bottom: 14px;">
+          <button class="tab-btn active" data-filter="ALL">ALL INDICES</button>
+          <button class="tab-btn" data-filter="NSE_INDEX|Nifty 50">NIFTY 50</button>
+          <button class="tab-btn" data-filter="NSE_INDEX|Nifty Bank">BANK NIFTY</button>
+          <button class="tab-btn" data-filter="BSE_INDEX|SENSEX">SENSEX</button>
+        </div>
+
         <!-- Day's Key Metrics Overview -->
         <div class="trades-summary-grid">
           <div class="trade-summary-card">
-            <span class="summary-label">Total Events</span>
-            <strong class="summary-val font-mono text-bright" id="summary-total-logs">0</strong>
+            <span class="summary-label">Total Snapshots</span>
+            <strong class="summary-val font-mono text-bright" id="summary-total-momentum">0</strong>
           </div>
           <div class="trade-summary-card">
-            <span class="summary-label">Entries / Exits</span>
+            <span class="summary-label">Active Filter</span>
+            <strong class="summary-val font-mono text-cyan" id="summary-momentum-index">ALL INDICES</strong>
+          </div>
+          <div class="trade-summary-card">
+            <span class="summary-label">Signals (CE / PE)</span>
             <div class="summary-val-split">
-              <span class="text-green font-mono font-bold" id="summary-entries-count">0 Entries</span>
+              <span class="text-green font-mono font-bold" id="summary-bullish-signals">0 CE</span>
               <span class="text-dim">/</span>
-              <span class="text-red font-mono font-bold" id="summary-exits-count">0 Exits</span>
+              <span class="text-red font-mono font-bold" id="summary-bearish-signals">0 PE</span>
             </div>
           </div>
           <div class="trade-summary-card">
-            <span class="summary-label">Risk Blocks / Guards</span>
-            <strong class="summary-val font-mono text-amber" id="summary-blocks-count">0</strong>
-          </div>
-          <div class="trade-summary-card">
-            <span class="summary-label">Warnings &amp; System Alerts</span>
-            <strong class="summary-val font-mono text-cyan" id="summary-warnings-count">0</strong>
+            <span class="summary-label">Confirmed Entries</span>
+            <strong class="summary-val font-mono text-gold font-bold" id="summary-confirmed-signals">0</strong>
           </div>
         </div>
 
-        <!-- Table: Executed Activity Logs -->
+        <!-- Table: Second-by-Second Momentum Timeline -->
         <div class="table-card">
-          <table class="data-table" id="table-logs-journal">
+          <table class="data-table" id="table-momentum-journal">
             <thead>
-              <tr>
+              <tr class="sub-headers">
                 <th class="col-idx text-center">#</th>
-                <th class="text-center" style="width: 130px;">TIMESTAMP (IST)</th>
-                <th class="text-center" style="width: 100px;">LEVEL</th>
-                <th class="text-center" style="width: 180px;">EVENT TYPE</th>
-                <th class="text-left" style="width: 180px;">SYMBOL / UNDERLYING</th>
-                <th class="text-left">ACTION / EVENT MESSAGE</th>
+                <th class="text-center" style="width: 110px;">TIME (IST)</th>
+                <th class="text-left" style="width: 140px;">INDEX</th>
+                <th class="text-right">CE BASKET % (PREV &rarr; NOW)</th>
+                <th class="text-right">PE BASKET % (PREV &rarr; NOW)</th>
+                <th class="text-center">CE % vs PE % MOMENTUM</th>
+                <th class="text-center" style="width: 220px;">SIGNAL &amp; 5-MIN HOLD</th>
               </tr>
             </thead>
-            <tbody id="tbody-logs-journal">
+            <tbody id="tbody-momentum-journal">
               <tr>
-                <td colspan="6" class="text-center text-muted">Select a date or wait for logs to load...</td>
+                <td colspan="7" class="text-center text-muted" style="padding: 24px;">Select a date or wait for momentum timeline to load...</td>
               </tr>
             </tbody>
           </table>
@@ -609,6 +749,6 @@
 
   </div>
 
-  <script src="/static/js/dashboard.js"></script>
+  <script src="/static/js/dashboard.js?v=3.0"></script>
 </body>
 </html>

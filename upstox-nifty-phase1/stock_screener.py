@@ -618,7 +618,7 @@ class StockScreener:
 
     def plan_stock_itm_contracts(self, symbol: str, spot: float | None = None) -> dict[str, Any]:
         """
-        Plans 8 ITM Option Contracts (4 CE below spot, 4 PE above spot)
+        Plans ATM ± 5 Option Basket (11 CE + 11 PE = 22 contracts total per stock)
         for a constituent NIFTY stock using its nearest monthly expiry.
         """
         stock_meta = next((s for s in NIFTY_50_STOCKS if s["symbol"] == symbol.upper()), None)
@@ -726,9 +726,26 @@ class StockScreener:
                 elif itype == "PE":
                     pe_by_strike[stk] = c
 
-            # Rule R5: 4 CE below spot, 4 PE above spot (excluding equal)
-            ce_strikes = sorted([s for s in ce_by_strike.keys() if s < spot], reverse=True)[:4]
-            pe_strikes = sorted([s for s in pe_by_strike.keys() if s > spot])[:4]
+            # ATM ± 5 Strike Window (11 CE + 11 PE = 22 options total per stock)
+            all_ce_strikes = sorted(ce_by_strike.keys())
+            all_pe_strikes = sorted(pe_by_strike.keys())
+            all_strikes = sorted(set(all_ce_strikes) | set(all_pe_strikes))
+            if all_strikes:
+                atm_strike = min(all_strikes, key=lambda s: abs(s - spot))
+                atm_idx = all_strikes.index(atm_strike)
+                lo = max(0, atm_idx - 5)
+                hi = min(len(all_strikes), atm_idx + 6)
+                window_strikes = all_strikes[lo:hi]
+            else:
+                window_strikes = []
+
+            ce_strikes = [s for s in window_strikes if s in ce_by_strike]
+            pe_strikes = [s for s in window_strikes if s in pe_by_strike]
+
+            if len(ce_strikes) < 11:
+                ce_strikes = sorted(all_ce_strikes, key=lambda s: abs(s - spot))[:11]
+            if len(pe_strikes) < 11:
+                pe_strikes = sorted(all_pe_strikes, key=lambda s: abs(s - spot))[:11]
 
             planned = []
             for s in sorted(ce_strikes):
@@ -739,7 +756,7 @@ class StockScreener:
                     "strike": s,
                     "side": "CE",
                     "expiry": active_expiry,
-                    "lot_size": lot_size,
+                    "lot_size": int(c.get("lot_size") or lot_size),
                 })
 
             for s in sorted(pe_strikes):
@@ -750,13 +767,14 @@ class StockScreener:
                     "strike": s,
                     "side": "PE",
                     "expiry": active_expiry,
-                    "lot_size": lot_size,
+                    "lot_size": int(c.get("lot_size") or lot_size),
                 })
 
             return {
                 "symbol": symbol.upper(),
                 "name": stock_meta["name"],
                 "spot": spot,
+                "atm_strike": atm_strike if all_strikes else spot,
                 "expiry": active_expiry,
                 "lot_size": lot_size,
                 "strike_step": strike_step,
@@ -767,11 +785,69 @@ class StockScreener:
             return self._plan_stock_itm_contracts_from_master(stock_meta, spot)
 
     def _plan_stock_itm_contracts_from_master(self, stock_meta: dict[str, Any], spot: float) -> dict[str, Any]:
-        """Plans 8 ITM Option Contracts (4 CE below spot, 4 PE above spot) using NSE.json master file."""
+        """Plans ATM ± 5 Option Basket (22 contracts: 11 CE + 11 PE) using UpstoxInstrumentsMaster or NSE.json."""
         symbol = stock_meta["symbol"].upper()
         underlying_sym = "TMPV" if symbol == "TATAMOTORS" else symbol
-        lot_size = stock_meta["lot_size"]
-        strike_step = stock_meta["strike_step"]
+        lot_size = int(stock_meta.get("lot_size") or 1)
+        strike_step = float(stock_meta.get("strike_step") or 1.0)
+
+        try:
+            from instruments_master import UpstoxInstrumentsMaster
+            master = getattr(self, "_instruments_master", None)
+            if master is None:
+                master = UpstoxInstrumentsMaster(self.base_dir)
+                self._instruments_master = master
+            if master.ensure_loaded():
+                active_expiry, actual_lot, active_contracts = master.get_nearest_options(symbol)
+                if active_contracts:
+                    if actual_lot and actual_lot > 0:
+                        lot_size = int(actual_lot)
+                        stock_meta["lot_size"] = lot_size
+                    ce_by_strike = {float(x.get("strike_price") or 0): x for x in active_contracts if str(x.get("instrument_type") or "").upper() == "CE"}
+                    pe_by_strike = {float(x.get("strike_price") or 0): x for x in active_contracts if str(x.get("instrument_type") or "").upper() == "PE"}
+                    all_strikes = sorted(set(ce_by_strike.keys()) | set(pe_by_strike.keys()))
+                    atm_strike = min(all_strikes, key=lambda s: abs(s - spot)) if all_strikes else spot
+                    if all_strikes:
+                        atm_idx = all_strikes.index(atm_strike)
+                        window_strikes = all_strikes[max(0, atm_idx - 5):min(len(all_strikes), atm_idx + 6)]
+                    else:
+                        window_strikes = []
+                    ce_strikes = [s for s in window_strikes if s in ce_by_strike]
+                    pe_strikes = [s for s in window_strikes if s in pe_by_strike]
+                    planned: list[dict[str, Any]] = []
+                    for st in ce_strikes:
+                        c = ce_by_strike[st]
+                        planned.append({
+                            "instrument_key": c.get("instrument_key"),
+                            "trading_symbol": c.get("trading_symbol"),
+                            "strike_price": float(st),
+                            "instrument_type": "CE",
+                            "expiry": active_expiry,
+                            "lot_size": int(c.get("lot_size") or lot_size),
+                        })
+                    for st in pe_strikes:
+                        c = pe_by_strike[st]
+                        planned.append({
+                            "instrument_key": c.get("instrument_key"),
+                            "trading_symbol": c.get("trading_symbol"),
+                            "strike_price": float(st),
+                            "instrument_type": "PE",
+                            "expiry": active_expiry,
+                            "lot_size": int(c.get("lot_size") or lot_size),
+                        })
+                    if planned:
+                        return {
+                            "symbol": symbol,
+                            "name": stock_meta["name"],
+                            "spot": spot,
+                            "atm_strike": atm_strike,
+                            "expiry": active_expiry,
+                            "lot_size": lot_size,
+                            "strike_step": (round(abs(all_strikes[1] - all_strikes[0]), 2) if len(all_strikes) >= 2 else strike_step),
+                            "planned_contracts": planned,
+                        }
+        except Exception as exc:
+            LOGGER.debug("UpstoxInstrumentsMaster fallback triggered for %s: %s", symbol, exc)
 
         search_paths = [
             Path("NSE.json"),
@@ -803,17 +879,24 @@ class StockScreener:
             ce_by_strike = {float(x.get("strike_price") or 0): x for x in active_contracts if x.get("instrument_type") == "CE"}
             pe_by_strike = {float(x.get("strike_price") or 0): x for x in active_contracts if x.get("instrument_type") == "PE"}
 
-            ce_strikes = sorted([s for s in ce_by_strike.keys() if s <= spot], reverse=True)[:4]
-            pe_strikes = sorted([s for s in pe_by_strike.keys() if s >= spot])[:4]
+            all_strikes = sorted(set(ce_by_strike.keys()) | set(pe_by_strike.keys()))
+            atm_strike = min(all_strikes, key=lambda s: abs(s - spot)) if all_strikes else spot
+            if all_strikes:
+                atm_idx = all_strikes.index(atm_strike)
+                window_strikes = all_strikes[max(0, atm_idx - 5):min(len(all_strikes), atm_idx + 6)]
+            else:
+                window_strikes = []
 
-            if len(ce_strikes) < 4:
-                ce_strikes = sorted(ce_by_strike.keys(), key=lambda s: abs(s - spot))[:4]
-            if len(pe_strikes) < 4:
-                pe_strikes = sorted(pe_by_strike.keys(), key=lambda s: abs(s - spot))[:4]
+            ce_strikes = [s for s in window_strikes if s in ce_by_strike]
+            pe_strikes = [s for s in window_strikes if s in pe_by_strike]
+
+            if len(ce_strikes) < 11:
+                ce_strikes = sorted(ce_by_strike.keys(), key=lambda s: abs(s - spot))[:11]
+            if len(pe_strikes) < 11:
+                pe_strikes = sorted(pe_by_strike.keys(), key=lambda s: abs(s - spot))[:11]
 
             planned = []
-            # Order CE strikes so ATM (nearest to spot) is first!
-            for s in sorted(ce_strikes, reverse=True):
+            for s in sorted(ce_strikes):
                 c = ce_by_strike[s]
                 planned.append({
                     "symbol": c.get("trading_symbol"),
@@ -824,7 +907,6 @@ class StockScreener:
                     "lot_size": int(c.get("lot_size") or lot_size),
                 })
 
-            # Order PE strikes so ATM (nearest to spot) is first!
             for s in sorted(pe_strikes):
                 c = pe_by_strike[s]
                 planned.append({
@@ -840,8 +922,9 @@ class StockScreener:
                 "symbol": symbol,
                 "name": stock_meta["name"],
                 "spot": spot,
+                "atm_strike": atm_strike,
                 "expiry": str(min_exp),
-                "lot_size": lot_size,
+                "lot_size": int(planned[0]["lot_size"]) if planned else lot_size,
                 "strike_step": strike_step,
                 "planned_contracts": planned,
             }

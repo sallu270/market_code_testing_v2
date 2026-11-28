@@ -173,8 +173,8 @@ class TestFirstPositiveTickStrategy(unittest.TestCase):
         trade = self.engine.on_tick({"instrument_key": k, "ltp": 110.0})
         self.assertIsNone(trade)
 
-    def test_index_stop_loss_25pct_and_target_40pct(self):
-        """Phase 1 Requirement 1: 25% SL and 40% Target sold strictly at live bid."""
+    def test_index_stop_loss_20pct_and_target_40pct(self):
+        """Phase 1 Requirement 1: 20% SL and 40% Target sold strictly at live bid."""
         idx_st = self.engine.index_underlyings[NIFTY_KEY]
         k = "NSE_FO|NIFTY26NOV24000CE"
         idx_st["locked_keys"] = [k]
@@ -195,16 +195,16 @@ class TestFirstPositiveTickStrategy(unittest.TestCase):
         trade = self.engine.on_tick({"instrument_key": k, "ltp": 105.0})
         self.assertIsNotNone(trade)
         entry_price = trade["entry_price"]  # 100.0
-        self.assertEqual(trade["stop_loss_price"], round(entry_price * 0.75, 2))  # 75.0
+        self.assertEqual(trade["stop_loss_price"], round(entry_price * 0.80, 2))  # 80.0
         self.assertEqual(trade["target_price"], round(entry_price * 1.40, 2))     # 140.0
         self.assertEqual(idx_st["state"], "HOLDING")
 
-        # 2. Stop-loss trigger at live bid <= 75.0
-        exit_trade = self.engine.on_tick({"instrument_key": k, "ltp": 74.0, "bid_price": 74.0})
+        # 2. Stop-loss trigger at live bid <= 80.0
+        exit_trade = self.engine.on_tick({"instrument_key": k, "ltp": 79.0, "bid_price": 79.0})
         self.assertIsNotNone(exit_trade)
         self.assertEqual(exit_trade["status"], "CLOSED")
-        self.assertEqual(exit_trade["exit_reason"], "STOP_LOSS_25PCT")
-        self.assertEqual(exit_trade["exit_price"], 74.0)
+        self.assertEqual(exit_trade["exit_reason"], "STOP_LOSS_20PCT")
+        self.assertEqual(exit_trade["exit_price"], 79.0)
 
 
 

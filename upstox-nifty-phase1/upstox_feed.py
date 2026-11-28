@@ -49,6 +49,9 @@ class UpstoxFeed:
         self._thread: threading.Thread | None = None
         self._streamer: Any = None
         self._connected = False
+        self._open_event = threading.Event()
+        self._last_error_str: str = ""
+        self.max_keys_per_socket: int = 1500
 
     @property
     def running(self) -> bool:
@@ -74,51 +77,73 @@ class UpstoxFeed:
         )
         self._thread.start()
 
-    def stop(self) -> None:
-        self._stop_event.set()
-        self._connected = False
-
+    def _cleanup_streamer(self) -> None:
         if self._streamer is not None:
+            try:
+                if hasattr(self._streamer, "auto_reconnect"):
+                    self._streamer.auto_reconnect(False)
+            except Exception:
+                pass
             try:
                 self._streamer.disconnect()
             except Exception:
                 pass
+            self._streamer = None
 
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._connected = False
+        self._open_event.set()
+        self._cleanup_streamer()
         self._emit_status("stopped", f"[{self.name}] Market feed stopped.")
 
     def _run_forever(self) -> None:
         delay = self.settings.reconnect_min_seconds
 
         while not self._stop_event.is_set():
+            if not self._subscribed_keys:
+                self._stop_event.wait(2.0)
+                continue
+
+            self._last_error_str = ""
+            self._open_event.clear()
             try:
                 self._connect_once()
-                delay = self.settings.reconnect_min_seconds
-
-                while not self._stop_event.wait(1):
-                    if not self._connected:
-                        break
+                # Wait up to 6 seconds for handshake _on_open before declaring failure
+                self._open_event.wait(6.0)
+                if self._connected:
+                    delay = self.settings.reconnect_min_seconds
+                    while not self._stop_event.wait(1):
+                        if not self._connected:
+                            break
+                else:
+                    self._cleanup_streamer()
 
             except Exception as exc:
                 self._connected = False
-                err_str = str(exc)
+                self._last_error_str = str(exc)
                 self._emit_status("error", f"[{self.name}] {type(exc).__name__}: {exc}")
-                if "403" in err_str or "Forbidden" in err_str:
-                    delay = max(delay, 10.0)
-                    LOGGER.warning("[%s] 403 Forbidden detected. Applying 10s cooldown backoff before reconnect.", self.name)
+                self._cleanup_streamer()
 
             if self._stop_event.is_set():
                 break
 
+            err_l = (self._last_error_str or "").lower()
+            if "429" in err_l or "too many" in err_l or "403" in err_l or "forbidden" in err_l:
+                delay = max(delay, 30.0)
+                LOGGER.warning("[%s] Rate limit / Auth guard (%s). Waiting %.0fs cooldown before reconnect.", self.name, self._last_error_str[:80], delay)
+
+            max_cap = max(float(self.settings.reconnect_max_seconds), 45.0 if ("429" in err_l or "403" in err_l) else float(self.settings.reconnect_max_seconds))
             sleep_seconds = min(
-                delay + random.uniform(0, 1),
-                self.settings.reconnect_max_seconds,
+                delay + random.uniform(0, 1.5),
+                max_cap,
             )
             self._emit_status(
                 "reconnecting",
                 f"[{self.name}] Reconnecting in {sleep_seconds:.1f} seconds.",
             )
             self._stop_event.wait(sleep_seconds)
-            delay = min(delay * 2, self.settings.reconnect_max_seconds)
+            delay = min(delay * 2, max_cap)
 
     def _connect_once(self) -> None:
         if not self.settings.access_token:
@@ -129,15 +154,18 @@ class UpstoxFeed:
             self._stop_event.wait(2.0)
             return
 
-        # Upstox strictly limits WebSocket V3 to 100 instruments per connection.
-        # With combined indices + stocks feed, we allow up to 115 keys safely.
-        # Enforce hard safety cap to prevent connection drops.
-        if len(self._subscribed_keys) > 150:
-            LOGGER.warning("[%s] Instrument count %d exceeds safety cap (150). Pruning non-essential keys.", self.name, len(self._subscribed_keys))
-            keys_list = list(self._subscribed_keys)[:150]
+        self._cleanup_streamer()
+
+        # Upstox V3 full mode allows up to 1,500 combined / 2,000 individual keys per connection.
+        keys_list = list(self._subscribed_keys)
+        if len(keys_list) > self.max_keys_per_socket:
+            LOGGER.warning("[%s] Instrument count %d exceeds socket cap (%d). Pruning overflow.", self.name, len(keys_list), self.max_keys_per_socket)
+            keys_list = keys_list[:self.max_keys_per_socket]
             self._subscribed_keys = set(keys_list)
-        else:
-            keys_list = list(self._subscribed_keys)
+
+        # Connect initially with the first batch (up to 100 keys) and subscribe the rest in chunks after open
+        initial_batch = keys_list[:100]
+        self._pending_subscribe_batches = [keys_list[i:i + 100] for i in range(100, len(keys_list), 100)]
 
         configuration = upstox_client.Configuration()
         configuration.access_token = self.settings.access_token
@@ -145,9 +173,14 @@ class UpstoxFeed:
 
         self._streamer = upstox_client.MarketDataStreamerV3(
             api_client,
-            keys_list,
+            initial_batch,
             self.settings.feed_mode,
         )
+        try:
+            if hasattr(self._streamer, "auto_reconnect"):
+                self._streamer.auto_reconnect(False)
+        except Exception:
+            pass
 
         self._streamer.on("open", self._on_open)
         self._streamer.on("message", self._on_message)
@@ -163,24 +196,18 @@ class UpstoxFeed:
         mode: str | None = None,
         target: str | None = None,
     ) -> None:
-        """Dynamically subscribe additional instrument keys to the live feed."""
+        """Dynamically subscribe additional instrument keys to the live feed in clean 100-key batches."""
         if not instrument_keys:
             return
         to_add = [k for k in instrument_keys if k not in self._subscribed_keys]
         if not to_add:
             return
 
-        # Enforce 150 instrument hard ceiling on active keys for combined single-feed mode
-        max_allowed = 150
+        max_allowed = self.max_keys_per_socket
         if len(self._subscribed_keys) + len(to_add) > max_allowed:
-            protected = set(getattr(self.settings, "instrument_keys", []))
-            prunable = [k for k in self._subscribed_keys if k not in protected]
-            slots_needed = (len(self._subscribed_keys) + len(to_add)) - max_allowed
-            for pk in prunable[:slots_needed]:
-                self._subscribed_keys.discard(pk)
             available_slots = max(0, max_allowed - len(self._subscribed_keys))
             if len(to_add) > available_slots:
-                LOGGER.warning("[%s] Requested %d keys exceeds remaining WebSocket capacity (%d). Truncating batch.", self.name, len(to_add), available_slots)
+                LOGGER.warning("[%s] Requested %d keys exceeds socket capacity (%d). Truncating batch.", self.name, len(to_add), available_slots)
                 to_add = to_add[:available_slots]
 
         if not to_add:
@@ -189,8 +216,13 @@ class UpstoxFeed:
         self._subscribed_keys.update(to_add)
         if self._streamer and self._connected:
             try:
-                self._streamer.subscribe(to_add, mode or self.settings.feed_mode)
-                LOGGER.info("[%s] Dynamically subscribed to %d instruments: %s", self.name, len(to_add), to_add)
+                use_mode = mode or self.settings.feed_mode
+                for i in range(0, len(to_add), 100):
+                    chunk = to_add[i:i + 100]
+                    self._streamer.subscribe(chunk, use_mode)
+                    if i + 100 < len(to_add):
+                        time.sleep(0.05)
+                LOGGER.info("[%s] Dynamically subscribed to %d instruments (total=%d)", self.name, len(to_add), len(self._subscribed_keys))
             except Exception as exc:
                 LOGGER.error("[%s] Failed to dynamically subscribe: %s", self.name, exc)
 
@@ -213,6 +245,19 @@ class UpstoxFeed:
 
     def _on_open(self, *args: Any) -> None:
         self._connected = True
+        self._open_event.set()
+        pending = getattr(self, "_pending_subscribe_batches", None) or []
+        if pending and self._streamer:
+            def _flush_batches():
+                for chunk in pending:
+                    if not self._connected or self._stop_event.is_set() or not self._streamer:
+                        break
+                    try:
+                        self._streamer.subscribe(chunk, self.settings.feed_mode)
+                        time.sleep(0.05)
+                    except Exception as exc:
+                        LOGGER.warning("[%s] Batch subscribe chunk error: %s", self.name, exc)
+            threading.Thread(target=_flush_batches, daemon=True).start()
         self._emit_status(
             "connected",
             f"[{self.name}] Subscribed to {len(self._subscribed_keys)} instrument(s).",
@@ -234,10 +279,13 @@ class UpstoxFeed:
 
     def _on_error(self, error: Any, *args: Any) -> None:
         self._connected = False
+        self._last_error_str = str(error)
+        self._open_event.set()
         self._emit_status("error", f"[{self.name}] {error}")
 
     def _on_close(self, *args: Any) -> None:
         self._connected = False
+        self._open_event.set()
         if not self._stop_event.is_set():
             self._emit_status("disconnected", f"[{self.name}] Upstox market feed disconnected.")
 
@@ -453,16 +501,15 @@ class UpstoxFeed:
 
 class DualUpstoxFeed:
     """
-    Manages two independent, concurrent Upstox V3 Market Data WebSockets
-    using a single access token:
-      1. indices-feed: Major Indices (NIFTY 50, BANK NIFTY, SENSEX), their futures,
-         and locked index option contracts (~30-40 instruments).
-      2. stocks-feed: All 50 Nifty constituent cash stocks (NSE_EQ|...) and active
-         stock option contracts (~50-90 instruments).
-
-    Keeps both sockets well below the ~100-120 Upstox instrument connection threshold,
-    eliminating [WinError 10054] connection drops and socket starvation.
+    Manages up to 3 concurrent Upstox V3 Market Data WebSockets (within Upstox Plus
+    5-connection limit) using a single access token:
+      1. indices-feed: Major Indices (NIFTY 50, BANK NIFTY, SENSEX), futures,
+         and ATM ± 10 basket contracts (42 options per index = 126 options + spots, ~129 keys).
+      2. stocks-feed: Primary stocks socket (first ~600 keys).
+      3. stocks-feed-2: Overflow stocks socket (remaining ~600 keys for 50 stocks × 22 strikes).
     """
+
+    STOCK_SOCKET_SPLIT_THRESHOLD = 600
 
     def __init__(
         self,
@@ -484,6 +531,9 @@ class DualUpstoxFeed:
         self._index_keys: set[str] = set(idx_keys)
         self._stock_keys: set[str] = set(stk_keys)
 
+        stk_1 = stk_keys[:self.STOCK_SOCKET_SPLIT_THRESHOLD]
+        stk_2 = stk_keys[self.STOCK_SOCKET_SPLIT_THRESHOLD:]
+
         self.indices_feed = UpstoxFeed(
             settings=settings,
             on_tick=self._on_child_tick,
@@ -497,58 +547,78 @@ class DualUpstoxFeed:
             on_tick=self._on_child_tick,
             on_status=lambda s: self._on_child_status("stocks", s),
             name="stocks-feed",
-            initial_keys=stk_keys,
+            initial_keys=stk_1,
+        )
+
+        self.stocks_feed_2 = UpstoxFeed(
+            settings=settings,
+            on_tick=self._on_child_tick,
+            on_status=lambda s: self._on_child_status("stocks-2", s),
+            name="stocks-feed-2",
+            initial_keys=stk_2,
         )
 
         self._child_statuses: dict[str, dict[str, Any]] = {
             "indices": {"state": "init", "connected": False, "message": "Initialized"},
             "stocks": {"state": "init", "connected": False, "message": "Initialized"},
+            "stocks-2": {"state": "init", "connected": False, "message": "Initialized"},
         }
 
     @property
     def running(self) -> bool:
-        return self.indices_feed.running or self.stocks_feed.running
+        return self.indices_feed.running or self.stocks_feed.running or self.stocks_feed_2.running
 
     @property
     def connected(self) -> bool:
         """Returns True if at least one feed is connected."""
-        return self.indices_feed.connected or self.stocks_feed.connected
+        return self.indices_feed.connected or self.stocks_feed.connected or self.stocks_feed_2.connected
 
     @property
     def both_connected(self) -> bool:
-        """Returns True if both index and stock feeds are simultaneously connected."""
-        return self.indices_feed.connected and self.stocks_feed.connected
+        """Returns True if all active feeds with keys are simultaneously connected."""
+        idx_ok = self.indices_feed.connected or not self.indices_feed.subscribed_keys
+        stk1_ok = self.stocks_feed.connected or not self.stocks_feed.subscribed_keys
+        stk2_ok = self.stocks_feed_2.connected or not self.stocks_feed_2.subscribed_keys
+        return self.connected and idx_ok and stk1_ok and stk2_ok
 
     @property
     def subscribed_keys(self) -> set[str]:
-        return self.indices_feed.subscribed_keys.union(self.stocks_feed.subscribed_keys)
+        return (
+            self.indices_feed.subscribed_keys
+            .union(self.stocks_feed.subscribed_keys)
+            .union(self.stocks_feed_2.subscribed_keys)
+        )
 
     def set_classifier(self, classifier: Callable[[str], str]) -> None:
         self.classifier = classifier
 
     def start(self) -> None:
         LOGGER.info(
-            "Starting DualUpstoxFeed: indices-feed (%d keys), stocks-feed (%d keys)",
+            "Starting MultiSocket DualUpstoxFeed: indices (%d), stocks-1 (%d), stocks-2 (%d)",
             len(self.indices_feed.subscribed_keys),
             len(self.stocks_feed.subscribed_keys),
+            len(self.stocks_feed_2.subscribed_keys),
         )
         self.indices_feed.start()
         self.stocks_feed.start()
+        self.stocks_feed_2.start()
 
     def stop(self) -> None:
         LOGGER.info("Stopping DualUpstoxFeed...")
         self.indices_feed.stop()
         self.stocks_feed.stop()
+        self.stocks_feed_2.stop()
 
     def _on_child_tick(self, tick: dict[str, Any]) -> None:
         self.on_tick(tick)
 
     def _on_child_status(self, child_name: str, status: dict[str, Any]) -> None:
         self._child_statuses[child_name] = status
-        agg_connected = self.indices_feed.connected and self.stocks_feed.connected
-        any_connected = self.indices_feed.connected or self.stocks_feed.connected
+        agg_connected = self.both_connected
+        any_connected = self.connected
         agg_state = "connected" if agg_connected else ("partial" if any_connected else status.get("state", "disconnected"))
 
+        stocks_total = len(self.stocks_feed.subscribed_keys) + len(self.stocks_feed_2.subscribed_keys)
         composite_status = {
             "state": agg_state,
             "child_feed": child_name,
@@ -556,9 +626,9 @@ class DualUpstoxFeed:
             "connected": any_connected,
             "both_connected": agg_connected,
             "indices_connected": self.indices_feed.connected,
-            "stocks_connected": self.stocks_feed.connected,
+            "stocks_connected": self.stocks_feed.connected or self.stocks_feed_2.connected,
             "indices_count": len(self.indices_feed.subscribed_keys),
-            "stocks_count": len(self.stocks_feed.subscribed_keys),
+            "stocks_count": stocks_total,
             "total_subscribed": len(self.subscribed_keys),
             "timestamp_ms": int(time.time() * 1000),
         }
@@ -583,7 +653,11 @@ class DualUpstoxFeed:
         # 2. Known key sets
         if key_str in self._index_keys or key_str in self.indices_feed.subscribed_keys:
             return "indices"
-        if key_str in self._stock_keys or key_str in self.stocks_feed.subscribed_keys:
+        if (
+            key_str in self._stock_keys
+            or key_str in self.stocks_feed.subscribed_keys
+            or key_str in self.stocks_feed_2.subscribed_keys
+        ):
             return "stocks"
 
         # 3. External classifier callback (e.g., from strategy_engine)
@@ -605,8 +679,7 @@ class DualUpstoxFeed:
     ) -> None:
         """
         Routes subscription requests to the appropriate child feed.
-        If target is explicitly 'indices' or 'stocks', routes directly.
-        Otherwise, automatically classifies each key based on instrument metadata.
+        Balances stock subscriptions cleanly across stocks_feed (<=600) and stocks_feed_2.
         """
         if not instrument_keys:
             return
@@ -629,20 +702,33 @@ class DualUpstoxFeed:
         if idx_batch:
             self.indices_feed.subscribe(idx_batch, mode=mode)
         if stk_batch:
-            self.stocks_feed.subscribe(stk_batch, mode=mode)
+            already = self.stocks_feed.subscribed_keys.union(self.stocks_feed_2.subscribed_keys)
+            new_stk = [k for k in stk_batch if k not in already]
+            if new_stk:
+                cap_1 = max(0, self.STOCK_SOCKET_SPLIT_THRESHOLD - len(self.stocks_feed.subscribed_keys))
+                batch_1 = new_stk[:cap_1]
+                batch_2 = new_stk[cap_1:]
+                if batch_1:
+                    self.stocks_feed.subscribe(batch_1, mode=mode)
+                if batch_2:
+                    self.stocks_feed_2.subscribe(batch_2, mode=mode)
 
     def unsubscribe(self, instrument_keys: list[str]) -> None:
         """Routes unsubscribe requests to the appropriate child feed."""
         if not instrument_keys:
             return
         idx_batch: list[str] = []
-        stk_batch: list[str] = []
+        stk1_batch: list[str] = []
+        stk2_batch: list[str] = []
         for k in instrument_keys:
             k_str = str(k).strip()
             if not k_str:
                 continue
             if k_str in self.stocks_feed.subscribed_keys:
-                stk_batch.append(k_str)
+                stk1_batch.append(k_str)
+                self._stock_keys.discard(k_str)
+            elif k_str in self.stocks_feed_2.subscribed_keys:
+                stk2_batch.append(k_str)
                 self._stock_keys.discard(k_str)
             else:
                 idx_batch.append(k_str)
@@ -650,5 +736,7 @@ class DualUpstoxFeed:
 
         if idx_batch:
             self.indices_feed.unsubscribe(idx_batch)
-        if stk_batch:
-            self.stocks_feed.unsubscribe(stk_batch)
+        if stk1_batch:
+            self.stocks_feed.unsubscribe(stk1_batch)
+        if stk2_batch:
+            self.stocks_feed_2.unsubscribe(stk2_batch)

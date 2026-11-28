@@ -1,17 +1,22 @@
 {
   "index_lots": {
-    "NSE_INDEX|Nifty 50": 2,
+    "NSE_INDEX|Nifty 50": 1,
     "NSE_INDEX|Nifty Bank": 2,
-    "BSE_INDEX|SENSEX": 2
+    "BSE_INDEX|SENSEX": 1
   },
   "index_enabled": {
     "NSE_INDEX|Nifty 50": true,
     "NSE_INDEX|Nifty Bank": true,
     "BSE_INDEX|SENSEX": true
   },
-  "lots_full": 3,
-  "lots_normal": 2,
+  "lots_full": 1,
+  "lots_normal": 1,
   "lots_scalp": 1,
-  "max_bullish_stocks": 5,
-  "max_bearish_stocks": 5
+  "max_bullish_stocks": 3,
+  "max_bearish_stocks": 3,
+  "entry_itm_depth": 2,
+  "min_entry_premium": 50.0,
+  "max_entry_premium": 2500.0,
+  "whipsaw_sec": 300.0,
+  "allow_double_exposure": false
 }

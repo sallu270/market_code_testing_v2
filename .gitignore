@@ -30,3 +30,7 @@ docx/
 !README.md
 !**/README.md
 
+
+# Database backups
+*.sql
+

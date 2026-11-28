@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
 import threading
 import time
@@ -20,8 +21,17 @@ class MarketDatabase:
         self._connection.row_factory = sqlite3.Row
         self._tick_count: int = 0
         self._last_commit_time: float = time.time()
+        self._tick_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=25000)
+        self._momentum_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10000)
+        self._stop_writer = threading.Event()
         self._configure()
         self._create_schema()
+        self._writer_thread = threading.Thread(
+            target=self._async_writer_loop,
+            name="db-async-batch-writer",
+            daemon=True,
+        )
+        self._writer_thread.start()
 
     def _configure(self) -> None:
         with self._lock:
@@ -59,6 +69,9 @@ class MarketDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_ticks_instrument_time
                     ON ticks(instrument_key, exchange_timestamp_ms DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_ticks_exchange_time
+                    ON ticks(exchange_timestamp_ms DESC);
 
                 CREATE TABLE IF NOT EXISTS candles_1m (
                     instrument_key TEXT NOT NULL,
@@ -102,7 +115,10 @@ class MarketDatabase:
                     atm_strike REAL,
                     bot_latency_ms REAL,
                     network_latency_ms REAL,
-                    build_up TEXT
+                    build_up TEXT,
+                    strategy TEXT,
+                    score REAL DEFAULT 0.0,
+                    rank INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS strategy_signals (
@@ -124,7 +140,9 @@ class MarketDatabase:
                     ask_price REAL,
                     spread_pct REAL,
                     oi_change REAL,
-                    confidence TEXT
+                    confidence TEXT,
+                    score REAL DEFAULT 0.0,
+                    rank INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS strategy_alerts (
@@ -141,6 +159,48 @@ class MarketDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_alerts_date_time
                     ON strategy_alerts(alert_date, timestamp_ms DESC);
+
+                CREATE TABLE IF NOT EXISTS momentum_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    log_date TEXT NOT NULL,
+                    timestamp_ist TEXT NOT NULL,
+                    timestamp_ms INTEGER NOT NULL,
+                    underlying_key TEXT NOT NULL,
+                    index_name TEXT NOT NULL,
+                    prev_ce_pct REAL NOT NULL,
+                    ce_pct REAL NOT NULL,
+                    delta_ce REAL NOT NULL,
+                    prev_pe_pct REAL NOT NULL,
+                    pe_pct REAL NOT NULL,
+                    delta_pe REAL NOT NULL,
+                    raw_signal TEXT NOT NULL,
+                    hold_sec INTEGER NOT NULL DEFAULT 0,
+                    confirmed INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_momentum_date_time
+                    ON momentum_logs(log_date, timestamp_ms DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_momentum_key_date
+                    ON momentum_logs(underlying_key, log_date, timestamp_ms DESC);
+
+                CREATE TABLE IF NOT EXISTS baseline_snapshots (
+                    date TEXT NOT NULL,
+                    underlying_key TEXT NOT NULL,
+                    ce_baseline_sum REAL NOT NULL,
+                    pe_baseline_sum REAL NOT NULL,
+                    baseline_prices_json TEXT,
+                    created_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (date, underlying_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS premarket_locks (
+                    date TEXT NOT NULL,
+                    underlying_key TEXT NOT NULL,
+                    locked_json TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (date, underlying_key)
+                );
                 """
             )
             self._connection.commit()
@@ -150,12 +210,17 @@ class MarketDatabase:
             self._add_column_if_missing("strategy_trades", "underlying_key", "TEXT")
             self._add_column_if_missing("strategy_trades", "spot_price", "REAL")
             self._add_column_if_missing("strategy_trades", "atm_strike", "REAL")
+            self._add_column_if_missing("strategy_trades", "score", "REAL DEFAULT 0.0")
+            self._add_column_if_missing("strategy_trades", "rank", "INTEGER DEFAULT 0")
             self._add_column_if_missing("strategy_signals", "instrument_name", "TEXT")
             self._add_column_if_missing("strategy_signals", "bid_price", "REAL")
             self._add_column_if_missing("strategy_signals", "ask_price", "REAL")
             self._add_column_if_missing("strategy_signals", "spread_pct", "REAL")
             self._add_column_if_missing("strategy_signals", "oi_change", "REAL")
             self._add_column_if_missing("strategy_signals", "confidence", "TEXT")
+            self._add_column_if_missing("strategy_signals", "score", "REAL DEFAULT 0.0")
+            self._add_column_if_missing("strategy_signals", "rank", "INTEGER DEFAULT 0")
+            self._add_column_if_missing("momentum_logs", "score", "REAL DEFAULT 0.0")
 
             # Backfill trade_date and underlying_key for any existing trades
             try:
@@ -209,6 +274,105 @@ class MarketDatabase:
             logging.getLogger("database").warning(
                 "Could not add column %s.%s: %s", table, column, exc
             )
+
+    def enqueue_tick(self, tick: dict[str, Any]) -> None:
+        """Non-blocking tick enqueue for high-throughput WebSocket receiver thread (53 symbols / 1,200+ keys)."""
+        try:
+            self._tick_queue.put_nowait(tick)
+        except queue.Full:
+            pass
+
+    def enqueue_momentum_log(self, entry: dict[str, Any]) -> None:
+        """Non-blocking momentum log enqueue for persistent full-day history."""
+        try:
+            self._momentum_queue.put_nowait(entry)
+        except queue.Full:
+            pass
+
+    def _async_writer_loop(self) -> None:
+        """Flushes queued ticks and momentum logs in fast SQLite transactions every 250ms."""
+        while not self._stop_writer.is_set():
+            time.sleep(0.25)
+            self._drain_async_queues()
+
+    def _drain_async_queues(self) -> None:
+        tick_batch: list[tuple[Any, ...]] = []
+        while len(tick_batch) < 1000:
+            try:
+                t = self._tick_queue.get_nowait()
+                tick_batch.append((
+                    t["instrument_key"],
+                    t.get("exchange_timestamp_ms") or t.get("received_timestamp_ms") or 0,
+                    t.get("received_timestamp_ms") or 0,
+                    t["ltp"],
+                    t.get("last_quantity"),
+                    t.get("average_price"),
+                    t.get("volume"),
+                    t.get("open_interest"),
+                    t.get("bid_price"),
+                    t.get("bid_quantity"),
+                    t.get("ask_price"),
+                    t.get("ask_quantity"),
+                    "{}",
+                ))
+            except queue.Empty:
+                break
+
+        mom_batch: list[tuple[Any, ...]] = []
+        while len(mom_batch) < 500:
+            try:
+                e = self._momentum_queue.get_nowait()
+                mom_batch.append((
+                    e["log_date"],
+                    e["timestamp_ist"],
+                    e["timestamp_ms"],
+                    e["underlying_key"],
+                    e["index_name"],
+                    float(e.get("prev_ce_pct") or 0.0),
+                    float(e.get("ce_pct") or 0.0),
+                    float(e.get("delta_ce") or 0.0),
+                    float(e.get("prev_pe_pct") or 0.0),
+                    float(e.get("pe_pct") or 0.0),
+                    float(e.get("delta_pe") or 0.0),
+                    float(e.get("score") or 0.0),
+                    str(e.get("raw_signal") or "Neutral"),
+                    int(e.get("hold_sec") or 0),
+                    1 if e.get("confirmed") else 0,
+                ))
+            except queue.Empty:
+                break
+
+        if not tick_batch and not mom_batch:
+            return
+
+        with self._lock:
+            try:
+                if tick_batch:
+                    self._connection.executemany(
+                        """
+                        INSERT OR IGNORE INTO ticks (
+                            instrument_key, exchange_timestamp_ms, received_timestamp_ms,
+                            ltp, last_quantity, average_price, volume, open_interest,
+                            bid_price, bid_quantity, ask_price, ask_quantity, raw_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        tick_batch,
+                    )
+                if mom_batch:
+                    self._connection.executemany(
+                        """
+                        INSERT INTO momentum_logs (
+                            log_date, timestamp_ist, timestamp_ms, underlying_key,
+                            index_name, prev_ce_pct, ce_pct, delta_ce,
+                            prev_pe_pct, pe_pct, delta_pe, score, raw_signal,
+                            hold_sec, confirmed
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        mom_batch,
+                    )
+                self._connection.commit()
+            except Exception:
+                pass
 
     def insert_tick(self, tick: dict[str, Any]) -> None:
         with self._lock:
@@ -464,6 +628,7 @@ class MarketDatabase:
                 ("bot_latency_ms", "REAL"),
                 ("network_latency_ms", "REAL"),
                 ("build_up", "TEXT"),
+                ("strategy", "TEXT"),
             ]:
                 try:
                     self._connection.execute(f"ALTER TABLE strategy_trades ADD COLUMN {col_name} {col_type}")
@@ -477,8 +642,9 @@ class MarketDatabase:
                     strike, lot_size, entry_time_ist, entry_price, entry_timestamp_ms,
                     exit_time_ist, exit_price, exit_timestamp_ms, exit_reason,
                     pnl_points, net_pnl, status, spot_price, atm_strike,
-                    bot_latency_ms, network_latency_ms, build_up
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    bot_latency_ms, network_latency_ms, build_up, strategy,
+                    score, rank
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade["trade_id"],
@@ -504,6 +670,9 @@ class MarketDatabase:
                     trade.get("bot_latency_ms"),
                     trade.get("network_latency_ms"),
                     trade.get("build_up"),
+                    trade.get("strategy") or ("PATH_1_0915" if ("PATH_1" in str(trade.get("entry_path", "")) or "PATH_1" in str(trade.get("build_up", "")) or "GAP-" in str(trade.get("trade_id", ""))) else "SUM_SIGNAL"),
+                    float(trade.get("score") or 0.0),
+                    int(trade.get("rank") or 0),
                 ),
             )
             self._connection.commit()
@@ -598,8 +767,9 @@ class MarketDatabase:
                     timestamp_ist, timestamp_ms, instrument_name, side, strike,
                     contract_key, ltp, prev_ltp, qty_delta,
                     val_lakhs, day_high, prev_close, action_taken,
-                    bid_price, ask_price, spread_pct, oi_change, confidence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    bid_price, ask_price, spread_pct, oi_change, confidence,
+                    score, rank
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sig["timestamp_ist"],
@@ -620,6 +790,8 @@ class MarketDatabase:
                     sig.get("spread_pct"),
                     sig.get("oi_change"),
                     sig.get("confidence"),
+                    float(sig.get("score") or 0.0),
+                    int(sig.get("rank") or 0),
                 ),
             )
             self._connection.commit()
@@ -701,6 +873,147 @@ class MarketDatabase:
             ).fetchall()
         return [r[0] for r in rows if r[0]]
 
+    def insert_momentum_log(self, entry: dict[str, Any]) -> int:
+        with self._lock:
+            cur = self._connection.execute(
+                """
+                INSERT INTO momentum_logs (
+                    log_date, timestamp_ist, timestamp_ms, underlying_key,
+                    index_name, prev_ce_pct, ce_pct, delta_ce,
+                    prev_pe_pct, pe_pct, delta_pe, score, raw_signal,
+                    hold_sec, confirmed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry["log_date"],
+                    entry["timestamp_ist"],
+                    entry["timestamp_ms"],
+                    entry["underlying_key"],
+                    entry["index_name"],
+                    float(entry.get("prev_ce_pct") or 0.0),
+                    float(entry.get("ce_pct") or 0.0),
+                    float(entry.get("delta_ce") or 0.0),
+                    float(entry.get("prev_pe_pct") or 0.0),
+                    float(entry.get("pe_pct") or 0.0),
+                    float(entry.get("delta_pe") or 0.0),
+                    float(entry.get("score") or 0.0),
+                    str(entry.get("raw_signal") or "Neutral"),
+                    int(entry.get("hold_sec") or 0),
+                    1 if entry.get("confirmed") else 0,
+                ),
+            )
+            self._connection.commit()
+            return int(cur.lastrowid or 0)
+
+    def get_momentum_logs(
+        self,
+        date: str | None = None,
+        underlying_key: str | None = None,
+        limit: int = 100000,
+    ) -> list[dict[str, Any]]:
+        self._drain_async_queues()
+        with self._lock:
+            clauses: list[str] = []
+            params: list[Any] = []
+            if date and date.lower() != "all":
+                clauses.append("log_date = ?")
+                params.append(date)
+            if underlying_key and underlying_key.upper() not in ("ALL", ""):
+                clauses.append("(underlying_key = ? OR index_name LIKE ?)")
+                params.extend([underlying_key, f"%{underlying_key}%"])
+
+            where_str = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            limit_clause = ""
+            if limit and limit > 0:
+                limit_clause = "LIMIT ?"
+                params.append(limit)
+            query = f"""
+                SELECT * FROM momentum_logs
+                {where_str}
+                ORDER BY timestamp_ms DESC
+                {limit_clause}
+            """
+            rows = self._connection.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_premarket_lock(self, date: str, underlying_key: str, locked_list: list[dict[str, Any]]) -> None:
+        with self._lock:
+            now_ms = int(time.time() * 1000)
+            self._connection.execute(
+                """
+                INSERT OR REPLACE INTO premarket_locks (date, underlying_key, locked_json, created_at_ms)
+                VALUES (?, ?, ?, ?)
+                """,
+                (date, underlying_key, json.dumps(locked_list), now_ms),
+            )
+            self._connection.commit()
+
+    def get_premarket_lock(self, date: str, underlying_key: str) -> list[dict[str, Any]] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT locked_json FROM premarket_locks WHERE date = ? AND underlying_key = ?",
+                (date, underlying_key),
+            ).fetchone()
+            if not row:
+                return None
+            try:
+                return json.loads(row[0] or "[]")
+            except Exception:
+                return None
+
+    def get_momentum_dates(self) -> list[str]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT DISTINCT log_date FROM momentum_logs
+                WHERE log_date IS NOT NULL AND log_date != ''
+                ORDER BY log_date DESC
+                """
+            ).fetchall()
+        return [r[0] for r in rows if r[0]]
+
+    def save_baseline_snapshot(
+        self,
+        date: str,
+        underlying_key: str,
+        ce_baseline_sum: float,
+        pe_baseline_sum: float,
+        baseline_prices: dict[str, float] | None = None,
+    ) -> None:
+        """Persists the 09:15 baseline snapshot to prevent fallback resets on mid-day restart."""
+        with self._lock:
+            now_ms = int(time.time() * 1000)
+            prices_json = json.dumps(baseline_prices or {})
+            self._connection.execute(
+                """
+                INSERT OR REPLACE INTO baseline_snapshots (
+                    date, underlying_key, ce_baseline_sum, pe_baseline_sum,
+                    baseline_prices_json, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (date, underlying_key, float(ce_baseline_sum), float(pe_baseline_sum), prices_json, now_ms),
+            )
+            self._connection.commit()
+
+    def get_baseline_snapshot(self, date: str, underlying_key: str) -> dict[str, Any] | None:
+        """Retrieves the persisted 09:15 baseline snapshot for an index on a specific date."""
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT * FROM baseline_snapshots
+                WHERE date = ? AND underlying_key = ?
+                """,
+                (date, underlying_key),
+            ).fetchone()
+            if not row:
+                return None
+            res = dict(row)
+            try:
+                res["baseline_prices"] = json.loads(res.get("baseline_prices_json") or "{}")
+            except Exception:
+                res["baseline_prices"] = {}
+            return res
+
     def get_db_stats(self) -> dict[str, Any]:
         """Returns database size, row counts, and disk statistics."""
         with self._lock:
@@ -766,6 +1079,16 @@ class MarketDatabase:
             }
 
     def close(self) -> None:
+        self._stop_writer.set()
+        self._drain_async_queues()
         with self._lock:
-            self._connection.commit()
-            self._connection.close()
+            if self._connection:
+                try:
+                    self._connection.commit()
+                except Exception:
+                    pass
+                try:
+                    self._connection.close()
+                except Exception:
+                    pass
+                self._connection = None

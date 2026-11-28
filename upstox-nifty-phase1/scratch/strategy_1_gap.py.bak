@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+LOGGER = logging.getLogger("strategy_1_gap")
+IST = ZoneInfo("Asia/Kolkata")
+
+NIFTY_KEY = "NSE_INDEX|Nifty 50"
+BANKNIFTY_KEY = "NSE_INDEX|Nifty Bank"
+SENSEX_KEY = "BSE_INDEX|SENSEX"
+
+INDEX_CONFIG: dict[str, dict[str, Any]] = {
+    NIFTY_KEY: {"name": "NIFTY 50", "step": 50.0, "lot_size": 65, "symbol_prefix": "NIFTY"},
+    BANKNIFTY_KEY: {"name": "BANK NIFTY", "step": 100.0, "lot_size": 15, "symbol_prefix": "BANKNIFTY"},
+    SENSEX_KEY: {"name": "SENSEX", "step": 100.0, "lot_size": 10, "symbol_prefix": "SENSEX"},
+}
+
+
+class Strategy1GapEngine:
+    """
+    STRATEGY 1: Opening Gap Entry - First Positive Tick Strategy.
+    Runs strictly from 09:14:55 to 09:18:00 for market entry on first positive tick.
+    Positions trail dynamically (+5% trigger to cost, +2% per +3%) until Target (+40%),
+    Stop Loss (-20%), or 15:15:00 EOD Square-off.
+    Completely decoupled from Strategy 2.
+    """
+
+    def __init__(self, database=None, add_alert_cb=None):
+        self._lock = threading.RLock()
+        self.database = database
+        self.add_alert_cb = add_alert_cb
+
+        self.lock_time: str = "09:14:55"
+        self.entry_start_time: str = "09:15:00"
+        self.entry_end_time: str = "09:18:00"
+        self.mode: str = "paper"
+        self.order_buffer: float = 0.50
+
+        # State tracking per index
+        self.positions: dict[str, dict[str, Any] | None] = {k: None for k in INDEX_CONFIG}
+        self.path1_done: dict[str, bool] = {k: False for k in INDEX_CONFIG}
+        self.locked_contracts: dict[str, list[str]] = {k: [] for k in INDEX_CONFIG}
+        self.snapshot_ref_prices: dict[str, dict[str, float]] = {k: {} for k in INDEX_CONFIG}
+        self.state: dict[str, str] = {k: "ARMED" for k in INDEX_CONFIG}
+        self._trade_counter: int = 1
+
+    def set_add_alert(self, cb) -> None:
+        self.add_alert_cb = cb
+
+    def add_alert(self, alert_type: str, message: str, level: str = "INFO", details: dict[str, Any] | None = None) -> None:
+        if self.add_alert_cb:
+            try:
+                self.add_alert_cb(alert_type, message, level=level, details=details)
+            except Exception as e:
+                LOGGER.debug("Error in add_alert callback: %s", e)
+
+    def lock_contracts(self, underlying_key: str, basket_keys: list[str], hot_cache: dict[str, Any]) -> None:
+        """Locks 12 ITM contracts at 09:14:55 and records reference prices."""
+        with self._lock:
+            self.locked_contracts[underlying_key] = list(basket_keys)
+            ref_map = {}
+            for k in basket_keys:
+                c = hot_cache.get(k) or {}
+                ltp = float(c.get("ltp") or 0.0)
+                prev = float(c.get("prev_close") or c.get("bid_price") or 0.0)
+                ref_map[k] = ltp if ltp > 0 else prev
+            self.snapshot_ref_prices[underlying_key] = ref_map
+            self.state[underlying_key] = "LOCKED"
+            LOGGER.info("[Strategy 1] Locked %d contracts for %s at %s", len(basket_keys), underlying_key, self.lock_time)
+
+    def on_tick(
+        self,
+        tick: dict[str, Any],
+        hot_cache: dict[str, Any],
+        underlying_key: str,
+        t_recv_perf: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Evaluates incoming tick for Strategy 1 open position trailing exits or new positive tick entries."""
+        with self._lock:
+            now_dt = datetime.now(IST)
+            now_time_hms = now_dt.strftime("%H:%M:%S")
+            inst_key = tick.get("instrument_key") or ""
+            ltp = float(tick.get("ltp") or 0.0)
+            if ltp <= 0:
+                return None
+
+            pos = self.positions.get(underlying_key)
+
+            # 1. Manage Active Position (Trailing Stop Loss & Target Checks)
+            if pos and pos.get("status") == "OPEN":
+                if inst_key == pos.get("instrument_key"):
+                    return self._manage_trailing_position(pos, ltp, underlying_key, hot_cache)
+                return None
+
+            # 2. Check Positive Tick Entry Window (09:15:00 to 09:18:00 strictly)
+            if self.path1_done.get(underlying_key):
+                return None
+
+            if now_time_hms < self.entry_start_time:
+                return None
+
+            if now_time_hms >= self.entry_end_time:
+                self.path1_done[underlying_key] = True
+                return None
+
+            # Rule R8: First positive tick above reference price
+            ref_map = self.snapshot_ref_prices.get(underlying_key) or {}
+            ref_price = ref_map.get(inst_key)
+            if ref_price is not None and ref_price > 0 and ltp > ref_price:
+                cached_entry = hot_cache.get(inst_key) or {}
+                side = cached_entry.get("side") or ("CE" if "CE" in cached_entry.get("trading_symbol", "") else "PE")
+                
+                # Execute Strategy 1 Entry
+                trade = self._execute_entry(
+                    winner=cached_entry,
+                    side=side,
+                    underlying_key=underlying_key,
+                    trigger_ms=int(time.time() * 1000),
+                    t_recv_perf=t_recv_perf,
+                )
+                if trade:
+                    self.positions[underlying_key] = trade
+                    self.path1_done[underlying_key] = True
+                    self.state[underlying_key] = "HOLDING"
+                    return trade
+
+            return None
+
+    def _execute_entry(
+        self,
+        winner: dict[str, Any],
+        side: str,
+        underlying_key: str,
+        trigger_ms: int,
+        t_recv_perf: float | None = None,
+    ) -> dict[str, Any] | None:
+        now_dt = datetime.now(IST)
+        t_built_perf = time.perf_counter()
+        bot_latency_ms = round((t_built_perf - t_recv_perf) * 1000, 3) if t_recv_perf else 0.35
+
+        idx_cfg = INDEX_CONFIG.get(underlying_key, {})
+        lots = idx_cfg.get("lots", 1)
+        lot_sz = idx_cfg.get("lot_size", 65)
+        total_qty = lots * lot_sz
+
+        ask = float(winner.get("ask_price") or 0.0)
+        ltp = float(winner.get("ltp") or 0.0)
+        ref_price = ask if ask > 0 else (ltp if ltp > 0 else 0.0)
+        if ref_price <= 0.0:
+            return None
+
+        limit_price = round(round((ref_price + self.order_buffer) / 0.05) * 0.05, 2)
+        entry_price = ref_price if self.mode == "paper" else limit_price
+        sl_price = round(entry_price * 0.80, 2)   # -20% SL as per Dr. Bhilwade
+        tgt_price = round(entry_price * 1.40, 2)  # +40% Target
+
+        trade_id = f"GAP-{now_dt.strftime('%m%d%H%M%S')}-{self._trade_counter}"
+        self._trade_counter += 1
+
+        trade = {
+            "trade_id": trade_id,
+            "trade_date": now_dt.strftime("%Y-%m-%d"),
+            "strategy": "PATH_1_0915",
+            "entry_path": "PATH_1_0915",
+            "stop_loss_price": sl_price,
+            "target_price": tgt_price,
+            "timeout_time": "09:45:00",
+            "side": f"BUY_{side}",
+            "symbol": winner.get("trading_symbol") or f"{idx_cfg.get('name')} {winner.get('strike')} {side}",
+            "instrument_key": winner.get("instrument_key"),
+            "underlying_key": underlying_key,
+            "strike": winner.get("strike"),
+            "lots": lots,
+            "lot_size": total_qty,
+            "entry_time_ist": now_dt.strftime("%H:%M:%S.%f")[:-3],
+            "entry_price": entry_price,
+            "entry_timestamp_ms": trigger_ms,
+            "exit_time_ist": None,
+            "exit_price": None,
+            "exit_timestamp_ms": None,
+            "exit_reason": None,
+            "pnl_points": 0.0,
+            "net_pnl": 0.0,
+            "status": "OPEN",
+            "spot_price": winner.get("spot_price"),
+            "atm_strike": winner.get("strike"),
+            "current_price": entry_price,
+            "build_up": winner.get("build_up") or "Neutral",
+            "bot_latency_ms": bot_latency_ms,
+            "network_latency_ms": 0.0,
+        }
+
+        # Persist to DB
+        if self.database and hasattr(self.database, "insert_strategy_trade"):
+            try:
+                self.database.insert_strategy_trade(trade)
+            except Exception as e:
+                LOGGER.debug("Could not insert Strategy 1 trade to DB: %s", e)
+
+        self.add_alert(
+            "ENTRY_ORDER_FILLED",
+            f"ENTERED {trade['side']} {trade['symbol']} @ {entry_price:.2f} (First-tick 09:15, Lots: {lots}, SL: {sl_price:.2f}, Tgt: {tgt_price:.2f})",
+            level="INFO",
+            details={"underlying": underlying_key, "trade_id": trade_id, "side": trade["side"], "entry_price": entry_price, "lots": lots},
+        )
+        return trade
+
+    def _manage_trailing_position(
+        self,
+        pos: dict[str, Any],
+        ltp: float,
+        underlying_key: str,
+        hot_cache: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        entry_price = float(pos.get("entry_price") or 0.0)
+        if entry_price <= 0:
+            return None
+
+        # Check Target (+40%)
+        target_price = float(pos.get("target_price") or entry_price * 1.40)
+        if ltp >= target_price:
+            return self.exit_trade(pos, "TARGET_40PCT", underlying_key, exit_price=target_price)
+
+        # Update Highest Price & Stepped Trailing SL
+        highest_price = float(pos.get("highest_price") or entry_price)
+        if ltp > highest_price:
+            highest_price = ltp
+            pos["highest_price"] = highest_price
+
+            gain_pct = ((highest_price - entry_price) / entry_price) * 100.0
+            if gain_pct >= 5.0:
+                cost_sl = entry_price
+                steps = int((gain_pct - 5.0) / 3.0)
+                trailing_sl = round(cost_sl * (1.0 + (steps * 0.02)), 2)
+                cur_sl = float(pos.get("stop_loss_price") or 0.0)
+                if trailing_sl > cur_sl:
+                    pos["stop_loss_price"] = trailing_sl
+                    LOGGER.info("[Strategy 1] %s Trailing SL stepped up to ₹%.2f (+%.1f%% gain)", pos["symbol"], trailing_sl, gain_pct)
+
+        # Check Stop Loss Hit
+        effective_sl = float(pos.get("stop_loss_price") or entry_price * 0.80)
+        if ltp <= effective_sl:
+            reason = "TRAILING_STOP_LOSS" if effective_sl > entry_price * 0.80 else "STOP_LOSS_20PCT"
+            return self.exit_trade(pos, reason, underlying_key, exit_price=effective_sl)
+
+        return None
+
+    def exit_trade(self, pos: dict[str, Any], reason: str, underlying_key: str, exit_price: float | None = None) -> dict[str, Any]:
+        """Exits Strategy 1 trade and records exact P&L."""
+        now_dt = datetime.now(IST)
+        entry_price = float(pos["entry_price"])
+        if exit_price is None or exit_price <= 0:
+            exit_price = float(pos.get("current_price") or entry_price)
+
+        qty = int(pos.get("lot_size") or 1)
+        pnl_pts = round(exit_price - entry_price, 2)
+        net_pnl = round(pnl_pts * qty, 2)
+
+        pos["exit_time_ist"] = now_dt.strftime("%H:%M:%S.%f")[:-3]
+        pos["exit_price"] = exit_price
+        pos["exit_timestamp_ms"] = int(time.time() * 1000)
+        pos["exit_reason"] = reason
+        pos["pnl_points"] = pnl_pts
+        pos["net_pnl"] = net_pnl
+        pos["status"] = "CLOSED"
+
+        # Update in database
+        if self.database and hasattr(self.database, "update_strategy_trade_exit"):
+            try:
+                self.database.update_strategy_trade_exit(
+                    trade_id=pos["trade_id"],
+                    exit_time_ist=pos["exit_time_ist"],
+                    exit_price=exit_price,
+                    exit_timestamp_ms=pos["exit_timestamp_ms"],
+                    exit_reason=reason,
+                    pnl_points=pnl_pts,
+                    net_pnl=net_pnl,
+                )
+            except Exception as e:
+                LOGGER.debug("Could not update trade exit in DB: %s", e)
+
+        self.positions[underlying_key] = None
+        self.state[underlying_key] = "CLOSED"
+
+        self.add_alert(
+            "EXIT_ORDER_FILLED",
+            f"{pos['symbol']} EXITED ({reason}) @ {exit_price:.2f} | P&L: {pnl_pts:+.2f} pts (₹{net_pnl:+,.2f})",
+            level="INFO",
+            details={"underlying": underlying_key, "trade_id": pos["trade_id"], "exit_price": exit_price, "pnl": net_pnl},
+        )
+        return pos

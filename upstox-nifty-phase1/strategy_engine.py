@@ -13,6 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from database import MarketDatabase
+from instruments_master import UpstoxInstrumentsMaster
 from stock_screener import StockScreener, NIFTY_50_STOCKS
 
 LOGGER = logging.getLogger("strategy_engine")
@@ -27,70 +28,39 @@ DEFAULT_LOT_SIZE = 65
 
 INDEX_CONFIG: dict[str, dict[str, Any]] = {
     NIFTY_KEY: {"name": "NIFTY 50", "step": 50.0, "lot_size": 65, "symbol_prefix": "NIFTY", "futures_key": "NSE_FO|61471"},
-    BANKNIFTY_KEY: {"name": "BANK NIFTY", "step": 100.0, "lot_size": 15, "symbol_prefix": "BANKNIFTY", "futures_key": "NSE_FO|61466"},
-    SENSEX_KEY: {"name": "SENSEX", "step": 100.0, "lot_size": 10, "symbol_prefix": "SENSEX", "futures_key": ""},
+    BANKNIFTY_KEY: {"name": "BANK NIFTY", "step": 100.0, "lot_size": 30, "symbol_prefix": "BANKNIFTY", "futures_key": "NSE_FO|61466"},
+    SENSEX_KEY: {"name": "SENSEX", "step": 100.0, "lot_size": 20, "symbol_prefix": "SENSEX", "futures_key": ""},
 }
 
 # =========================================================================
-# THE 16 CONDITIONS DECISION TABLE (Section 4)
-# Pattern:
-# CE price UP and PE price DOWN gives CE Buy
-# PE price UP and CE price DOWN gives PE Buy
-# Both the same direction gives No trade
-# OI decides the stars and size
+# STRATEGY 1 & STRATEGY 2 DUAL TRADING ARCHITECTURE
+# Strategy 1 (Indices): 09:14:55 Lock & 09:15:00-09:18:00 First Positive Tick Entry
+# Strategy 2 (Indices & 50 Stocks): Dr. Vijay Bhilwade Sum Signal (Score = CE% - PE%)
+#   - Indices: ATM ± 10 (21 CE + 21 PE = 42 contracts per index)
+#   - Stocks: ATM ± 5 (11 CE + 11 PE = 22 contracts per stock) across all 50 Nifty stocks
+#   - Live 1 to 50 Ranking & Top 3 Bullish / Bottom 3 Bearish 300s Whipsaw Entry
+#   - Stepped Trailing SL (-20% SL, +40% Target, +5% to Cost, +2% per +3% profit)
+#   - Non-cutting Position Management (Active trades never cut on rank changes)
 # =========================================================================
-DECISION_TABLE: dict[tuple[str, str], dict[str, Any]] = {
-    # 1. SC, SB -> CE Buy, ⭐⭐⭐, full lots
-    ("SC", "SB"): {"rule": 1, "decision": "CE Buy", "side": "CE", "stars": "⭐⭐⭐", "size": "full"},
-    # 2. LB, SB -> CE Buy, ⭐⭐, normal lots
-    ("LB", "SB"): {"rule": 2, "decision": "CE Buy", "side": "CE", "stars": "⭐⭐", "size": "normal"},
-    # 3. LB, LU -> CE Buy, ⭐⭐, normal lots
-    ("LB", "LU"): {"rule": 3, "decision": "CE Buy", "side": "CE", "stars": "⭐⭐", "size": "normal"},
-    # 4. SC, LU -> CE Buy, ⭐⭐, quick scalp
-    ("SC", "LU"): {"rule": 4, "decision": "CE Buy", "side": "CE", "stars": "⭐⭐", "size": "scalp"},
-    # 5. SB, SC -> PE Buy, ⭐⭐⭐, full lots
-    ("SB", "SC"): {"rule": 5, "decision": "PE Buy", "side": "PE", "stars": "⭐⭐⭐", "size": "full"},
-    # 6. SB, LB -> PE Buy, ⭐⭐, normal lots
-    ("SB", "LB"): {"rule": 6, "decision": "PE Buy", "side": "PE", "stars": "⭐⭐", "size": "normal"},
-    # 7. LU, LB -> PE Buy, ⭐⭐, normal lots
-    ("LU", "LB"): {"rule": 7, "decision": "PE Buy", "side": "PE", "stars": "⭐⭐", "size": "normal"},
-    # 8. LU, SC -> PE Buy, ⭐⭐, quick scalp
-    ("LU", "SC"): {"rule": 8, "decision": "PE Buy", "side": "PE", "stars": "⭐⭐", "size": "scalp"},
-    # 9. LB, LB -> No trade (both premiums rising, IV spike)
-    ("LB", "LB"): {"rule": 9, "decision": "No trade", "side": None, "stars": "", "size": "", "note": "both premiums rising, IV spike"},
-    # 10. LB, SC -> No trade (both rising)
-    ("LB", "SC"): {"rule": 10, "decision": "No trade", "side": None, "stars": "", "size": "", "note": "both rising"},
-    # 11. SC, LB -> No trade (both rising)
-    ("SC", "LB"): {"rule": 11, "decision": "No trade", "side": None, "stars": "", "size": "", "note": "both rising"},
-    # 12. SC, SC -> No trade (both rising)
-    ("SC", "SC"): {"rule": 12, "decision": "No trade", "side": None, "stars": "", "size": "", "note": "both rising"},
-    # 13. SB, SB -> No trade (both falling, range market)
-    ("SB", "SB"): {"rule": 13, "decision": "No trade", "side": None, "stars": "", "size": "", "note": "both falling, range market"},
-    # 14. SB, LU -> No trade (both falling)
-    ("SB", "LU"): {"rule": 14, "decision": "No trade", "side": None, "stars": "", "size": "", "note": "both falling"},
-    # 15. LU, SB -> No trade (both falling)
-    ("LU", "SB"): {"rule": 15, "decision": "No trade", "side": None, "stars": "", "size": "", "note": "both falling"},
-    # 16. LU, LU -> No trade (both falling, dead market)
-    ("LU", "LU"): {"rule": 16, "decision": "No trade", "side": None, "stars": "", "size": "", "note": "both falling, dead market"},
-}
 
 
 class GapEntryStrategyEngine:
     """
-    Opening Gap Entry Bot - First Positive Tick Strategy (NIFTY 50, BANK NIFTY, SENSEX).
-    Rules & Data Flow as per Gap_Entry_Strategy_Rules_and_Architecture.md v2.1.
+    Unified Production Strategy Engine (Indices & All 50 NIFTY Constituent Stocks).
     
-    Active Strategy (Indices):
-    - 09:00 to 09:14:55: Dynamic 8 ITM strikes calculation (4 CE ITM below spot, 4 PE ITM above spot)
-    - 09:14:55: Lock the 8 contracts and store ref_ltp for each contract (fixed for the day)
-    - 09:15:00: Market open -> State transitions to ARMED
-    - From 09:15:00: First positive tick (LTP > ref_ltp) triggers immediate entry order
-      on the winning ITM strike with tightest bid-ask spread
-    - Exit: Manual exit, or automatic square-off at 15:15:00
+    1. Strategy 1 (Indices: NIFTY 50, BANK NIFTY, SENSEX):
+       - 09:14:55: Lock ATM ± 10 contracts (42 options) and store fixed reference prices.
+       - 09:15:00 to 09:18:00: Market open -> State transitions to ARMED.
+       - First positive tick (LTP > ref_ltp) enters winning contract on tightest spread.
+       - Stop Loss -20%, Target +40%, Stepped Trailing SL, 15:15:00 EOD Square-off.
     
-    Preserved Strategy:
-    - The 09:18 OI Build-up 16-condition table strategy is preserved in comments/backup as requested.
-    - Constituent stock options evaluate via the 09:18 OI buildup table.
+    2. Strategy 2 (All 53 Underlyings: 3 Indices + 50 NIFTY Stocks):
+       - 09:15:00: Unified Baseline Sum freeze (CE sum & PE sum fixed for the day).
+       - Live Score = CE % Change - PE % Change (evaluated every second).
+       - Stocks Live 1 to 50 Ranking:
+           * Top 3 Bullish (Rank 1, 2, 3): BUY CE (ITM-2) with 300s whipsaw confirmation.
+           * Bottom 3 Bearish (Rank 48, 49, 50): BUY PE (ITM-2) with 300s whipsaw confirmation.
+       - Active positions are NEVER closed due to ranking changes; managed strictly on SL/TP/Reversal.
     """
 
     def __init__(
@@ -119,12 +89,32 @@ class GapEntryStrategyEngine:
         self.lots_full: int = 1    # ⭐⭐⭐ full lots (user-configurable, default 1)
         self.lots_normal: int = 1  # ⭐⭐ normal lots (user-configurable, default 1)
         self.lots_scalp: int = 1   # ⭐⭐ quick scalp (user-configurable, default 1)
-        self.max_trades_per_day: int = 3  # Phase 3: Limit raised from 1 to 3 trades per index per day
-        self.daily_loss_limit_inr: float = 10000.0  # Phase 3: Daily loss limit per index
-        self.stock_max_trades_per_day: int = 3  # Max 3 trades per stock per day
-        self.max_bullish_stocks: int = 5  # Pre-defined count of bullish stocks to trade today
-        self.max_bearish_stocks: int = 5  # Pre-defined count of bearish stocks to trade today
+        self.max_trades_per_day: int = 3
+        self.daily_loss_limit_inr: float = 10000.0
+        self.stock_max_trades_per_day: int = 3
+        self.max_bullish_stocks: int = 3
+        self.max_bearish_stocks: int = 3
         self.today_trades_count: int = 0
+
+        # Configurable Strategy Brief Parameters (Dr. Bhilwade 24-11-2026 & 27-11-2026 Review)
+        self.entry_itm_depth: int = 2
+        self.min_entry_premium: float = 50.0
+        self.max_entry_premium: float = 2500.0
+        self.whipsaw_sec: float = 300.0
+        self.max_stock_spread_pct: float = 5.0
+        self.min_stock_basket_premium: float = 5.0
+        self.allow_double_exposure: bool = False
+
+        # O(1) fast key -> underlying lookup table (crucial for 1,200+ streaming keys)
+        self._key_to_underlying: dict[str, str] = {}
+        self._stock_rankings: list[dict[str, Any]] = []
+        self._top_bullish: list[dict[str, Any]] = []
+        self._top_bearish: list[dict[str, Any]] = []
+        self._last_stock_rank_ts: float = 0.0
+        self._last_rank_emit_ts: float = 0.0
+
+        # Daily Upstox Instruments Master (single download, dynamic official exchange lot sizes)
+        self.instruments_master = UpstoxInstrumentsMaster(base_dir)
 
         # Phase 3: Live Alerts system
         self.alerts: list[dict[str, Any]] = []
@@ -132,6 +122,10 @@ class GapEntryStrategyEngine:
         self._alert_flags: set[str] = set()
         self.last_tick_time: float = time.time()
         self._active_stock_option_keys: set[str] = set()
+
+        # Live Percentage Momentum History (Second-by-second changes in CE %, PE %, and Score)
+        self.momentum_history: list[dict[str, Any]] = []
+        self._momentum_lock = threading.Lock()
 
         # Priority 1: Stock order pacing (50ms interval = max 20 orders/sec to prevent broker HTTP 429)
         # Priority 0: Indices bypass pacing completely with zero delay
@@ -147,8 +141,8 @@ class GapEntryStrategyEngine:
         }
         self.index_lot_sizes: dict[str, int] = {
             "NSE_INDEX|Nifty 50": 65,
-            "NSE_INDEX|Nifty Bank": 15,
-            "BSE_INDEX|SENSEX": 10,
+            "NSE_INDEX|Nifty Bank": 30,
+            "BSE_INDEX|SENSEX": 20,
         }
         self.index_enabled: dict[str, bool] = {
             "NSE_INDEX|Nifty 50": True,
@@ -191,7 +185,7 @@ class GapEntryStrategyEngine:
         self.ce_by_underlying: dict[str, dict[float, dict[str, Any]]] = {}
         self.pe_by_underlying: dict[str, dict[float, dict[str, Any]]] = {}
 
-        # 8 Locked ITM Contracts (4 CE + 4 PE)
+        # Locked Basket Contracts (ATM ± 10 for Indices: 21 CE + 21 PE = 42 contracts per index)
         self.planned_keys: list[str] = []
         self.locked_keys: list[str] = []
         self.locked_at_ms: int | None = None
@@ -377,6 +371,12 @@ class GapEntryStrategyEngine:
                         if ukey == NIFTY_KEY:
                             self.path1_done = True
                         LOGGER.info("Auto-armed index %s on startup at spot %.2f (Path 1 marked completed for mid-day start)", ukey, spot)
+                        self.add_alert(
+                            "INDEX_ARMED",
+                            f"{idx_st['name']}: ARMED at spot ₹{spot:.2f} (Mid-day start - Path 2 Sum Signal active)",
+                            level="INFO",
+                            details={"underlying": ukey, "spot": spot},
+                        )
 
             for sym, st in self.stock_underlyings.items():
                 if st.get("enabled", True) and st.get("state") in ("SETUP", "PLANNING"):
@@ -419,9 +419,19 @@ class GapEntryStrategyEngine:
                         if "lots_scalp" in data:
                             self.lots_scalp = max(1, int(data["lots_scalp"]))
                         if "max_bullish_stocks" in data:
-                            self.max_bullish_stocks = max(1, min(5, int(data["max_bullish_stocks"])))
+                            self.max_bullish_stocks = max(1, min(10, int(data["max_bullish_stocks"])))
                         if "max_bearish_stocks" in data:
-                            self.max_bearish_stocks = max(1, min(5, int(data["max_bearish_stocks"])))
+                            self.max_bearish_stocks = max(1, min(10, int(data["max_bearish_stocks"])))
+                        if "entry_itm_depth" in data:
+                            self.entry_itm_depth = max(1, min(5, int(data["entry_itm_depth"])))
+                        if "min_entry_premium" in data:
+                            self.min_entry_premium = max(1.0, float(data["min_entry_premium"]))
+                        if "max_entry_premium" in data:
+                            self.max_entry_premium = max(50.0, float(data["max_entry_premium"]))
+                        if "whipsaw_sec" in data:
+                            self.whipsaw_sec = max(10.0, float(data["whipsaw_sec"]))
+                        if "allow_double_exposure" in data:
+                            self.allow_double_exposure = bool(data["allow_double_exposure"])
                         if NIFTY_KEY in self.index_lots:
                             self.lots = self.index_lots[NIFTY_KEY]
                         if hasattr(self, "index_underlyings"):
@@ -430,7 +440,8 @@ class GapEntryStrategyEngine:
                                     idx_st["lots"] = self.index_lots[ukey]
                                 if ukey in self.index_enabled:
                                     idx_st["enabled"] = self.index_enabled[ukey]
-                LOGGER.info("Loaded index config from %s: lots=%s, enabled=%s", self.lots_file, self.index_lots, self.index_enabled)
+                                idx_st["whipsaw_sec"] = self.whipsaw_sec
+                LOGGER.info("Loaded config from %s: lots=%s, ITM=%d, prem=[%.0f,%.0f], whipsaw=%.0fs", self.lots_file, self.index_lots, self.entry_itm_depth, self.min_entry_premium, self.max_entry_premium, self.whipsaw_sec)
             except Exception as exc:
                 LOGGER.warning("Could not load index_lots.json: %s", exc)
 
@@ -443,8 +454,13 @@ class GapEntryStrategyEngine:
                     "lots_full": self.lots_full,
                     "lots_normal": self.lots_normal,
                     "lots_scalp": self.lots_scalp,
-                    "max_bullish_stocks": getattr(self, "max_bullish_stocks", 5),
-                    "max_bearish_stocks": getattr(self, "max_bearish_stocks", 5),
+                    "max_bullish_stocks": getattr(self, "max_bullish_stocks", 3),
+                    "max_bearish_stocks": getattr(self, "max_bearish_stocks", 3),
+                    "entry_itm_depth": getattr(self, "entry_itm_depth", 2),
+                    "min_entry_premium": getattr(self, "min_entry_premium", 50.0),
+                    "max_entry_premium": getattr(self, "max_entry_premium", 2500.0),
+                    "whipsaw_sec": getattr(self, "whipsaw_sec", 300.0),
+                    "allow_double_exposure": getattr(self, "allow_double_exposure", False),
                 }
                 with open(self.lots_file, "w", encoding="utf-8") as f:
                     json.dump(payload, f, indent=2)
@@ -487,11 +503,44 @@ class GapEntryStrategyEngine:
                     LOGGER.debug("Could not persist alert to database: %s", ex)
 
             LOGGER.info("[ALERT] [%s] %s: %s", level, alert_type, message)
+            if hasattr(self, "on_alert") and callable(self.on_alert):
+                try:
+                    self.on_alert(alert)
+                except Exception as cb_err:
+                    LOGGER.debug("on_alert callback error: %s", cb_err)
             return alert
 
     def get_alerts(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._alerts_lock:
             return list(reversed(self.alerts[-limit:]))
+
+    def get_momentum_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._momentum_lock:
+            if self.momentum_history:
+                return list(reversed(self.momentum_history[-limit:]))
+        if hasattr(self, "database") and self.database:
+            try:
+                today_s = datetime.now(IST).strftime("%Y-%m-%d")
+                db_logs = self.database.get_momentum_logs(date=today_s, limit=limit)
+                return [{
+                    "id": f"db_{l.get('id')}",
+                    "time": l.get("timestamp_ist", ""),
+                    "key": l.get("underlying_key", ""),
+                    "name": l.get("index_name", ""),
+                    "ce_pct": float(l.get("ce_pct") or 0.0),
+                    "prev_ce_pct": float(l.get("prev_ce_pct") or 0.0),
+                    "delta_ce": float(l.get("delta_ce") or 0.0),
+                    "pe_pct": float(l.get("pe_pct") or 0.0),
+                    "prev_pe_pct": float(l.get("prev_pe_pct") or 0.0),
+                    "delta_pe": float(l.get("delta_pe") or 0.0),
+                    "score": round(float(l.get("ce_pct") or 0.0) - float(l.get("pe_pct") or 0.0), 2),
+                    "raw_signal": l.get("raw_signal", "Neutral"),
+                    "hold_sec": l.get("hold_sec", 0),
+                    "confirmed": bool(l.get("confirmed")),
+                } for l in db_logs]
+            except Exception:
+                pass
+        return []
 
     def _log_signal_audit(
         self,
@@ -611,6 +660,17 @@ class GapEntryStrategyEngine:
         # 3. Legacy locked keys
         idx_keys.extend(self.locked_keys or self.planned_keys or [])
 
+        # 4. Open position contracts (for live Trade Book P&L only — strictly EXCLUDED from Sum Signal basket)
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        if hasattr(self, "database") and self.database:
+            try:
+                open_trades = self.database.get_strategy_trades(limit=50, trade_date=today_str)
+                for ot in open_trades:
+                    if ot.get("status") == "OPEN" and ot.get("instrument_key"):
+                        idx_keys.append(ot["instrument_key"])
+            except Exception:
+                pass
+
         idx_uniq = list(dict.fromkeys([k for k in idx_keys if k]))
         stk_uniq = list(dict.fromkeys([k for k in stk_keys if k]))
 
@@ -635,62 +695,182 @@ class GapEntryStrategyEngine:
             except Exception as e:
                 LOGGER.debug("Could not pre-load contracts for %s: %s", ukey, e)
 
+    # -------------------------------------------------------------------------
+    # 50 NIFTY Constituent Stocks Universe Management (Section 1-4 of Brief)
+    # -------------------------------------------------------------------------
+    def _refresh_dynamic_lot_sizes(self) -> None:
+        """Syncs official exchange lot sizes from Upstox Daily Instruments Master."""
+        try:
+            for ukey, cfg in INDEX_CONFIG.items():
+                live_lot = self.instruments_master.get_lot_size(cfg["symbol_prefix"], default=cfg["lot_size"])
+                if live_lot > 0:
+                    self.index_lot_sizes[ukey] = live_lot
+                    if ukey in self.index_underlyings:
+                        self.index_underlyings[ukey]["lot_size"] = live_lot
+                    if ukey == NIFTY_KEY:
+                        self.lot_size = live_lot
+        except Exception as exc:
+            LOGGER.debug("Dynamic lot size refresh skipped: %s", exc)
+
     def load_stock_configs(self) -> None:
-        """Bypassed: Strategy engine operates strictly in Indices-Only Mode."""
+        """Initializes all 50 NIFTY constituent stocks (with official lot sizes) for Sum Signal Ranking & Trading."""
         with self._lock:
-            self.stock_underlyings = {}
-            LOGGER.info("Stock processing bypassed: Engine operating strictly for Indices (NIFTY, BANK NIFTY, SENSEX).")
+            for meta in NIFTY_50_STOCKS:
+                sym = meta["symbol"].upper()
+                eq_key = meta["key"]
+                lot_sz = meta["lot_size"]
+                if sym not in self.stock_underlyings:
+                    self.stock_underlyings[sym] = {
+                        "key": eq_key,
+                        "symbol": sym,
+                        "name": sym,
+                        "step": float(meta.get("strike_step") or 10.0),
+                        "lot_size": lot_sz,
+                        "lots": 1,
+                        "enabled": True,
+                        "spot_price": None,
+                        "prev_close": None,
+                        "atm_strike": None,
+                        "state": "SETUP",
+                        "planned_keys": [],
+                        "locked_keys": [],
+                        "atm_plus_minus_keys": [],
+                        "ce_basket_keys": [],
+                        "pe_basket_keys": [],
+                        "baseline_prices": {},
+                        "ce_baseline_sum": 0.0,
+                        "pe_baseline_sum": 0.0,
+                        "ce_current_sum": 0.0,
+                        "pe_current_sum": 0.0,
+                        "baseline_locked": False,
+                        "snapshot_taken": False,
+                        "snapshot": {},
+                        "ce_pct": 0.0,
+                        "pe_pct": 0.0,
+                        "score": 0.0,
+                        "rank": 0,
+                        "raw_signal": "Neutral",
+                        "candidate_signal": None,
+                        "candidate_start_time": None,
+                        "hold_elapsed_sec": 0.0,
+                        "confirmed_signal": None,
+                        "cooldown_until": None,
+                        "last_closed_side": None,
+                        "whipsaw_sec": float(getattr(self, "whipsaw_sec", 300.0)),
+                        "current_position": None,
+                        "path2_position": None,
+                        "today_trades_count": 0,
+                        "realized_pnl": 0.0,
+                        "daily_loss_limit_inr": self.daily_loss_limit_inr,
+                        "max_trades_per_day": self.stock_max_trades_per_day,
+                        "last_evaluation": {"decision": "WAIT", "raw_signal": "Neutral", "score": 0.0},
+                    }
+                    self._key_to_underlying[eq_key] = sym
 
-    def plan_stock_contracts(self, stock_sym: str, spot: float | None = None) -> list[str]:
-        """Plans 8 ITM contracts for a constituent stock and subscribes to feed."""
-        stock_sym = stock_sym.upper()
-        stock_state = self.stock_underlyings.get(stock_sym)
-        if not stock_state or not stock_state.get("enabled", True):
+    def plan_all_stocks(self) -> None:
+        """Plans ATM +- 5 (22 strikes = 11 CE + 11 PE) for all 50 NIFTY stocks using Upstox Daily Master."""
+        with self._lock:
+            self._refresh_dynamic_lot_sizes()
+            all_sub_keys: list[str] = []
+            for sym, st in self.stock_underlyings.items():
+                if not st.get("enabled", True):
+                    continue
+                if st.get("planned_keys"):
+                    continue
+                spot = st.get("spot_price")
+                if not spot or float(spot) <= 0:
+                    continue
+                keys = self.plan_stock_contracts(sym, float(spot), subscribe_now=False)
+                if keys:
+                    all_sub_keys.extend(keys)
+
+            if all_sub_keys and self.feed and hasattr(self.feed, "subscribe"):
+                try:
+                    self.feed.subscribe(all_sub_keys, target="stocks")
+                except Exception as exc:
+                    LOGGER.debug("Batch stock subscribe failed: %s", exc)
+
+    def plan_stock_contracts(self, sym: str, spot: float, subscribe_now: bool = True) -> list[str]:
+        """Plans ATM +- 5 (11 CE + 11 PE = 22 strikes) for a stock from Upstox Master."""
+        st = self.stock_underlyings.get(sym)
+        if not st or spot <= 0:
             return []
 
-        if spot is not None and spot > 0:
-            stock_state["spot_price"] = spot
-        elif stock_state.get("spot_price") and float(stock_state["spot_price"]) > 0:
-            spot = float(stock_state["spot_price"])
-        elif stock_state.get("prev_close") and float(stock_state["prev_close"]) > 0:
-            spot = float(stock_state["prev_close"])
-        elif stock_state.get("open_price") and float(stock_state["open_price"]) > 0:
-            spot = float(stock_state["open_price"])
+        if sym not in self.ce_by_underlying or not self.ce_by_underlying[sym]:
+            exp, official_lot, contracts = self.instruments_master.get_nearest_options(sym)
+            if contracts:
+                st["lot_size"] = official_lot
+                self.expiries_by_underlying[sym] = exp
+                self.contracts_by_underlying[sym] = contracts
+                ce_m: dict[float, dict[str, Any]] = {}
+                pe_m: dict[float, dict[str, Any]] = {}
+                for c in contracts:
+                    c["underlying_key"] = sym
+                    k = c.get("instrument_key")
+                    stk = float(c.get("strike_price") or 0.0)
+                    itype = str(c.get("instrument_type") or "").upper()
+                    if k:
+                        self.contracts_by_key[k] = c
+                    if itype == "CE":
+                        ce_m[stk] = c
+                    elif itype == "PE":
+                        pe_m[stk] = c
+                self.ce_by_underlying[sym] = ce_m
+                self.pe_by_underlying[sym] = pe_m
 
-        res = self.stock_screener.plan_stock_itm_contracts(stock_sym, spot)
-        if not res or "error" in res:
-            LOGGER.warning("Could not plan ITM contracts for %s: %s", stock_sym, res.get("error") if res else "None")
+        ce_dict = self.ce_by_underlying.get(sym, {})
+        pe_dict = self.pe_by_underlying.get(sym, {})
+        if not ce_dict or not pe_dict:
             return []
 
-        planned_list = res.get("planned_contracts") or []
-        keys = []
-        for c in planned_list:
-            k = c.get("instrument_key")
-            if not k:
-                continue
-            keys.append(k)
-            self.contracts_by_key[k] = {
-                "instrument_key": k,
-                "trading_symbol": c.get("symbol") or k,
-                "strike_price": c.get("strike"),
-                "instrument_type": c.get("side"),
-                "lot_size": c.get("lot_size", stock_state["lot_size"]),
-                "underlying_key": stock_sym,
-            }
+        all_strikes = sorted(set(ce_dict.keys()) & set(pe_dict.keys()))
+        if not all_strikes:
+            all_strikes = sorted(set(ce_dict.keys()) | set(pe_dict.keys()))
+        if not all_strikes:
+            return []
+
+        atm_strike = min(all_strikes, key=lambda s: abs(s - spot))
+        atm_idx = all_strikes.index(atm_strike)
+        start_idx = max(0, atm_idx - 5)
+        end_idx = min(len(all_strikes), start_idx + 11)
+        if end_idx - start_idx < 11 and len(all_strikes) >= 11:
+            start_idx = max(0, end_idx - 11)
+        window_strikes = all_strikes[start_idx:end_idx]
+
+        ce_keys: list[str] = []
+        pe_keys: list[str] = []
+        keys: list[str] = []
+        for s in window_strikes:
+            if s in ce_dict and ce_dict[s].get("instrument_key"):
+                ck = ce_dict[s]["instrument_key"]
+                ce_keys.append(ck)
+                keys.append(ck)
+            if s in pe_dict and pe_dict[s].get("instrument_key"):
+                pk = pe_dict[s]["instrument_key"]
+                pe_keys.append(pk)
+                keys.append(pk)
+
+        st["planned_keys"] = keys
+        st["ce_basket_keys"] = ce_keys
+        st["pe_basket_keys"] = pe_keys
+        st["atm_plus_minus_keys"] = list(keys)
+        st["atm_strike"] = atm_strike
+        if st["state"] == "SETUP":
+            st["state"] = "PLANNING"
+
+        for k in keys:
+            self._key_to_underlying[k] = sym
             if k not in self.hot_cache:
+                c = self.contracts_by_key.get(k, {})
                 self.hot_cache[k] = {
                     "instrument_key": k,
-                    "trading_symbol": c.get("symbol") or k,
-                    "underlying_key": stock_sym,
-                    "strike": float(c.get("strike") or 0.0),
-                    "side": str(c.get("side") or "").upper(),
+                    "trading_symbol": c.get("trading_symbol") or k,
+                    "underlying_key": sym,
+                    "strike": float(c.get("strike_price") or 0.0),
+                    "side": str(c.get("instrument_type") or "").upper(),
                     "ref_ltp": None,
                     "ref_source": None,
                     "prev_close": 0.0,
-                    "prev_oi": 0.0,
-                    "oi": None,
-                    "build_up": "Neutral",
-                    "build_up_class": "bu-neutral",
                     "ltp": None,
                     "bid_price": 0.0,
                     "bid_qty": 0.0,
@@ -701,673 +881,116 @@ class GapEntryStrategyEngine:
                     "last_quote_ms": None,
                 }
 
-        stock_state["planned_keys"] = keys
-        if stock_state.get("state") == "SETUP":
-            stock_state["state"] = "PLANNING"
-
-        extra_keys = []
-        if stock_state.get("key"):
-            extra_keys.append(stock_state["key"])
-        if stock_state.get("futures_key"):
-            extra_keys.append(stock_state["futures_key"])
-
-        # JIT: Subscribe only cash equity and futures upfront, preventing 400 option saturation
-        if self.feed and hasattr(self.feed, "subscribe") and extra_keys:
-            self.feed.subscribe(extra_keys, target="stocks")
-
-        LOGGER.info("Planned 8 ITM contracts for %s: %s", stock_sym, keys)
+        if subscribe_now and keys and self.feed and hasattr(self.feed, "subscribe"):
+            self.feed.subscribe(keys, target="stocks")
         return keys
 
-    def lock_stock_contracts(self, stock_sym: str) -> None:
-        stock_sym = stock_sym.upper()
-        st = self.stock_underlyings.get(stock_sym)
+    def lock_stock_contracts(self, sym: str) -> None:
+        st = self.stock_underlyings.get(sym)
         if not st or not st.get("enabled", True):
             return
         if not st.get("planned_keys") and st.get("spot_price"):
-            self.plan_stock_contracts(stock_sym, st["spot_price"])
-        if not st.get("planned_keys"):
+            self.plan_stock_contracts(sym, float(st["spot_price"]), subscribe_now=False)
+        p_keys = st.get("planned_keys") or []
+        if not p_keys:
             return
-        st["locked_keys"] = list(st["planned_keys"])
-        for k in st["locked_keys"]:
-            entry = self.hot_cache.get(k)
-            if entry:
-                if entry.get("ltp") is not None and float(entry["ltp"]) > 0:
-                    entry["ref_ltp"] = float(entry["ltp"])
-                    entry["ref_source"] = "ltp"
-                else:
-                    entry["ref_ltp"] = float(entry.get("bid_price") or 0.0)
-                    entry["ref_source"] = "bid"
+        st["locked_keys"] = list(p_keys)
         st["state"] = "LOCKED"
-        LOGGER.info("LOCKED 8 contracts for %s: %s", stock_sym, st["locked_keys"])
-
-    def take_stock_snapshot(self, stock_sym: str) -> None:
-        """
-        09:15:00 Snapshot for stock:
-        - Snapshots 09:15 Open Price from live cash tick.
-        - Checks Gap filter against yesterday's direction (Skip stock if gap > 0.3% against).
-        - Checks Exhaustion Gap Cap (Skip stock if abs(gap) > 2.5%).
-        - Transitions state to ARMED for Path 1.
-        """
-        stock_sym = stock_sym.upper()
-        st = self.stock_underlyings.get(stock_sym)
-        if not st or not st.get("enabled", True):
-            return
-
-        # 09:15 Open Price
-        open_p = float(st.get("spot_price") or self.hot_cache.get(st.get("key", ""), {}).get("ltp") or 0.0)
-        st["open_price"] = open_p
-
-        # Gap filter against yesterday's direction (Rules 4 & 5) + 2.5% Exhaustion Cap
-        prev_c = float(st.get("prev_close") or self.hot_cache.get(st.get("key", ""), {}).get("prev_close") or 0.0)
-        if prev_c > 0 and open_p > 0:
-            gap_pct = ((open_p - prev_c) / prev_c) * 100.0
-            st["gap_pct"] = round(gap_pct, 2)
-            dir_pref = str(st.get("watchlist_direction") or "BULLISH").upper()
-            if abs(gap_pct) > 2.5:
-                st["gap_against"] = True
-                st["gap_reason"] = f"Exhaustion gap {gap_pct:+.2f}% exceeds 2.5% cap"
-                LOGGER.info("Stock %s - SKIPPED for Path 1: %s", stock_sym, st["gap_reason"])
-            elif dir_pref == "BULLISH" and gap_pct < -0.3:
-                st["gap_against"] = True
-                st["gap_reason"] = f"Gapped down {gap_pct:.2f}% (> 0.3%) against BULLISH direction"
-                LOGGER.info("Stock %s BULLISH - SKIPPED for Path 1: %s", stock_sym, st["gap_reason"])
-            elif dir_pref == "BEARISH" and gap_pct > 0.3:
-                st["gap_against"] = True
-                st["gap_reason"] = f"Gapped up +{gap_pct:.2f}% (> 0.3%) against BEARISH direction"
-                LOGGER.info("Stock %s BEARISH - SKIPPED for Path 1: %s", stock_sym, st["gap_reason"])
-            else:
-                st["gap_against"] = False
-                st["gap_reason"] = ""
-
-        # Option snapshot if contracts already planned
-        keys = st.get("locked_keys") or st.get("planned_keys") or []
-        snap = {}
-        for k in keys:
-            entry = self.hot_cache.get(k, {})
-            ltp = float(entry.get("ltp") or entry.get("ref_ltp") or 0.0)
-            oi = float(entry.get("oi") or entry.get("prev_oi") or 0.0)
-            bid = float(entry.get("bid_price") or 0.0)
-            ask = float(entry.get("ask_price") or 0.0)
-            snap[k] = {
-                "ltp": ltp,
-                "oi": oi,
-                "bid": bid,
-                "ask": ask,
-                "strike": float(entry.get("strike") or 0.0),
-                "side": entry.get("side"),
-            }
-        st["snapshot"] = snap
-
-        # Futures snapshot
-        fut_k = st.get("futures_key")
-        if fut_k and fut_k in self.hot_cache:
-            st["futures_snap_ltp"] = float(self.hot_cache[fut_k].get("ltp") or 0.0)
-            st["futures_snap_oi"] = float(self.hot_cache[fut_k].get("oi") or 0.0)
-
-        st["snapshot_taken"] = True
-        st["state"] = "ARMED"
-        LOGGER.info(
-            "SNAPSHOT taken at 09:15:00 for %s (Open=%.2f, Gap=%.2f%%, GapAgainst=%s)",
-            stock_sym,
-            open_p,
-            st.get("gap_pct", 0.0),
-            st.get("gap_against", False),
-        )
-
-    def _pace_stock_order_dispatch(self) -> float:
-        """
-        Enforces micro-pacing (50ms spacing / max 20 orders/sec) for Priority 1 stock orders.
-        Indices are Priority 0 and bypass this completely with zero delay.
-        Thread-safe: Uses _stock_pace_lock so index order processing is never blocked.
-        """
-        with self._stock_pace_lock:
-            now = time.time()
-            elapsed = now - self._last_stock_order_time
-            if elapsed < self.stock_order_interval_sec:
-                sleep_needed = self.stock_order_interval_sec - elapsed
-                time.sleep(sleep_needed)
-            self._last_stock_order_time = time.time()
-            return self._last_stock_order_time
-
-    def _execute_stock_path1_entry(
-        self,
-        stock_sym: str,
-        side: str,
-        trigger_ms: int | None = None,
-    ) -> dict[str, Any] | None:
-        """
-        Path 1: 09:15 First-Tick Entry (only for watchlist stocks ranked ★★★ or ★★★★).
-        - Skip if opened > 0.3% against yesterday's direction.
-        - Buy ATM CE on first tick above open (Bullish).
-        - Buy ATM PE on first tick below open (Bearish).
-        - Rule 9 Futures Gate: Re-confirm futures direction (CE requires not SB/LU; PE requires not LB/SC).
-        - Difference 4 Spread Guard: Reject if bid-ask spread > 3.0%.
-        - Priority 1 Micro-Pacing: 50ms spacing (max 20 orders/sec) to prevent Upstox HTTP 429.
-        - Fill at live ask. Stop-loss 25%, target 40%, cutoff 09:45. Max 1 09:15 entry per stock.
-        """
-        stock_sym = stock_sym.upper()
-        st = self.stock_underlyings.get(stock_sym)
-        if not st or not st.get("enabled", True):
-            return None
-
-        now_dt = datetime.now(IST)
-        now_time_hms = now_dt.strftime("%H:%M:%S")
-        if self.re_eval_min_interval_sec > 0 and now_time_hms >= self.entry_start_time:
-            st["path1_done"] = True
-            st["path1_evaluating"] = False
-            return None
-
-        if st.get("gap_against"):
-            st["path1_done"] = True
-            st["path1_evaluating"] = False
-            return None
-        rank = st.get("watchlist_rank", "★★★")
-        if rank not in ("★★★", "★★★★"):
-            st["path1_done"] = True
-            st["path1_evaluating"] = False
-            return None
-        if st.get("current_position") is not None:
-            st["path1_done"] = True
-            st["path1_evaluating"] = False
-            return None
-
-        # Rule 9: Re-confirm futures direction check (Futures Gate)
-        fut_bu = st.get("futures_buildup", "Neutral")
-        if side == "CE" and fut_bu in ("SB", "LU"):
-            LOGGER.info("Stock Path 1 BLOCKED for %s (CE): Futures buildup is %s (must not be SB/LU)", stock_sym, fut_bu)
-            st["path1_done"] = True
-            st["path1_evaluating"] = False
-            return None
-        elif side == "PE" and fut_bu in ("LB", "SC"):
-            LOGGER.info("Stock Path 1 BLOCKED for %s (PE): Futures buildup is %s (must not be LB/SC)", stock_sym, fut_bu)
-            st["path1_done"] = True
-            st["path1_evaluating"] = False
-            return None
-
-        # JIT Strike Planning & Locking
-        spot_p = float(st.get("spot_price") or st.get("open_price") or st.get("prev_close") or 0.0)
-        if not st.get("locked_keys"):
-            self.plan_stock_contracts(stock_sym, spot=spot_p)
-            self.lock_stock_contracts(stock_sym)
-
-        winner = self._select_best_strike(side, locked_keys=st.get("locked_keys"), spot=spot_p)
-        if not winner:
-            LOGGER.warning("Path 1 for %s (%s): No valid strike found.", stock_sym, side)
-            st["path1_evaluating"] = False
-            return None
-
-        # JIT: Subscribes ONLY this specific winning contract to WebSocket 2
-        w_key = winner.get("instrument_key")
-        if self.feed and hasattr(self.feed, "subscribe") and w_key:
-            self.feed.subscribe([w_key], target="stocks")
-
-        ask = float(winner.get("ask_price") or winner.get("ltp") or 0.0)
-        bid = float(winner.get("bid_price") or 0.0)
-        if ask <= 0.0 and w_key in self.hot_cache:
-            ask = float(self.hot_cache[w_key].get("ask_price") or self.hot_cache[w_key].get("ltp") or 0.0)
-            if bid <= 0.0:
-                bid = float(self.hot_cache[w_key].get("bid_price") or 0.0)
-
-        # Fast quote wait buffer: Wait up to 300ms (6 x 50ms) for the WebSocket quote to arrive in hot_cache
-        if ask <= 0.0 and w_key:
-            for _ in range(6):
-                time.sleep(0.05)
-                cached = self.hot_cache.get(w_key, {})
-                ask = float(cached.get("ask_price") or cached.get("ltp") or 0.0)
-                bid = float(cached.get("bid_price") or 0.0)
-                if ask > 0.0:
-                    break
-
-        if ask <= 0.0:
-            LOGGER.info("Path 1 for %s (%s): Strike %s waiting for live quote (ask/ltp=0). Retrying on next tick.",
-                        stock_sym, side, winner.get("trading_symbol"))
-            # Crucial: Do NOT mark path1_done=True; allow next tick to retry once quote arrives!
-            st["path1_evaluating"] = False
-            return None
-
-        # Difference 4: Stock Safety Guard - Bid-Ask spread > 3.0% rejection
-        if bid > 0.0 and ask > 0.0:
-            spread_pct = ((ask - bid) / ask) * 100.0
-            if spread_pct > self.max_spread_pct:
-                LOGGER.warning("Path 1 for %s (%s): Strike %s spread %.2f%% exceeds %.1f%% guard. Order rejected.",
-                               stock_sym, side, winner.get("trading_symbol"), spread_pct, self.max_spread_pct)
-                st["path1_done"] = True
-                st["path1_evaluating"] = False
-                return None
-
-        # Priority 1: Enforce micro-pacing for stock order (50ms rate limit buffer)
-        self._pace_stock_order_dispatch()
-
-        st["path1_done"] = True
-        st["path1_evaluating"] = False
-        base_lots = max(1, int(st.get("lots", 1)))
-        lots = max(1, base_lots * 2) if "★★★★" in rank else base_lots
-        lot_sz = int(st.get("lot_size", self.lot_size))
-        total_qty = lots * lot_sz
-
-        entry_price = ask
-        stop_loss_price = round(entry_price * 0.75, 2)
-        target_price = round(entry_price * 1.40, 2)
-
-        today_str = datetime.now(IST).strftime("%Y-%m-%d")
-        now_dt = datetime.now(IST)
-        time_str = now_dt.strftime("%H:%M:%S.%f")[:-3]
-        trade_id = f"STK-P1-{datetime.now(IST).strftime('%m%d%H%M%S')}-{self._trade_counter}"
-        self._trade_counter += 1
-
-        order_side = f"BUY_{side}"
-        symbol = winner.get("trading_symbol") or f"{stock_sym} {winner.get('strike')} {side}"
-        inst_key = winner["instrument_key"]
-        strike = winner.get("strike", 0.0)
-
-        trade = {
-            "trade_id": trade_id,
-            "trade_date": today_str,
-            "side": order_side,
-            "symbol": symbol,
-            "instrument_key": inst_key,
-            "underlying_key": stock_sym,
-            "strike": strike,
-            "lots": lots,
-            "lot_size": total_qty,
-            "entry_time_ist": time_str,
-            "entry_price": entry_price,
-            "entry_timestamp_ms": trigger_ms or int(time.time() * 1000),
-            "exit_time_ist": None,
-            "exit_price": None,
-            "exit_timestamp_ms": None,
-            "exit_reason": None,
-            "pnl_points": 0.0,
-            "net_pnl": 0.0,
-            "status": "OPEN",
-            "spot_price": st.get("spot_price"),
-            "atm_strike": strike,
-            "current_price": entry_price,
-            "stop_loss_price": stop_loss_price,
-            "target_price": target_price,
-            "entry_path": "PATH_1_0915",
-            "timeout_time": "09:45:00",
-            "build_up": f"Path 1 (09:15) First-Tick {side} Buy | Rank: {rank}",
-            "stars": rank,
-            "decision": f"09:15 {side} Buy",
-        }
-
-        st["current_position"] = trade
-        st["today_trades_count"] = st.get("today_trades_count", 0) + 1
-        st["state"] = "HOLDING"
-        self.current_positions[stock_sym] = trade
-
-        try:
-            self.database.insert_strategy_trade(trade)
-            if self.csv_path.exists():
-                with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        trade_id, today_str, order_side, symbol, strike, lots, total_qty,
-                        time_str, entry_price, "", "", "", 0.0, 0.0, "OPEN",
-                        st.get("spot_price"), strike, trade["build_up"], 0.25, 0.0
-                    ])
-        except Exception as exc:
-            LOGGER.error("DB error recording Path 1 trade for %s: %s", stock_sym, exc)
-
-        LOGGER.info(
-            "PATH 1 (09:15) ENTRY EXECUTED: %s %s @ %.2f (Qty: %d, SL: %.2f, Target: %.2f, Cutoff: 09:45)",
-            stock_sym,
-            symbol,
-            entry_price,
-            total_qty,
-            stop_loss_price,
-            target_price,
-        )
-        return trade
-
-    @staticmethod
-    def _classify_buildup(p_dir: str, oi_dir: str) -> str:
-        if p_dir == "UP" and oi_dir == "UP":
-            return "LB"
-        if p_dir == "DOWN" and oi_dir == "UP":
-            return "SB"
-        if p_dir == "UP" and oi_dir == "DOWN":
-            return "SC"
-        if p_dir == "DOWN" and oi_dir == "DOWN":
-            return "LU"
-        return "Neutral"
-
-    def evaluate_stock_oi_buildup(
-        self,
-        stock_sym: str,
-        trigger_ms: int | None = None,
-        force: bool = False,
-        require_consecutive: bool = False,
-    ) -> dict[str, Any] | None:
-        """
-        Path 2: From 09:18 OI-based entry, all day (until 14:45).
-        - 16-condition table applied to stock ATM +- 1 options vs 09:15 snapshot.
-        - Futures check (Futures Gate): CE Buy needs LB/SC. PE Buy needs SB/LU. Otherwise block it!
-        - Signal must hold for 2 OI updates in a row.
-        - Rank decides lot size (Sizing matrix).
-        - Live ask fill, SL 25%, Target 40%, live bid exit. Max 3 trades per stock per day.
-        """
-        stock_sym = stock_sym.upper()
-        st = self.stock_underlyings.get(stock_sym)
-        if not st or not st.get("enabled", True):
-            return None
-        if st.get("current_position") is not None:
-            return None
-
-        if not force and self.re_eval_min_interval_sec > 0:
-            now_ts = time.time()
-            if now_ts - st.get("_last_eval_time", 0.0) < self.re_eval_min_interval_sec:
-                return None
-            st["_last_eval_time"] = now_ts
-
-            now_dt = datetime.now(IST)
-            now_time_hms = now_dt.strftime("%H:%M:%S")
-            if now_time_hms >= self.entry_end_time or now_time_hms < self.entry_start_time:
-                return None
-
-        snap = st.get("snapshot") or {}
-        locked_keys = st.get("locked_keys") or []
-        if len(locked_keys) < 8 or len(snap) < 8:
-            return None
-
-        ce_keys = [k for k in locked_keys if self.hot_cache.get(k, {}).get("side") == "CE"]
-        pe_keys = [k for k in locked_keys if self.hot_cache.get(k, {}).get("side") == "PE"]
-        if len(ce_keys) != 4 or len(pe_keys) != 4:
-            return None
-
-        ce_oi_fresh = any(
-            float(self.hot_cache.get(k, {}).get("oi") or 0.0) != float(snap.get(k, {}).get("oi") or 0.0)
-            for k in ce_keys
-        )
-        pe_oi_fresh = any(
-            float(self.hot_cache.get(k, {}).get("oi") or 0.0) != float(snap.get(k, {}).get("oi") or 0.0)
-            for k in pe_keys
-        )
-        if not (ce_oi_fresh and pe_oi_fresh):
-            return None
-
-        ce_curr_oi_sum = sum(float(self.hot_cache.get(k, {}).get("oi") or 0.0) for k in ce_keys)
-        ce_snap_oi_sum = sum(float(snap.get(k, {}).get("oi") or 0.0) for k in ce_keys)
-        delta_ce = ce_curr_oi_sum - ce_snap_oi_sum
-
-        pe_curr_oi_sum = sum(float(self.hot_cache.get(k, {}).get("oi") or 0.0) for k in pe_keys)
-        pe_snap_oi_sum = sum(float(snap.get(k, {}).get("oi") or 0.0) for k in pe_keys)
-        delta_pe = pe_curr_oi_sum - pe_snap_oi_sum
-
-        ce_curr_ltp_sum = sum(float(self.hot_cache.get(k, {}).get("ltp") or snap.get(k, {}).get("ltp") or 0.0) for k in ce_keys)
-        ce_snap_ltp_sum = sum(float(snap.get(k, {}).get("ltp") or 0.0) for k in ce_keys)
-        ce_price_pct = ((ce_curr_ltp_sum - ce_snap_ltp_sum) / ce_snap_ltp_sum * 100.0) if ce_snap_ltp_sum > 0 else 0.0
-
-        pe_curr_ltp_sum = sum(float(self.hot_cache.get(k, {}).get("ltp") or snap.get(k, {}).get("ltp") or 0.0) for k in pe_keys)
-        pe_snap_ltp_sum = sum(float(snap.get(k, {}).get("ltp") or 0.0) for k in pe_keys)
-        pe_price_pct = ((pe_curr_ltp_sum - pe_snap_ltp_sum) / pe_snap_ltp_sum * 100.0) if pe_snap_ltp_sum > 0 else 0.0
-
-        ce_oi_pct = (delta_ce / ce_snap_oi_sum * 100.0) if ce_snap_oi_sum > 0 else 0.0
-        pe_oi_pct = (delta_pe / pe_snap_oi_sum * 100.0) if pe_snap_oi_sum > 0 else 0.0
-
-        ce_price_dir = "UP" if ce_price_pct > self.price_threshold_pct else "DOWN" if ce_price_pct < -self.price_threshold_pct else "FLAT"
-        ce_oi_dir = "UP" if ce_oi_pct > self.oi_threshold_pct else "DOWN" if ce_oi_pct < -self.oi_threshold_pct else "FLAT"
-        pe_price_dir = "UP" if pe_price_pct > self.price_threshold_pct else "DOWN" if pe_price_pct < -self.price_threshold_pct else "FLAT"
-        pe_oi_dir = "UP" if pe_oi_pct > self.oi_threshold_pct else "DOWN" if pe_oi_pct < -self.oi_threshold_pct else "FLAT"
-
-        if "FLAT" in (ce_price_dir, ce_oi_dir, pe_price_dir, pe_oi_dir):
-            st["last_evaluation"] = {
-                "decision": "WAIT",
-                "reason": "At least one direction is FLAT",
-                "delta_ce": delta_ce,
-                "delta_pe": delta_pe,
-                "summary_line": f"{stock_sym} WAIT: FLAT direction",
-            }
-            st["consecutive_signal"] = None
-            st["consecutive_count"] = 0
-            return None
-
-        ce_type = self._classify_buildup(ce_price_dir, ce_oi_dir)
-        pe_type = self._classify_buildup(pe_price_dir, pe_oi_dir)
-
-        table_entry = DECISION_TABLE.get((ce_type, pe_type), {"rule": None, "decision": "No trade", "side": None, "stars": "", "size": ""})
-        decision = table_entry["decision"]
-        side = table_entry.get("side")
-        stars = table_entry.get("stars", "")
-        size = table_entry.get("size", "")
-        rule_num = table_entry.get("rule")
-
-        st["last_evaluation"] = {
-            "decision": decision,
-            "rule": rule_num,
-            "stars": stars,
-            "size": size,
-            "delta_ce": delta_ce,
-            "delta_pe": delta_pe,
-            "ce_type": ce_type,
-            "pe_type": pe_type,
-            "summary_line": f"{stock_sym} ΔCE: {delta_ce:+,.0f} | ΔPE: {delta_pe:+,.0f} | {ce_type}+{pe_type} -> {decision} {stars}",
-        }
-
-        if decision in ("CE Buy", "PE Buy") and side:
-            # 1. Futures Check (Rule 9: Gate)
-            fut_bu = st.get("futures_buildup", "Neutral")
-            if decision == "CE Buy" and fut_bu in ("SB", "LU"):
-                LOGGER.info("Futures Gate BLOCKED CE Buy for %s: Futures is %s (must be LB or SC)", stock_sym, fut_bu)
-                st["consecutive_signal"] = None
-                st["consecutive_count"] = 0
-                return None
-            elif decision == "PE Buy" and fut_bu in ("LB", "SC"):
-                LOGGER.info("Futures Gate BLOCKED PE Buy for %s: Futures is %s (must be SB or LU)", stock_sym, fut_bu)
-                st["consecutive_signal"] = None
-                st["consecutive_count"] = 0
-                return None
-
-            # 2. Two Consecutive OI Updates Check (Rule 11)
-            if require_consecutive and not force:
-                prev_sig = st.get("consecutive_signal")
-                if prev_sig == decision:
-                    st["consecutive_count"] = st.get("consecutive_count", 0) + 1
-                else:
-                    st["consecutive_signal"] = decision
-                    st["consecutive_count"] = 1
-                    LOGGER.info("%s signal %s held for 1 fresh OI update. Awaiting 2nd consecutive update...", stock_sym, decision)
-                    return None
-
-                if st["consecutive_count"] < 2:
-                    return None
-
-                # Confirmed for 2 updates! Reset counter
-                st["consecutive_count"] = 0
-
-            # 3. Strike Selection
-            winner = self._select_best_strike(side, locked_keys=locked_keys)
-            if not winner:
-                LOGGER.warning("%s %s trigger: No valid contract with spread <= %.1f%%", stock_sym, side, self.max_spread_pct)
-                return None
-
-            # JIT: Subscribes ONLY this specific winning contract to WebSocket 2
-            w_key = winner.get("instrument_key")
-            if self.feed and hasattr(self.feed, "subscribe") and w_key:
-                self.feed.subscribe([w_key], target="stocks")
-
-            # Difference 4: Stock Safety Guard - Bid-Ask spread > 3.0% rejection
-            w_bid = float(winner.get("bid_price") or 0.0)
-            w_ask = float(winner.get("ask_price") or winner.get("ltp") or 0.0)
-            if w_bid > 0.0 and w_ask > 0.0:
-                w_spread = ((w_ask - w_bid) / w_ask) * 100.0
-                if w_spread > self.max_spread_pct:
-                    LOGGER.warning("Stock %s %s trigger: Winner %s spread %.2f%% exceeds max %.1f%% guard. Order rejected.",
-                                   stock_sym, side, winner.get("trading_symbol"), w_spread, self.max_spread_pct)
-                    return None
-
-            # Priority 1: Enforce micro-pacing for stock order (50ms rate limit buffer)
-            self._pace_stock_order_dispatch()
-
-            # 4. Sizing Matrix (Rule 10)
-            size_cat = size or "normal"
-            wl_rank = st.get("watchlist_rank") or stars
-            if "★★★★" in wl_rank:
-                size_cat = "full"
-
-            trade = self._execute_entry_order(
-                winner=winner,
-                side=side,
-                size=size_cat,
-                rule_num=rule_num,
-                stars=stars or wl_rank,
-                delta_ce=delta_ce,
-                delta_pe=delta_pe,
-                ce_type=ce_type,
-                pe_type=pe_type,
-                time_str=datetime.now(IST).strftime("%H:%M:%S.%f")[:-3],
-                trigger_ms=trigger_ms or int(time.time() * 1000),
-                underlying_key=stock_sym,
-            )
-            # Attach SL 25% and Target 40%
-            entry_p = float(trade["entry_price"])
-            trade["stop_loss_price"] = round(entry_p * 0.75, 2)
-            trade["target_price"] = round(entry_p * 1.40, 2)
-            trade["entry_path"] = "PATH_2_OI"
-
-            st["current_position"] = trade
-            st["state"] = "HOLDING"
-            return trade
-
-        else:
-            st["consecutive_signal"] = None
-            st["consecutive_count"] = 0
-
-        return None
-
-    def plan_all_stocks(self) -> None:
-        """In JIT mode, option contracts are planned dynamically when a stock triggers."""
-        pass
 
     def lock_all_stocks(self) -> None:
-        """
-        At 09:14:55 Lock Checkpoint:
-        Pre-plans and locks contracts for the Top 10 stocks (e.g. 5 Bullish + 5 Bearish).
-        Subscribes ATM +- 2 options (4 contracts per stock: 2 CE + 2 PE = 40 instruments total)
-        to WebSocket 2 (stocks-feed) so quotes are active for the 09:15 open.
-        """
         with self._lock:
-            # 1. Determine priority watchlist symbols (Top Bullish + Top Bearish)
-            max_bull = getattr(self, "max_bullish_stocks", 5)
-            max_bear = getattr(self, "max_bearish_stocks", 5)
-            top_syms: list[str] = []
+            self.plan_all_stocks()
+            for sym in self.stock_underlyings:
+                self.lock_stock_contracts(sym)
+
+    def take_stock_snapshot(self, sym: str) -> None:
+        """Captures 09:15:00 single-source-of-truth baseline for a stock's 22 options (mid-price, NEVER prev_close)."""
+        st = self.stock_underlyings.get(sym)
+        if not st or not st.get("enabled", True):
+            return
+        if st.get("snapshot_taken") and st.get("baseline_locked"):
+            return
+        if not st.get("locked_keys"):
+            self.lock_stock_contracts(sym)
+        l_keys = st.get("locked_keys") or []
+        if not l_keys:
+            return
+
+        today_s = datetime.now(IST).strftime("%Y-%m-%d")
+        existing = self.database.get_baseline_snapshot(today_s, sym) if self.database else None
+        if existing and existing.get("baseline_prices"):
+            st["baseline_prices"] = {k: float(v) for k, v in existing["baseline_prices"].items() if float(v or 0) > 0}
+        else:
+            st["baseline_prices"] = {}
+            for k in l_keys:
+                c = self.hot_cache.get(k, {})
+                bid_p = float(c.get("bid_price") or 0.0)
+                ask_p = float(c.get("ask_price") or 0.0)
+                ltp_p = float(c.get("ltp") or 0.0)
+                # Brief Section 3 #8: Stocks use mid-price (bid+ask)/2 if valid, fallback to live trade ltp (NEVER prev_close)
+                if bid_p > 0 and ask_p > 0 and ask_p >= bid_p:
+                    snap_p = round((bid_p + ask_p) / 2.0, 2)
+                elif ltp_p > 0:
+                    snap_p = ltp_p
+                else:
+                    snap_p = 0.0
+                if snap_p > 0.0:
+                    st["baseline_prices"][k] = snap_p
+
+        self._recompute_unified_baseline_sums(st)
+        st["snapshot_taken"] = True
+        st["baseline_locked"] = True
+        st["state"] = "ARMED"
+        if self.database and st["ce_baseline_sum"] > 0 and st["pe_baseline_sum"] > 0:
             try:
-                wl = self.stock_screener.get_tomorrow_watchlist()
-                for item in (wl.get("top_bullish") or [])[:max_bull]:
-                    s = str(item.get("symbol", "")).upper().strip()
-                    if s and s not in top_syms:
-                        top_syms.append(s)
-                for item in (wl.get("top_bearish") or [])[:max_bear]:
-                    s = str(item.get("symbol", "")).upper().strip()
-                    if s and s not in top_syms:
-                        top_syms.append(s)
-            except Exception as e:
-                LOGGER.debug("Could not read tomorrow watchlist: %s", e)
-
-            # Fallback if watchlist not yet generated
-            if not top_syms:
-                try:
-                    cfg = self.stock_screener.get_top_stocks_config()
-                    for s in (cfg.get("stocks") or []):
-                        sym_u = str(s.get("symbol", "")).upper().strip()
-                        if sym_u and sym_u not in top_syms:
-                            top_syms.append(sym_u)
-                        if len(top_syms) >= (max_bull + max_bear):
-                            break
-                except Exception:
-                    pass
-
-            # 2. Pre-plan & subscribe ATM +- 2 options (4 contracts per stock = 40 instruments)
-            atm_keys_to_sub: list[str] = []
-            for sym in top_syms:
-                st = self.stock_underlyings.get(sym)
-                if not st or not st.get("enabled", True):
-                    continue
-
-                spot = float(st.get("spot_price") or st.get("prev_close") or 0.0)
-                if spot > 0 and not st.get("locked_keys"):
-                    self.plan_stock_contracts(sym, spot)
-                    self.lock_stock_contracts(sym)
-
-                l_keys = st.get("locked_keys") or []
-                if l_keys:
-                    ce_keys = [k for k in l_keys if self.hot_cache.get(k, {}).get("side") == "CE"]
-                    pe_keys = [k for k in l_keys if self.hot_cache.get(k, {}).get("side") == "PE"]
-                    # 1 ATM CE + 1 ATM PE per stock (20 options total for 10 stocks)
-                    if ce_keys:
-                        atm_keys_to_sub.append(ce_keys[0])
-                    if pe_keys:
-                        atm_keys_to_sub.append(pe_keys[0])
-
-            if not hasattr(self, "_active_stock_option_keys"):
-                self._active_stock_option_keys = set()
-            self._active_stock_option_keys.update(atm_keys_to_sub)
-
-            if atm_keys_to_sub and self.feed and hasattr(self.feed, "subscribe"):
-                try:
-                    self.feed.subscribe(atm_keys_to_sub)
-                    LOGGER.info(
-                        "Pre-subscribed %d ATM option contracts for Top %d stocks on WebSocket: %s",
-                        len(atm_keys_to_sub), len(top_syms), atm_keys_to_sub
-                    )
-                except Exception as exc:
-                    LOGGER.debug("Could not pre-subscribe ATM stock keys: %s", exc)
+                self.database.save_baseline_snapshot(today_s, sym, st["ce_baseline_sum"], st["pe_baseline_sum"], st["baseline_prices"])
+            except Exception:
+                pass
 
     def snapshot_all_stocks(self) -> None:
-        for sym, st in self.stock_underlyings.items():
-            if st.get("enabled", True) and not st.get("snapshot_taken", False):
+        with self._lock:
+            for sym in self.stock_underlyings:
                 self.take_stock_snapshot(sym)
 
     def arm_all_stocks(self) -> None:
-        for sym, st in self.stock_underlyings.items():
-            if st.get("enabled", True) and st.get("state") in ("LOCKED", "DATA_COLLECTION"):
-                st["state"] = "ARMED"
+        with self._lock:
+            for sym, st in self.stock_underlyings.items():
+                if st.get("enabled", True) and st.get("state") in ("SETUP", "PLANNING", "LOCKED"):
+                    st["state"] = "ARMED"
 
     def squareoff_all_stocks_1515(self) -> None:
-        """
-        15:15:00 EOD clock square-off across all active stock positions,
-        and dynamically unsubscribes all 40 stock option contracts from the stocks WebSocket.
-        """
         with self._lock:
-            # 1. Close open stock positions at live bid
             for sym, st in self.stock_underlyings.items():
-                if st.get("state") == "HOLDING" and st.get("current_position"):
-                    pos = st["current_position"]
-                    if pos.get("status") == "OPEN":
-                        inst_key = pos["instrument_key"]
-                        cached = self.hot_cache.get(inst_key)
-                        bid = float(cached.get("bid_price") or 0.0) if cached else 0.0
-                        ltp = float(cached.get("ltp") or 0.0) if cached else 0.0
-                        ref_p = float(cached.get("ref_ltp") or 0.0) if cached else 0.0
-                        exit_price = bid if bid > 0 else (ltp if ltp > 0 else (ref_p if ref_p > 0 else float(pos.get("entry_price") or 0.0)))
-                        qty = int(pos.get("lot_size") or 1)
-                        pts = round(exit_price - float(pos["entry_price"]), 2)
-                        pos["exit_time_ist"] = datetime.now(IST).strftime("%H:%M:%S.%f")[:-3]
-                        pos["exit_price"] = exit_price
-                        pos["exit_reason"] = "SQUAREOFF_1515"
-                        pos["pnl_points"] = pts
-                        pos["net_pnl"] = round(pts * qty, 2)
-                        pos["status"] = "CLOSED"
-                        st["state"] = "CLOSED"
-                        st["current_position"] = None
-                        self.current_positions[sym] = None
-                        LOGGER.info("15:15:00 EOD Square-Off executed for stock %s @ %.2f", sym, exit_price)
+                pos = st.get("path2_position") or st.get("current_position")
+                if pos and isinstance(pos, dict) and pos.get("status") == "OPEN":
+                    self._exit_single_trade(pos, "SQUAREOFF_1515", sym)
+                st["state"] = "CLOSED"
 
-            # 2. Stop and unsubscribe all 40 active stock option contracts from stocks WebSocket
-            if hasattr(self, "_active_stock_option_keys") and self._active_stock_option_keys:
-                keys_to_unsub = list(self._active_stock_option_keys)
-                if self.feed and hasattr(self.feed, "unsubscribe"):
-                    try:
-                        self.feed.unsubscribe(keys_to_unsub)
-                        LOGGER.info("15:15:00 Stopped and unsubscribed all %d stock option instruments from stocks WebSocket.", len(keys_to_unsub))
-                    except Exception as exc:
-                        LOGGER.warning("Could not unsubscribe stock option instruments: %s", exc)
-                self._active_stock_option_keys.clear()
+    def manual_exit_stocks(self, reason: str = "MANUAL") -> list[dict[str, Any]]:
+        closed: list[dict[str, Any]] = []
+        with self._lock:
+            for sym, st in list(self.stock_underlyings.items()):
+                pos = st.get("path2_position") or st.get("current_position")
+                if pos and isinstance(pos, dict) and pos.get("status") == "OPEN":
+                    res = self._exit_single_trade(pos, reason, sym)
+                    if res:
+                        closed.append(res)
+        return closed
 
-    # -------------------------------------------------------------------------
-    # Initialisation & State Resumption
-    # -------------------------------------------------------------------------
+    def _recompute_unified_baseline_sums(self, state_obj: dict[str, Any]) -> None:
+        """
+        Single Source of Truth: Computes ce_baseline_sum and pe_baseline_sum directly
+        from per-strike baseline_prices so the Summary Table ALWAYS equals the Strike Table.
+        """
+        b_prices = state_obj.get("baseline_prices") or {}
+        if not b_prices:
+            return
+        ce_keys = state_obj.get("ce_basket_keys") or []
+        pe_keys = state_obj.get("pe_basket_keys") or []
+        ce_sum = sum(float(b_prices[k]) for k in ce_keys if k in b_prices and float(b_prices.get(k) or 0) > 0)
+        pe_sum = sum(float(b_prices[k]) for k in pe_keys if k in b_prices and float(b_prices.get(k) or 0) > 0)
+        state_obj["ce_baseline_sum"] = round(ce_sum, 2)
+        state_obj["pe_baseline_sum"] = round(pe_sum, 2)
 
     def _init_csv(self) -> None:
         try:
@@ -1397,6 +1020,11 @@ class GapEntryStrategyEngine:
                 for tr in today_trades:
                     ukey = tr.get("underlying_key") or NIFTY_KEY
                     if ukey in self.index_underlyings:
+                        is_p1 = (tr.get("strategy") == "PATH_1_0915" or str(tr.get("trade_id", "")).startswith("GAP-"))
+                        if is_p1:
+                            self.index_underlyings[ukey]["path1_trades_count"] = self.index_underlyings[ukey].get("path1_trades_count", 0) + 1
+                        else:
+                            self.index_underlyings[ukey]["path2_trades_count"] = self.index_underlyings[ukey].get("path2_trades_count", 0) + 1
                         self.index_underlyings[ukey]["today_trades_count"] += 1
                     elif ukey in self.stock_underlyings:
                         self.stock_underlyings[ukey]["today_trades_count"] += 1
@@ -1431,6 +1059,15 @@ class GapEntryStrategyEngine:
                     if u_key == NIFTY_KEY:
                         self.current_position = t
                         self.state = "HOLDING"
+
+                    # Auto-subscribe open trade contract key to feed for live Trade Book PnL tracking
+                    ik = t.get("instrument_key")
+                    if ik and hasattr(self, "market_data_feed") and self.market_data_feed and hasattr(self.market_data_feed, "subscribe"):
+                        try:
+                            self.market_data_feed.subscribe([ik], target="indices")
+                        except Exception:
+                            pass
+
                     LOGGER.info("Resumed open paper position for %s: %s", u_key, t["trade_id"])
         except Exception as exc:
             LOGGER.error("Failed to resume open position: %s", exc)
@@ -1464,59 +1101,29 @@ class GapEntryStrategyEngine:
     # -------------------------------------------------------------------------
 
     def _load_index_contracts_from_master(self, underlying_key: str) -> bool:
-        """Loads index option contracts directly from local NSE.json master file."""
+        """Loads nearest-expiry index option contracts and official lot size from Upstox Daily Instruments Master."""
         sym_map = {
             NIFTY_KEY: "NIFTY",
             BANKNIFTY_KEY: "BANKNIFTY",
+            SENSEX_KEY: "SENSEX",
             "NSE_INDEX|Nifty 50": "NIFTY",
             "NSE_INDEX|Nifty Bank": "BANKNIFTY",
+            "BSE_INDEX|SENSEX": "SENSEX",
         }
         target_sym = sym_map.get(underlying_key)
         if not target_sym:
             return False
 
-        search_paths = [
-            Path("NSE.json"),
-            Path(__file__).parent / "NSE.json",
-            Path(__file__).parent.parent / "NSE.json",
-        ]
-        nse_file = next((p for p in search_paths if p.is_file()), None)
-        if not nse_file:
-            return False
-
         try:
-            if not hasattr(self, "_master_instruments") or not self._master_instruments:
-                with open(nse_file, "r", encoding="utf-8") as f:
-                    try:
-                        self._master_instruments = json.load(f)
-                    except (json.JSONDecodeError, KeyboardInterrupt, Exception) as load_err:
-                        LOGGER.error("Failed to load NSE.json (interrupted or corrupted): %s", load_err)
-                        return False
-
-            opts = [
-                x for x in self._master_instruments
-                if x.get("instrument_type") in ("CE", "PE")
-                and (x.get("underlying_symbol") == target_sym or x.get("asset_symbol") == target_sym)
-            ]
-            if not opts:
+            act_exp, official_lot, matched = self.instruments_master.get_nearest_options(target_sym)
+            if not matched:
                 return False
 
-            # Find active expiry >= today in IST
-            today_str = datetime.now(IST).strftime("%Y-%m-%d")
-            from datetime import timezone
-            exp_dict: dict[str, list[dict[str, Any]]] = {}
-            for x in opts:
-                exp_ts = int(x.get("expiry") or 0)
-                if exp_ts > 0:
-                    d_str = datetime.fromtimestamp(exp_ts / 1000.0, timezone.utc).strftime("%Y-%m-%d")
-                    if d_str >= today_str:
-                        exp_dict.setdefault(d_str, []).append(x)
-
-            if not exp_dict:
-                return False
-
-            act_exp = sorted(exp_dict.keys())[0]
-            matched = exp_dict[act_exp]
+            if official_lot > 0 and underlying_key in self.index_underlyings:
+                self.index_lot_sizes[underlying_key] = official_lot
+                self.index_underlyings[underlying_key]["lot_size"] = official_lot
+                if underlying_key == NIFTY_KEY:
+                    self.lot_size = official_lot
 
             self.contracts_by_underlying[underlying_key] = matched
             self.expiries_by_underlying[underlying_key] = act_exp
@@ -1524,9 +1131,6 @@ class GapEntryStrategyEngine:
             if underlying_key == NIFTY_KEY:
                 self.active_expiry = act_exp
                 self.all_contracts = matched
-                self.contracts_by_key.clear()
-                self.ce_by_strike.clear()
-                self.pe_by_strike.clear()
 
             ce_map: dict[float, dict[str, Any]] = {}
             pe_map: dict[float, dict[str, Any]] = {}
@@ -1550,101 +1154,87 @@ class GapEntryStrategyEngine:
             self.pe_by_underlying[underlying_key] = pe_map
 
             LOGGER.info(
-                "Loaded %s contracts for %s expiry %s from NSE.json (%s CE, %s PE).",
-                len(matched),
-                underlying_key,
-                act_exp,
-                len(ce_map),
-                len(pe_map),
+                "Loaded %s contracts for %s expiry %s (lot_size=%s) from Instruments Master (%s CE, %s PE).",
+                len(matched), underlying_key, act_exp, official_lot, len(ce_map), len(pe_map),
             )
             return True
         except Exception as exc:
-            LOGGER.error("Failed to load option contracts from NSE.json for %s: %s", underlying_key, exc)
+            LOGGER.error("Failed to load option contracts from Instruments Master for %s: %s", underlying_key, exc)
             return False
 
     def load_contracts_if_needed(self, underlying_key: str = NIFTY_KEY) -> bool:
-        """Fetch option contracts for index and isolate nearest expiry."""
+        """Fetch option contracts for index (preferring Daily Instruments Master to avoid 429s)."""
         if underlying_key in self.contracts_by_underlying and self.contracts_by_underlying[underlying_key]:
             return True
 
-        # 1. Prefer fast local master file (NSE.json) for NSE indices to eliminate 429 rate limits
+        # 1. Prefer Daily Instruments Master (1 single download for all 53 symbols + live official lot sizes)
         if self._load_index_contracts_from_master(underlying_key):
             return True
 
-        if not self.access_token:
-            return False
-
-        try:
-            url = f"https://api.upstox.com/v2/option/contract?instrument_key={urllib.parse.quote(underlying_key, safe='|')}"
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "Authorization": f"Bearer {self.access_token}",
-                    "User-Agent": "Mozilla/5.0",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                contracts = data.get("data") or []
-                if not contracts:
-                    return False
-
-                today_str = datetime.now(IST).strftime("%Y-%m-%d")
-                expiries = sorted(list({c["expiry"] for c in contracts if c.get("expiry") and c.get("expiry") >= today_str}))
-                if not expiries:
-                    return False
-
-                act_exp = expiries[0]
-                matched = [c for c in contracts if c.get("expiry") == act_exp]
-                self.contracts_by_underlying[underlying_key] = matched
-                self.expiries_by_underlying[underlying_key] = act_exp
-
-                if underlying_key == NIFTY_KEY:
-                    self.active_expiry = act_exp
-                    self.all_contracts = matched
-                    self.contracts_by_key.clear()
-                    self.ce_by_strike.clear()
-                    self.pe_by_strike.clear()
-
-                ce_map: dict[float, dict[str, Any]] = {}
-                pe_map: dict[float, dict[str, Any]] = {}
-                for c in matched:
-                    c["underlying_key"] = underlying_key
-                    k = c.get("instrument_key")
-                    strike = float(c.get("strike_price") or 0.0)
-                    itype = str(c.get("instrument_type") or "").upper()
-                    if k:
-                        self.contracts_by_key[k] = c
-                    if itype == "CE":
-                        ce_map[strike] = c
-                        if underlying_key == NIFTY_KEY:
-                            self.ce_by_strike[strike] = c
-                    elif itype == "PE":
-                        pe_map[strike] = c
-                        if underlying_key == NIFTY_KEY:
-                            self.pe_by_strike[strike] = c
-
-                self.ce_by_underlying[underlying_key] = ce_map
-                self.pe_by_underlying[underlying_key] = pe_map
-
-                LOGGER.info(
-                    "Loaded %s contracts for %s expiry %s (%s CE, %s PE).",
-                    len(matched),
-                    underlying_key,
-                    act_exp,
-                    len(ce_map),
-                    len(pe_map),
+        # 2. Fallback to Upstox Option Contract API if master unavailable
+        if self.access_token:
+            try:
+                enc_key = urllib.parse.quote(underlying_key)
+                url = f"https://api.upstox.com/v2/option/contract?instrument_key={enc_key}"
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "Accept": "application/json",
+                        "Authorization": f"Bearer {self.access_token}",
+                        "User-Agent": "Mozilla/5.0",
+                    },
                 )
-                return True
-        except Exception as exc:
-            LOGGER.error("Failed to load option contracts for %s: %s", underlying_key, exc)
-            return self._load_index_contracts_from_master(underlying_key)
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    contracts = data.get("data") or []
+                    if contracts:
+                        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+                        expiries = sorted(list({c["expiry"] for c in contracts if c.get("expiry") and c.get("expiry") >= today_str}))
+                        if expiries:
+                            act_exp = expiries[0]
+                            matched = [c for c in contracts if c.get("expiry") == act_exp]
+                            self.contracts_by_underlying[underlying_key] = matched
+                            self.expiries_by_underlying[underlying_key] = act_exp
+
+                            if underlying_key == NIFTY_KEY:
+                                self.active_expiry = act_exp
+                                self.all_contracts = matched
+
+                            ce_map: dict[float, dict[str, Any]] = {}
+                            pe_map: dict[float, dict[str, Any]] = {}
+                            for c in matched:
+                                c["underlying_key"] = underlying_key
+                                k = c.get("instrument_key")
+                                strike = float(c.get("strike_price") or 0.0)
+                                itype = str(c.get("instrument_type") or "").upper()
+                                if k:
+                                    self.contracts_by_key[k] = c
+                                if itype == "CE":
+                                    ce_map[strike] = c
+                                    if underlying_key == NIFTY_KEY:
+                                        self.ce_by_strike[strike] = c
+                                elif itype == "PE":
+                                    pe_map[strike] = c
+                                    if underlying_key == NIFTY_KEY:
+                                        self.pe_by_strike[strike] = c
+
+                            self.ce_by_underlying[underlying_key] = ce_map
+                            self.pe_by_underlying[underlying_key] = pe_map
+
+                            LOGGER.info(
+                                "Loaded %s live contracts for %s expiry %s from Upstox API (%s CE, %s PE).",
+                                len(matched), underlying_key, act_exp, len(ce_map), len(pe_map),
+                            )
+                            return True
+            except Exception as exc:
+                LOGGER.warning("Could not load option contracts from Upstox API for %s: %s", underlying_key, exc)
+
+        return False
 
     def plan_8_itm_contracts(self, spot: float, underlying_key: str = NIFTY_KEY) -> list[str]:
         """
-        Plans ATM +- 5 Strikes (11 CE and 11 PE strikes, 22 contracts total per index)
-        for both the 09:15 Positive Tick and the new Sum Signal (Score = CE % - PE %) strategy.
+        Plans ATM +- 10 Strikes (21 CE and 21 PE strikes = 42 contracts total, including OTM)
+        for Indices (NIFTY 50, BANK NIFTY, SENSEX) for both 09:15 Positive Tick and Sum Signal (Score = CE % - PE %).
         """
         if underlying_key not in self.ce_by_underlying or not self.ce_by_underlying[underlying_key]:
             self.load_contracts_if_needed(underlying_key)
@@ -1655,29 +1245,30 @@ class GapEntryStrategyEngine:
         step = float(self.index_underlyings.get(underlying_key, {}).get("step") or 50.0)
         atm_strike = round(spot / step) * step
 
-        # ATM +- 5: 11 strikes total (5 below ATM, ATM, 5 above ATM)
-        all_ce_strikes = sorted(ce_dict.keys())
-        all_pe_strikes = sorted(pe_dict.keys())
+        # Select 21 symmetric strikes centered around ATM (ATM-10 .. ATM .. ATM+10) for Indices
+        all_strikes = sorted(set(ce_dict.keys()) & set(pe_dict.keys()))
+        if not all_strikes:
+            all_strikes = sorted(set(ce_dict.keys()) | set(pe_dict.keys()))
 
         ce_basket_keys: list[str] = []
         pe_basket_keys: list[str] = []
         keys: list[str] = []
 
-        if all_ce_strikes:
-            nearest_idx = min(range(len(all_ce_strikes)), key=lambda i: abs(all_ce_strikes[i] - atm_strike))
-            start_i = max(0, nearest_idx - 5)
-            end_i = min(len(all_ce_strikes), nearest_idx + 6)
-            for s in all_ce_strikes[start_i:end_i]:
+        if all_strikes:
+            nearest_atm = min(all_strikes, key=lambda s: abs(s - atm_strike))
+            atm_strike = nearest_atm
+            atm_idx = all_strikes.index(nearest_atm)
+            start_idx = max(0, atm_idx - 10)
+            end_idx = min(len(all_strikes), start_idx + 21)
+            if end_idx - start_idx < 21 and len(all_strikes) >= 21:
+                start_idx = max(0, end_idx - 21)
+            selected_strikes = all_strikes[start_idx:end_idx]
+
+            for s in selected_strikes:
                 c = ce_dict.get(s)
                 if c and c.get("instrument_key"):
                     keys.append(c["instrument_key"])
                     ce_basket_keys.append(c["instrument_key"])
-
-        if all_pe_strikes:
-            nearest_idx = min(range(len(all_pe_strikes)), key=lambda i: abs(all_pe_strikes[i] - atm_strike))
-            start_i = max(0, nearest_idx - 5)
-            end_i = min(len(all_pe_strikes), nearest_idx + 6)
-            for s in all_pe_strikes[start_i:end_i]:
                 p = pe_dict.get(s)
                 if p and p.get("instrument_key"):
                     keys.append(p["instrument_key"])
@@ -1701,8 +1292,9 @@ class GapEntryStrategyEngine:
             if self.state == "SETUP":
                 self.state = "PLANNING"
 
-        # Pre-populate hot cache entries
+        # Pre-populate hot cache and O(1) lookup table
         for k in keys:
+            self._key_to_underlying[k] = underlying_key
             if k not in self.hot_cache:
                 contract = self.contracts_by_key.get(k, {})
                 prev_close = float(contract.get("prev_close") or 0.0)
@@ -1737,7 +1329,7 @@ class GapEntryStrategyEngine:
         return keys
 
     def plan_all_indices(self) -> None:
-        """Plans 8 ITM contracts for all enabled indices if spot price is known."""
+        """Plans ATM ± 10 basket contracts (42 options per index) for all enabled indices if spot price is known."""
         for ukey, idx_st in self.index_underlyings.items():
             if idx_st.get("enabled", True):
                 spot = idx_st.get("spot_price")
@@ -1749,8 +1341,9 @@ class GapEntryStrategyEngine:
     # -------------------------------------------------------------------------
 
     def lock_contracts(self, underlying_key: str | None = None) -> None:
-        """Lock the 8 ITM contracts at 09:14:55 for specified index or all indices."""
+        """Lock the ATM +- 10 (42 contracts for indices) at 09:14:55 with real live non-zero reference prices."""
         with self._lock:
+            today_s = datetime.now(IST).strftime("%Y-%m-%d")
             targets = [underlying_key] if underlying_key else list(self.index_underlyings.keys())
             for ukey in targets:
                 idx_state = self.index_underlyings.get(ukey)
@@ -1772,18 +1365,51 @@ class GapEntryStrategyEngine:
                     continue
 
                 idx_state["locked_keys"] = list(p_keys)
+                missing_count = 0
                 for k in idx_state["locked_keys"]:
                     entry = self.hot_cache.get(k)
                     if not entry:
                         continue
-                    if entry.get("ltp") is not None and float(entry["ltp"]) > 0:
-                        entry["ref_ltp"] = float(entry["ltp"])
-                        entry["ref_source"] = "ltp"
+                    live_ltp = float(entry.get("ltp") or 0.0)
+                    bid_p = float(entry.get("bid_price") or 0.0)
+                    ask_p = float(entry.get("ask_price") or 0.0)
+                    if live_ltp > 0.0:
+                        entry["ref_ltp"] = live_ltp
+                        entry["ref_source"] = "live_ltp"
+                    elif bid_p > 0.0 and ask_p > 0.0 and ask_p >= bid_p:
+                        entry["ref_ltp"] = round((bid_p + ask_p) / 2.0, 2)
+                        entry["ref_source"] = "mid_quote"
                     else:
-                        contract = self.contracts_by_key.get(k, {})
-                        prev = float(contract.get("prev_close") or entry.get("bid_price") or 0.0)
-                        entry["ref_ltp"] = prev
-                        entry["ref_source"] = "prev_close"
+                        # NEVER fall back to prev_close or fake 0.0 as valid ref; flag MISSING explicitly
+                        entry["ref_ltp"] = 0.0
+                        entry["ref_source"] = "MISSING_091455"
+                        missing_count += 1
+
+                if missing_count > 0:
+                    LOGGER.warning(
+                        "[09:14:55 LOCK] %s had %d/%d contracts with 0/no live quote at 09:14:55 — flagged MISSING_091455 (no false >0 trigger).",
+                        ukey, missing_count, len(idx_state["locked_keys"])
+                    )
+
+                snapshot_091455 = []
+                for k in idx_state["locked_keys"]:
+                    c_info = self.contracts_by_key.get(k, {})
+                    h_info = self.hot_cache.get(k, {})
+                    snapshot_091455.append({
+                        "instrument_key": k,
+                        "symbol": h_info.get("trading_symbol") or c_info.get("trading_symbol") or k,
+                        "strike": float(h_info.get("strike") or c_info.get("strike_price") or 0.0),
+                        "side": str(h_info.get("side") or c_info.get("option_type") or ("CE" if "CE" in str(k) else "PE")).upper(),
+                        "ref_ltp": float(h_info.get("ref_ltp") or 0.0),
+                        "ref_source": h_info.get("ref_source") or "MISSING_091455",
+                        "lock_time": "09:14:55",
+                    })
+                idx_state["locked_091455_snapshot"] = snapshot_091455
+                if hasattr(self, "database") and self.database and snapshot_091455:
+                    try:
+                        self.database.save_premarket_lock(today_s, ukey, snapshot_091455)
+                    except Exception:
+                        pass
 
                 idx_state["state"] = "LOCKED"
                 if ukey == NIFTY_KEY:
@@ -1795,19 +1421,27 @@ class GapEntryStrategyEngine:
                         self.feed.subscribe(idx_state["locked_keys"], target="indices")
                     except Exception as exc:
                         LOGGER.debug("Could not subscribe locked keys for %s: %s", ukey, exc)
-                LOGGER.info("LOCKED 6 contracts (ATM +-3) for %s at 09:14:55: %s", ukey, idx_state["locked_keys"])
+                ce_cnt = len(idx_state.get("ce_basket_keys") or [])
+                pe_cnt = len(idx_state.get("pe_basket_keys") or [])
+                LOGGER.info("LOCKED %d contracts (%d CE + %d PE) for %s at 09:14:55.", len(snapshot_091455), ce_cnt, pe_cnt, ukey)
+                self.add_alert(
+                    "PRE_MARKET_LOCKED",
+                    f"{idx_state['name']}: 09:14:55 Pre-Market Locked ({len(snapshot_091455)} Contracts: {ce_cnt} CE + {pe_cnt} PE, missing={missing_count})",
+                    level="WARNING" if missing_count > 0 else "INFO",
+                    details={"underlying": ukey, "count": len(snapshot_091455), "missing_count": missing_count},
+                )
 
     def lock_all_indices(self) -> None:
         self.lock_contracts()
 
     # -------------------------------------------------------------------------
-    # Timeline Step 2: 09:15:00 Snapshot (Section 2 & 3)
+    # Timeline Step 2: 09:15:00 Snapshot (Unified Single Source of Truth)
     # -------------------------------------------------------------------------
 
     def take_snapshot(self, underlying_key: str | None = None) -> None:
         """
-        At 09:15:00, take the snapshot of the 6 contracts (ATM +-3): LTP, OI, bid, ask.
-        NO TRADING IS ALLOWED AT 09:15:00.
+        At 09:15:00, captures the single unified baseline price per strike from live WebSocket
+        (first trade LTP or bid/ask mid-price; NEVER prev_close). Summary sum == Sum(per-strike).
         """
         with self._lock:
             targets = [underlying_key] if underlying_key else list(self.index_underlyings.keys())
@@ -1834,20 +1468,12 @@ class GapEntryStrategyEngine:
                 idx_snap = {}
                 for k in l_keys:
                     c = self.hot_cache.get(k, {})
-                    ltp = float(c.get("ltp") or c.get("prev_close") or 100.0)
-                    oi = float(c.get("oi") or c.get("prev_oi") or 0.0)
                     bid = float(c.get("bid_price") or 0.0)
                     ask = float(c.get("ask_price") or 0.0)
-                    if oi == 0.0 or ltp == 100.0:
-                        try:
-                            db_tick = self.database.get_latest_tick(k)
-                            if db_tick:
-                                ltp = float(db_tick.get("ltp") or ltp)
-                                oi = float(db_tick.get("oi") or oi)
-                                bid = float(db_tick.get("bid_price") or bid)
-                                ask = float(db_tick.get("ask_price") or ask)
-                        except Exception:
-                            pass
+                    ltp = float(c.get("ltp") or 0.0)
+                    if ltp <= 0.0 and bid > 0.0 and ask > 0.0 and ask >= bid:
+                        ltp = round((bid + ask) / 2.0, 2)
+                    oi = float(c.get("oi") or c.get("prev_oi") or 0.0)
                     idx_snap[k] = {
                         "instrument_key": k,
                         "trading_symbol": c.get("trading_symbol") or k,
@@ -1859,44 +1485,85 @@ class GapEntryStrategyEngine:
                         "ask": ask,
                     }
 
-                # Phase 2: 09:15 Futures Snapshot (price, OI, volume)
+                # Phase 2: 09:15 Futures Snapshot
                 fut_k = idx_state.get("futures_key")
                 if fut_k:
                     fut_c = self.hot_cache.get(fut_k, {})
-                    fut_ltp = float(fut_c.get("ltp") or fut_c.get("prev_close") or idx_state.get("futures_ltp") or 0.0)
-                    fut_oi = float(fut_c.get("oi") or fut_c.get("prev_oi") or idx_state.get("futures_oi") or 0.0)
+                    fut_ltp = float(fut_c.get("ltp") or idx_state.get("futures_ltp") or 0.0)
+                    fut_oi = float(fut_c.get("oi") or idx_state.get("futures_oi") or 0.0)
                     idx_state["futures_snap_ltp"] = fut_ltp
                     idx_state["futures_snap_oi"] = fut_oi
                     idx_state["futures_snap_vol"] = float(fut_c.get("volume") or 0.0)
-                    LOGGER.info("SNAPSHOT FUTURES for %s: LTP=%.2f, OI=%.0f", ukey, fut_ltp, fut_oi)
 
                 idx_state["snapshot"] = idx_snap
                 idx_state["snapshot_taken"] = True
                 idx_state["state"] = "ARMED"
 
-                # Lock the 09:15:00 Sum Signal Baseline (11 CE and 11 PE strikes)
-                idx_state["baseline_prices"] = {}
-                for k in l_keys:
-                    c = self.hot_cache.get(k, {})
-                    snap_p = float(c.get("ltp") or c.get("ref_ltp") or 0.0)
-                    if snap_p <= 0.0:
-                        bid_p = float(c.get("bid_price") or 0.0)
-                        ask_p = float(c.get("ask_price") or 0.0)
-                        if bid_p > 0 and ask_p > 0:
-                            snap_p = round((bid_p + ask_p) / 2.0, 2)
-                        else:
-                            snap_p = float(c.get("prev_close") or 100.0)
-                    idx_state["baseline_prices"][k] = snap_p
+                # Single Unified 09:15:00 Baseline (NEVER prev_close; summary sum strictly == strike table sum)
+                today_s = datetime.now(IST).strftime("%Y-%m-%d")
+                existing_snap = None
+                if hasattr(self, "database") and self.database:
+                    try:
+                        existing_snap = self.database.get_baseline_snapshot(today_s, ukey)
+                    except Exception:
+                        pass
 
                 ce_b_keys = idx_state.get("ce_basket_keys") or [k for k in l_keys if self.hot_cache.get(k, {}).get("side") == "CE"]
                 pe_b_keys = idx_state.get("pe_basket_keys") or [k for k in l_keys if self.hot_cache.get(k, {}).get("side") == "PE"]
+                basket_set = set(ce_b_keys + pe_b_keys)
 
-                ce_base_sum = sum(idx_state["baseline_prices"].get(k, 0.0) for k in ce_b_keys)
-                pe_base_sum = sum(idx_state["baseline_prices"].get(k, 0.0) for k in pe_b_keys)
-                idx_state["ce_baseline_sum"] = round(ce_base_sum, 2)
-                idx_state["pe_baseline_sum"] = round(pe_base_sum, 2)
+                restored_prices: dict[str, float] = {}
+                if existing_snap and isinstance(existing_snap.get("baseline_prices"), dict):
+                    restored_prices = {
+                        k: float(v)
+                        for k, v in existing_snap["baseline_prices"].items()
+                        if k in basket_set and float(v or 0.0) > 0.0
+                    }
+
+                if restored_prices and len(restored_prices) >= len(basket_set) * 0.8:
+                    idx_state["baseline_prices"] = restored_prices
+                else:
+                    idx_state["baseline_prices"] = {}
+                    for k in ce_b_keys + pe_b_keys:
+                        c = self.hot_cache.get(k, {})
+                        ltp_v = float(c.get("ltp") or 0.0)
+                        bid_p = float(c.get("bid_price") or 0.0)
+                        ask_p = float(c.get("ask_price") or 0.0)
+                        if ltp_v > 0.0:
+                            snap_p = ltp_v
+                        elif bid_p > 0.0 and ask_p > 0.0 and ask_p >= bid_p:
+                            snap_p = round((bid_p + ask_p) / 2.0, 2)
+                        else:
+                            # Never use prev_close; leave absent so first fresh 09:15+ tick locks it
+                            snap_p = 0.0
+                        if snap_p > 0.0:
+                            idx_state["baseline_prices"][k] = snap_p
+
+                for k, bp in idx_state["baseline_prices"].items():
+                    if k in idx_snap:
+                        idx_snap[k]["ltp"] = float(bp)
+
+                self._recompute_unified_baseline_sums(idx_state)
+                ce_base_sum = float(idx_state.get("ce_baseline_sum") or 0.0)
+                pe_base_sum = float(idx_state.get("pe_baseline_sum") or 0.0)
                 idx_state["baseline_locked"] = True
-                LOGGER.info("SUM SIGNAL BASELINE LOCKED at 09:15 for %s: CE Sum = %.2f, PE Sum = %.2f across %d strikes.", ukey, ce_base_sum, pe_base_sum, len(ce_b_keys) + len(pe_b_keys))
+
+                if hasattr(self, "database") and self.database and ce_base_sum > 0 and pe_base_sum > 0:
+                    try:
+                        self.database.save_baseline_snapshot(today_s, ukey, ce_base_sum, pe_base_sum, idx_state["baseline_prices"])
+                    except Exception as ex:
+                        LOGGER.error("Failed to save baseline snapshot to DB: %s", ex)
+
+                LOGGER.info(
+                    "UNIFIED 09:15 BASELINE LOCKED for %s: CE Sum = ₹%.2f, PE Sum = ₹%.2f (%d/%d strikes populated).",
+                    ukey, ce_base_sum, pe_base_sum, len(idx_state["baseline_prices"]), len(basket_set)
+                )
+                self.add_alert(
+                    "BASELINE_LOCKED",
+                    f"{idx_state['name']}: 09:15 Unified Baseline Locked (CE: ₹{ce_base_sum:.2f}, PE: ₹{pe_base_sum:.2f})",
+                    level="INFO",
+                    details={"underlying": ukey, "ce_base": ce_base_sum, "pe_base": pe_base_sum},
+                )
 
                 if ukey == NIFTY_KEY:
                     self.snapshot = dict(idx_snap)
@@ -1904,7 +1571,7 @@ class GapEntryStrategyEngine:
                     self.snapshot_at_ms = int(time.time() * 1000)
                     self.state = "ARMED"
 
-                LOGGER.info("SNAPSHOT TAKEN at 09:15:00 for %s (%d contracts). State -> ARMED (Watching for first positive tick).", ukey, len(idx_snap))
+                LOGGER.info("SNAPSHOT TAKEN at 09:15:00 for %s (%d contracts). State -> ARMED.", ukey, len(idx_snap))
 
     def snapshot_all_indices(self) -> None:
         self.take_snapshot()
@@ -1931,108 +1598,218 @@ class GapEntryStrategyEngine:
     # Baseline locked at 09:15:00. Confirmation requires 5-minute continuous hold.
     # -------------------------------------------------------------------------
 
+    def _get_underlying_state(self, underlying_key: str) -> tuple[dict[str, Any] | None, bool]:
+        if underlying_key in self.index_underlyings:
+            return self.index_underlyings[underlying_key], False
+        if underlying_key in self.stock_underlyings:
+            return self.stock_underlyings[underlying_key], True
+        return None, False
+
+    @staticmethod
+    def _effective_option_price(c: dict[str, Any], is_stock: bool, max_spread_pct: float = 5.0, min_prem: float = 5.0) -> tuple[float, bool]:
+        """
+        Returns (effective_price, is_valid).
+        For stocks (Brief Section 3 #8): uses mid-price (bid+ask)/2 if valid;
+        skips strikes with spread > max_spread_pct (5%) or premium < min_prem (Rs 5).
+        For indices: uses live ltp (or mid-price if ltp unavailable).
+        """
+        bid = float(c.get("bid_price") or 0.0)
+        ask = float(c.get("ask_price") or 0.0)
+        ltp = float(c.get("ltp") or 0.0)
+
+        if is_stock:
+            if bid > 0.0 and ask > 0.0 and ask >= bid:
+                mid = round((bid + ask) / 2.0, 2)
+                spread_pct = ((ask - bid) / mid) * 100.0 if mid > 0 else 999.0
+                if spread_pct > max_spread_pct or mid < min_prem:
+                    return 0.0, False
+                return mid, True
+            if ltp >= min_prem:
+                return ltp, True
+            return 0.0, False
+        else:
+            if ltp > 0.0:
+                return ltp, True
+            if bid > 0.0 and ask > 0.0 and ask >= bid:
+                return round((bid + ask) / 2.0, 2), True
+            return 0.0, False
+
     def evaluate_sum_signal(
         self,
         underlying_key: str = NIFTY_KEY,
         trigger_ms: int = 0,
         force: bool = False,
         require_consecutive: bool = False,
+        allow_stock_entry: bool = True,
     ) -> dict[str, Any] | None:
         """
-        Calculates the real-time Sum Signal for an index using WebSocket ticks:
-        - Basket: ATM +- 5 strikes (11 CE and 11 PE contracts).
-        - CE % = ((Sum of CE LTPs - Baseline CE Sum) / Baseline CE Sum) * 100
-        - PE % = ((Sum of PE LTPs - Baseline PE Sum) / Baseline PE Sum) * 100
+        Calculates the real-time Sum Signal for any Index or NIFTY-50 Stock:
+        - Basket: ATM +- 5 strikes (11 CE and 11 PE contracts = 22 total).
+        - CE % = ((Sum of CE live - Sum of CE 09:15) / Sum of CE 09:15) * 100
+        - PE % = ((Sum of PE live - Sum of PE 09:15) / Sum of PE 09:15) * 100
         - Score = CE % - PE %
-        - Signal:
-            Bullish: CE % > +2.0% AND PE % < -2.0% -> 'CE Buy'
-            Bearish: PE % > +2.0% AND CE % < -2.0% -> 'PE Buy'
-            Neutral: within +-2.0% buffer or mixed -> 'Neutral'
-        - Whipsaw Control: Signal must hold continuously for 300 seconds (5 minutes).
-          If it breaks to Neutral or opposite, timer resets to 0.
-        - Execution: On confirmation, enters tightest spread strike on signal side
-          with -20% Stop-Loss and +40% Target, with Stepped Trailing Stop-Loss.
+        - Single unified baseline rule: Summary baseline == exact sum of per-strike 09:15 prices.
+        - Independent per-symbol confirmation timer (whipsaw_sec, default 300s).
         """
         with self._lock:
             now_dt = datetime.now(IST)
             now_time_hms = now_dt.strftime("%H:%M:%S")
             now_ts = time.time()
 
-            idx_state = self.index_underlyings.get(underlying_key)
+            idx_state, is_stock = self._get_underlying_state(underlying_key)
             if not idx_state:
                 idx_state = self.index_underlyings.get(NIFTY_KEY)
                 underlying_key = NIFTY_KEY
+                is_stock = False
             if not idx_state or not idx_state.get("enabled", True):
                 return None
 
-            # Get or auto-plan CE and PE baskets (11 strikes each)
             ce_keys = idx_state.get("ce_basket_keys") or []
             pe_keys = idx_state.get("pe_basket_keys") or []
 
             if not ce_keys or not pe_keys:
-                spot = float(idx_state.get("spot_price") or self.spot_price or 0.0)
+                spot = float(idx_state.get("spot_price") or (0.0 if is_stock else (self.spot_price or 0.0)))
                 if spot > 0:
-                    self.plan_8_itm_contracts(spot, underlying_key=underlying_key)
+                    if is_stock:
+                        self.plan_stock_contracts(underlying_key, spot, subscribe_now=False)
+                    else:
+                        self.plan_8_itm_contracts(spot, underlying_key=underlying_key)
                     ce_keys = idx_state.get("ce_basket_keys") or []
                     pe_keys = idx_state.get("pe_basket_keys") or []
 
             if not ce_keys or not pe_keys:
-                # Fallback to locked keys if baskets still empty
                 l_keys = idx_state.get("locked_keys") or []
                 ce_keys = [k for k in l_keys if "CE" in self.hot_cache.get(k, {}).get("trading_symbol", "") or self.hot_cache.get(k, {}).get("side") == "CE"]
                 pe_keys = [k for k in l_keys if "PE" in self.hot_cache.get(k, {}).get("trading_symbol", "") or self.hot_cache.get(k, {}).get("side") == "PE"]
 
-            # Compute current sums from live WebSocket hot cache
+            b_prices = idx_state.get("baseline_prices") or {}
+            has_per_strike_base = bool(b_prices)
+
+            # Backfill any missing strike baseline price ONLY if not using a pre-locked summary baseline without per-strike map
+            market_open_hms = getattr(self, "market_open_time", getattr(self, "snapshot_time", "09:15:00"))
+            allow_backfill = not (idx_state.get("baseline_locked") and not has_per_strike_base and float(idx_state.get("ce_baseline_sum") or 0.0) > 0.0)
+            if allow_backfill and (now_time_hms >= market_open_hms or force):
+                for k in ce_keys + pe_keys:
+                    if float(b_prices.get(k) or 0.0) <= 0.0:
+                        c = self.hot_cache.get(k)
+                        if c:
+                            eff_p, valid_p = self._effective_option_price(
+                                c, is_stock=is_stock,
+                                max_spread_pct=self.max_stock_spread_pct,
+                                min_prem=self.min_stock_basket_premium,
+                            )
+                            if valid_p and eff_p > 0.0:
+                                b_prices[k] = eff_p
+                                idx_state.setdefault("baseline_prices", {})[k] = eff_p
+
+            # Compute live sums strictly matching valid per-strike baseline items (single source of truth)
             ce_curr_sum = 0.0
+            ce_matched_base = 0.0
             for k in ce_keys:
                 c = self.hot_cache.get(k)
-                if c:
-                    p = float(c.get("ltp") or c.get("bid_price") or c.get("ref_ltp") or 0.0)
-                    ce_curr_sum += p
+                if not c:
+                    continue
+                eff_p, valid_p = self._effective_option_price(
+                    c, is_stock=is_stock,
+                    max_spread_pct=self.max_stock_spread_pct,
+                    min_prem=self.min_stock_basket_premium,
+                )
+                if not valid_p or eff_p <= 0.0:
+                    continue
+                if has_per_strike_base:
+                    bp = float(b_prices.get(k) or 0.0)
+                    if bp <= 0.0:
+                        continue
+                    ce_matched_base += bp
+                ce_curr_sum += eff_p
 
             pe_curr_sum = 0.0
+            pe_matched_base = 0.0
             for k in pe_keys:
                 c = self.hot_cache.get(k)
-                if c:
-                    p = float(c.get("ltp") or c.get("bid_price") or c.get("ref_ltp") or 0.0)
-                    pe_curr_sum += p
+                if not c:
+                    continue
+                eff_p, valid_p = self._effective_option_price(
+                    c, is_stock=is_stock,
+                    max_spread_pct=self.max_stock_spread_pct,
+                    min_prem=self.min_stock_basket_premium,
+                )
+                if not valid_p or eff_p <= 0.0:
+                    continue
+                if has_per_strike_base:
+                    bp = float(b_prices.get(k) or 0.0)
+                    if bp <= 0.0:
+                        continue
+                    pe_matched_base += bp
+                pe_curr_sum += eff_p
 
             idx_state["ce_current_sum"] = round(ce_curr_sum, 2)
             idx_state["pe_current_sum"] = round(pe_curr_sum, 2)
 
-            # Retrieve baseline sums locked at 09:15:00
-            ce_base = float(idx_state.get("ce_baseline_sum") or 0.0)
-            pe_base = float(idx_state.get("pe_baseline_sum") or 0.0)
+            if has_per_strike_base:
+                self._recompute_unified_baseline_sums(idx_state)
+                ce_base = ce_matched_base if ce_matched_base > 0 else float(idx_state.get("ce_baseline_sum") or 0.0)
+                pe_base = pe_matched_base if pe_matched_base > 0 else float(idx_state.get("pe_baseline_sum") or 0.0)
+            else:
+                ce_base = float(idx_state.get("ce_baseline_sum") or 0.0)
+                pe_base = float(idx_state.get("pe_baseline_sum") or 0.0)
 
-            # Auto-lock baseline if not locked yet and market is open or forced
-            market_open_hms = getattr(self, "market_open_time", getattr(self, "snapshot_time", "09:15:00"))
+            # Auto-restore from DB ONLY if per-strike baseline_prices match current basket
+            if (ce_base <= 0.0 or pe_base <= 0.0) and hasattr(self, "database") and self.database:
+                try:
+                    today_s = datetime.now(IST).strftime("%Y-%m-%d")
+                    snap = self.database.get_baseline_snapshot(today_s, underlying_key)
+                    if snap and isinstance(snap.get("baseline_prices"), dict) and snap["baseline_prices"]:
+                        basket_set = set(ce_keys + pe_keys)
+                        restored = {
+                            k: float(v) for k, v in snap["baseline_prices"].items()
+                            if k in basket_set and float(v or 0.0) > 0.0
+                        }
+                        if restored:
+                            idx_state["baseline_prices"] = restored
+                            self._recompute_unified_baseline_sums(idx_state)
+                            idx_state["baseline_locked"] = True
+                            ce_base = float(idx_state["ce_baseline_sum"])
+                            pe_base = float(idx_state["pe_baseline_sum"])
+                except Exception:
+                    pass
+
+            # Auto-lock baseline cleanly from live cache if not yet locked and market is open (preserve any already-captured prices)
             if not idx_state.get("baseline_locked") and (now_time_hms >= market_open_hms or force):
-                if ce_curr_sum > 0 or pe_curr_sum > 0:
-                    idx_state["ce_baseline_sum"] = round(ce_curr_sum, 2)
-                    idx_state["pe_baseline_sum"] = round(pe_curr_sum, 2)
+                new_bp: dict[str, float] = dict(idx_state.get("baseline_prices") or {})
+                for k in ce_keys + pe_keys:
+                    if float(new_bp.get(k) or 0.0) > 0.0:
+                        continue
+                    c = self.hot_cache.get(k)
+                    if c:
+                        eff_p, valid_p = self._effective_option_price(
+                            c, is_stock=is_stock,
+                            max_spread_pct=self.max_stock_spread_pct,
+                            min_prem=self.min_stock_basket_premium,
+                        )
+                        if valid_p and eff_p > 0.0:
+                            new_bp[k] = eff_p
+                if new_bp:
+                    idx_state["baseline_prices"] = new_bp
+                    self._recompute_unified_baseline_sums(idx_state)
                     idx_state["baseline_locked"] = True
-                    ce_base = round(ce_curr_sum, 2)
-                    pe_base = round(pe_curr_sum, 2)
-                    LOGGER.info("Sum Signal baseline auto-locked for %s: CE=%.2f, PE=%.2f", underlying_key, ce_base, pe_base)
+                    ce_base = float(idx_state["ce_baseline_sum"])
+                    pe_base = float(idx_state["pe_baseline_sum"])
+                    if hasattr(self, "database") and self.database and ce_base > 0 and pe_base > 0:
+                        try:
+                            self.database.save_baseline_snapshot(datetime.now(IST).strftime("%Y-%m-%d"), underlying_key, ce_base, pe_base, new_bp)
+                        except Exception:
+                            pass
 
-            # Compute percentage changes and Sum Signal Score
-            if ce_base > 0:
-                ce_pct = round(((ce_curr_sum - ce_base) / ce_base) * 100.0, 2)
-            else:
-                ce_pct = 0.0
-
-            if pe_base > 0:
-                pe_pct = round(((pe_curr_sum - pe_base) / pe_base) * 100.0, 2)
-            else:
-                pe_pct = 0.0
-
+            ce_pct = round(((ce_curr_sum - ce_base) / ce_base) * 100.0, 2) if ce_base > 0 else 0.0
+            pe_pct = round(((pe_curr_sum - pe_base) / pe_base) * 100.0, 2) if pe_base > 0 else 0.0
             score = round(ce_pct - pe_pct, 2)
 
             idx_state["ce_pct"] = ce_pct
             idx_state["pe_pct"] = pe_pct
             idx_state["score"] = score
 
-            # Signal classification as per Dr. Bhilwade's document
+            # ±2% buffer rule (Brief Section 3)
             if ce_pct > 2.0 and pe_pct < -2.0:
                 raw_signal = "CE Buy"
             elif pe_pct > 2.0 and ce_pct < -2.0:
@@ -2042,13 +1819,14 @@ class GapEntryStrategyEngine:
 
             idx_state["raw_signal"] = raw_signal
 
-            # Whipsaw / 5-Minute Continuous Hold Tracking
-            whipsaw_sec = float(idx_state.get("whipsaw_sec", 300.0))
+            # Per-symbol continuous whipsaw hold timer (300s default)
+            whipsaw_sec = float(idx_state.get("whipsaw_sec") or getattr(self, "whipsaw_sec", 300.0))
             if raw_signal == "Neutral":
                 idx_state["candidate_signal"] = None
                 idx_state["candidate_start_time"] = None
                 idx_state["hold_elapsed_sec"] = 0.0
                 idx_state["confirmed_signal"] = None
+                idx_state["_alert_confirmed_sent"] = False
             elif raw_signal in ("CE Buy", "PE Buy"):
                 if idx_state.get("candidate_signal") == raw_signal:
                     start_t = idx_state.get("candidate_start_time") or now_ts
@@ -2056,12 +1834,20 @@ class GapEntryStrategyEngine:
                     idx_state["hold_elapsed_sec"] = elapsed
                     if elapsed >= whipsaw_sec:
                         idx_state["confirmed_signal"] = raw_signal
+                        if not idx_state.get("_alert_confirmed_sent"):
+                            idx_state["_alert_confirmed_sent"] = True
+                            self.add_alert(
+                                "SIGNAL_CONFIRMED",
+                                f"{idx_state['name']}: {raw_signal} CONFIRMED after {int(elapsed)}s hold (Score: {score:+.2f}%)",
+                                level="INFO",
+                                details={"underlying": underlying_key, "signal": raw_signal, "score": score, "hold_sec": elapsed},
+                            )
                 else:
-                    # Raw signal flipped or started fresh
                     idx_state["candidate_signal"] = raw_signal
                     idx_state["candidate_start_time"] = now_ts
                     idx_state["hold_elapsed_sec"] = 0.0
                     idx_state["confirmed_signal"] = None
+                    idx_state["_alert_confirmed_sent"] = False
 
             confirmed = idx_state.get("confirmed_signal")
             elapsed_sec = idx_state.get("hold_elapsed_sec", 0.0)
@@ -2086,9 +1872,79 @@ class GapEntryStrategyEngine:
             if underlying_key == NIFTY_KEY:
                 self.last_evaluation = res
 
-            # Check if active position needs reversal
-            if idx_state.get("current_position"):
-                pos = idx_state["current_position"]
+            # Record full-day momentum progression (async queued for SQLite; 0 WebSocket lag!)
+            last_mom = idx_state.get("_last_momentum_event")
+            if not last_mom or abs(ce_pct - last_mom["ce_pct"]) >= 0.05 or abs(pe_pct - last_mom["pe_pct"]) >= 0.05 or raw_signal != last_mom["raw_signal"]:
+                ist_now = datetime.now(IST)
+                raw_n = underlying_key.replace("NSE_INDEX|", "").replace("BSE_INDEX|", "").strip()
+                prev_ce = last_mom["ce_pct"] if last_mom else ce_pct
+                prev_pe = last_mom["pe_pct"] if last_mom else pe_pct
+                prev_sc = last_mom["score"] if last_mom else score
+                delta_ce = round(ce_pct - prev_ce, 2)
+                delta_pe = round(pe_pct - prev_pe, 2)
+                delta_sc = round(score - prev_sc, 2)
+
+                if not is_stock:
+                    mom_entry = {
+                        "id": f"mom_{int(now_ts * 1000)}",
+                        "time": ist_now.strftime("%H:%M:%S"),
+                        "key": underlying_key,
+                        "name": raw_n,
+                        "ce_pct": ce_pct,
+                        "prev_ce_pct": prev_ce,
+                        "delta_ce": delta_ce,
+                        "pe_pct": pe_pct,
+                        "prev_pe_pct": prev_pe,
+                        "delta_pe": delta_pe,
+                        "score": score,
+                        "prev_score": prev_sc,
+                        "delta_score": delta_sc,
+                        "raw_signal": raw_signal,
+                        "hold_sec": round(elapsed_sec),
+                        "confirmed": bool(confirmed),
+                    }
+                    with self._momentum_lock:
+                        self.momentum_history.append(mom_entry)
+                        if len(self.momentum_history) > 500:
+                            self.momentum_history.pop(0)
+
+                if hasattr(self, "database") and self.database:
+                    try:
+                        log_rec = {
+                            "log_date": ist_now.strftime("%Y-%m-%d"),
+                            "timestamp_ist": ist_now.strftime("%H:%M:%S"),
+                            "timestamp_ms": int(now_ts * 1000),
+                            "underlying_key": underlying_key,
+                            "index_name": raw_n,
+                            "prev_ce_pct": prev_ce,
+                            "ce_pct": ce_pct,
+                            "delta_ce": delta_ce,
+                            "prev_pe_pct": prev_pe,
+                            "pe_pct": pe_pct,
+                            "delta_pe": delta_pe,
+                            "score": score,
+                            "raw_signal": raw_signal,
+                            "hold_sec": round(elapsed_sec),
+                            "confirmed": bool(confirmed),
+                        }
+                        if hasattr(self.database, "enqueue_momentum_log"):
+                            self.database.enqueue_momentum_log(log_rec)
+                        else:
+                            self.database.insert_momentum_log(log_rec)
+                    except Exception:
+                        pass
+
+                idx_state["_last_momentum_event"] = {
+                    "ce_pct": ce_pct,
+                    "pe_pct": pe_pct,
+                    "score": score,
+                    "raw_signal": raw_signal,
+                }
+
+            # Confirmed opposite signal reversal check for open Strategy 2 trade
+            target_pos = idx_state.get("path2_position")
+            if target_pos:
+                pos = target_pos
                 if "CE" in pos.get("side", "") and confirmed == "PE Buy":
                     LOGGER.info("CONFIRMED REVERSAL to PE Buy for %s. Closing CE position at live bid.", underlying_key)
                     self._exit_single_trade(pos, "SIGNAL_REVERSAL_PE", underlying_key)
@@ -2101,43 +1957,130 @@ class GapEntryStrategyEngine:
 
             # Fresh Entry Check
             if confirmed in ("CE Buy", "PE Buy"):
+                if is_stock and not allow_stock_entry:
+                    return None
                 side = "CE" if confirmed == "CE Buy" else "PE"
+
+                # Prevent unintended double exposure on the same symbol if Path 1 is still open
+                if not is_stock and not getattr(self, "allow_double_exposure", False) and idx_state.get("path1_position"):
+                    return None
 
                 # Check 15-minute cooldown for same direction
                 cooldown_until = idx_state.get("cooldown_until")
                 if cooldown_until and now_dt < cooldown_until:
                     if idx_state.get("last_closed_side") == side:
-                        LOGGER.debug("Underlying %s in 15-min cooldown for %s until %s", underlying_key, side, cooldown_until)
                         return None
 
-                # Check daily trade limits
-                max_t = idx_state.get("max_trades_per_day", self.max_trades_per_day)
-                if idx_state.get("today_trades_count", 0) >= max_t:
+                max_t = idx_state.get("max_trades_per_day", self.stock_max_trades_per_day if is_stock else self.max_trades_per_day)
+                cnt_key = "today_trades_count" if is_stock else "path2_trades_count"
+                if idx_state.get(cnt_key, 0) >= max_t:
                     return None
 
-                # Check daily loss limit
                 loss_lim = idx_state.get("daily_loss_limit_inr", self.daily_loss_limit_inr)
                 if idx_state.get("realized_pnl", 0.0) <= -loss_lim:
                     return None
 
-                # Check trading hours (09:18 to 14:45)
                 if not force and (now_time_hms < self.entry_start_time or now_time_hms >= self.entry_end_time):
                     return None
 
-                trade = self._enter_sum_signal_trade(underlying_key=underlying_key, side=side)
-                return trade
+                return self._enter_sum_signal_trade(underlying_key=underlying_key, side=side)
 
             return None
 
+    def _select_itm_strike(
+        self,
+        underlying_key: str,
+        side: str,
+        spot: float | None = None,
+        allowed_keys: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Brief Req #12: Selects configurable ITM N strike (default ITM 2) with premium in
+        [min_entry_premium, max_entry_premium] (Rs 50 - Rs 2,500) and spread <= max_spread_pct.
+        Only considers contracts with active live quotes (ask > 0 or ltp > 0).
+        """
+        st_obj, is_stock = self._get_underlying_state(underlying_key)
+        if not st_obj:
+            return self._select_best_strike(side)
+
+        if spot is None or spot <= 0:
+            spot = float(st_obj.get("spot_price") or st_obj.get("atm_strike") or 0.0)
+
+        basket_keys = list(allowed_keys) if allowed_keys is not None else list(
+            (st_obj.get("ce_basket_keys" if side == "CE" else "pe_basket_keys") or [])
+            + (st_obj.get("locked_keys") or [])
+        )
+        seen_k: set[str] = set()
+        candidates: list[dict[str, Any]] = []
+        for k in basket_keys:
+            if k in seen_k:
+                continue
+            seen_k.add(k)
+            c = self.hot_cache.get(k)
+            if not c or str(c.get("side") or "").upper() != side:
+                continue
+            if float(c.get("ask_price") or 0.0) > 0.0 or float(c.get("ltp") or 0.0) > 0.0:
+                c_copy = dict(c)
+                c_copy.setdefault("instrument_key", k)
+                candidates.append(c_copy)
+
+        if not candidates and allowed_keys is None:
+            for k_e, e in self.hot_cache.items():
+                if (
+                    e.get("underlying_key") == underlying_key
+                    and str(e.get("side") or "").upper() == side
+                    and (float(e.get("ask_price") or 0.0) > 0.0 or float(e.get("ltp") or 0.0) > 0.0)
+                ):
+                    c_copy = dict(e)
+                    c_copy.setdefault("instrument_key", k_e)
+                    candidates.append(c_copy)
+        if not candidates:
+            return None
+
+        itm_depth = max(1, int(getattr(self, "entry_itm_depth", 2)))
+        min_prem = float(getattr(self, "min_entry_premium", 50.0))
+        max_prem = float(getattr(self, "max_entry_premium", 2500.0))
+
+        # Isolate strict ITM strikes ordered from ITM 1 outward (CE: below spot desc; PE: above spot asc)
+        if spot and spot > 0:
+            if side == "CE":
+                itm_cands = sorted([c for c in candidates if float(c.get("strike") or 0.0) < spot], key=lambda c: float(c.get("strike") or 0.0), reverse=True)
+                otm_cands = sorted([c for c in candidates if float(c.get("strike") or 0.0) >= spot], key=lambda c: float(c.get("strike") or 0.0))
+            else:
+                itm_cands = sorted([c for c in candidates if float(c.get("strike") or 0.0) > spot], key=lambda c: float(c.get("strike") or 0.0))
+                otm_cands = sorted([c for c in candidates if float(c.get("strike") or 0.0) <= spot], key=lambda c: float(c.get("strike") or 0.0), reverse=True)
+            ordered = []
+            # Prioritize requested ITM depth index (0-based = itm_depth - 1) first, then nearby ITM strikes
+            if len(itm_cands) >= itm_depth:
+                ordered.append(itm_cands[itm_depth - 1])
+            for idx_c, c in enumerate(itm_cands):
+                if idx_c != itm_depth - 1:
+                    ordered.append(c)
+            ordered.extend(otm_cands)
+        else:
+            ordered = candidates
+
+        # Filter by premium bounds [min_entry_premium, max_entry_premium] & valid quotes
+        for c in ordered:
+            ask = float(c.get("ask_price") or 0.0)
+            ltp = float(c.get("ltp") or 0.0)
+            prem = ask if ask > 0 else ltp
+            if prem <= 0:
+                continue
+            if min_prem <= prem <= max_prem:
+                return c
+
+        # Fallback: closest positive-price candidate if all outside [50, 2500]; never return unquoted 0.00
+        pos_cands = [c for c in ordered if (float(c.get("ask_price") or 0.0) > 0 or float(c.get("ltp") or 0.0) > 0)]
+        return pos_cands[0] if pos_cands else None
+
     def _enter_sum_signal_trade(self, underlying_key: str, side: str) -> dict[str, Any] | None:
-        """Executes a market entry on confirmed Sum Signal for the selected index."""
-        idx_st = self.index_underlyings.get(underlying_key)
+        """Executes a market entry on confirmed Sum Signal for an Index or Ranked Stock."""
+        idx_st, is_stock = self._get_underlying_state(underlying_key)
         if not idx_st:
             return None
 
-        # Select strike: tightest spread candidate among ITM / ATM basket
-        basket_keys = idx_st.get("ce_basket_keys" if side == "CE" else "pe_basket_keys") or idx_st.get("locked_keys")
-        winner = self._select_best_strike(side, locked_keys=basket_keys)
+        winner = self._select_itm_strike(underlying_key, side, spot=idx_st.get("spot_price"))
         if not winner:
             winner = self._select_atm_strike(side, underlying_key=underlying_key)
         if not winner:
@@ -2147,18 +2090,21 @@ class GapEntryStrategyEngine:
         ask = float(winner.get("ask_price") or 0.0)
         ltp = float(winner.get("ltp") or 0.0)
         bid = float(winner.get("bid_price") or 0.0)
-        ref_price = ask if ask > 0 else (ltp if ltp > 0 else 0.0)
+        if is_stock and bid > 0 and ask > 0:
+            ref_price = ask if self.mode != "paper" else round((bid + ask) / 2.0, 2)
+        else:
+            ref_price = ask if ask > 0 else (ltp if ltp > 0 else 0.0)
         if ref_price <= 0.0:
             LOGGER.warning("ORDER REJECTED: No live quotes for %s (%s)", winner.get("trading_symbol"), winner.get("instrument_key"))
             return None
 
         limit_price = round(round((ref_price + self.order_buffer) / 0.05) * 0.05, 2)
         entry_price = ref_price if self.mode == "paper" else limit_price
-        sl_price = round(entry_price * 0.80, 2)   # -20% SL as per Dr. Bhilwade's document
-        tgt_price = round(entry_price * 1.40, 2)  # +40% Target
+        sl_price = round(entry_price * 0.80, 2)
+        tgt_price = round(entry_price * 1.40, 2)
 
-        lots = self.index_lots.get(underlying_key, idx_st.get("lots", 1))
-        lot_sz = idx_st.get("lot_size") or self.index_lot_sizes.get(underlying_key, self.lot_size)
+        lots = self.index_lots.get(underlying_key, idx_st.get("lots", 1)) if not is_stock else idx_st.get("lots", 1)
+        lot_sz = idx_st.get("lot_size") or (self.index_lot_sizes.get(underlying_key, self.lot_size) if not is_stock else 100)
         total_qty = lots * lot_sz
 
         now_dt = datetime.now(IST)
@@ -2168,12 +2114,13 @@ class GapEntryStrategyEngine:
         trade = {
             "trade_id": trade_id,
             "trade_date": now_dt.strftime("%Y-%m-%d"),
+            "strategy": "SUM_SIGNAL",
             "entry_path": "SUM_SIGNAL",
             "stop_loss_price": sl_price,
             "target_price": tgt_price,
             "side": f"BUY_{side}",
             "symbol": winner.get("trading_symbol") or f"{idx_st['name']} {winner.get('strike')} {side}",
-            "instrument_key": winner["instrument_key"],
+            "instrument_key": winner.get("instrument_key") or winner.get("trading_symbol") or "",
             "underlying_key": underlying_key,
             "strike": winner.get("strike"),
             "lots": lots,
@@ -2192,6 +2139,7 @@ class GapEntryStrategyEngine:
             "atm_strike": winner.get("strike"),
             "current_price": entry_price,
             "score": idx_st.get("score", 0.0),
+            "rank": idx_st.get("rank", 0),
             "ce_pct": idx_st.get("ce_pct", 0.0),
             "pe_pct": idx_st.get("pe_pct", 0.0),
             "decision": f"{side} Buy",
@@ -2201,7 +2149,9 @@ class GapEntryStrategyEngine:
             "network_latency_ms": 0.0,
         }
 
+        idx_st["path2_position"] = trade
         idx_st["current_position"] = trade
+        idx_st["path2_trades_count"] = idx_st.get("path2_trades_count", 0) + 1
         idx_st["today_trades_count"] = idx_st.get("today_trades_count", 0) + 1
         idx_st["state"] = "HOLDING"
         if underlying_key == NIFTY_KEY:
@@ -2209,9 +2159,27 @@ class GapEntryStrategyEngine:
             self.state = "HOLDING"
             self.today_trades_count += 1
 
+        try:
+            self.database.insert_strategy_trade(trade)
+        except Exception as exc:
+            LOGGER.error("DB insert error for Strategy 2 trade %s: %s", underlying_key, exc)
+
         LOGGER.info(
-            "SUM SIGNAL TRADE EXECUTED for %s: %s at %.2f (SL: %.2f [-20%%], TGT: %.2f [+40%%], Score: %s)",
-            underlying_key, trade["symbol"], entry_price, sl_price, tgt_price, idx_st.get("score")
+            "SUM SIGNAL TRADE EXECUTED for %s: %s at %.2f (ITM-%d, SL: %.2f [-20%%], TGT: %.2f [+40%%], Score: %s)",
+            underlying_key, trade["symbol"], entry_price, self.entry_itm_depth, sl_price, tgt_price, idx_st.get("score")
+        )
+        self.add_alert(
+            "ENTRY_ORDER_FILLED",
+            f"ENTERED {side} {trade['symbol']} @ ₹{entry_price:.2f} (Score {idx_st.get('score', 0.0):+.2f}%, ITM-{self.entry_itm_depth}, Lots: {lots})",
+            level="INFO",
+            details={
+                "underlying": underlying_key,
+                "symbol": trade["symbol"],
+                "side": side,
+                "entry_price": entry_price,
+                "lots": lots,
+                "trade_id": trade_id,
+            },
         )
         return trade
 
@@ -2227,7 +2195,7 @@ class GapEntryStrategyEngine:
 
     def _select_atm_strike(self, side: str, underlying_key: str = NIFTY_KEY) -> dict[str, Any] | None:
         """Selects the ATM option contract of the chosen side closest to spot price."""
-        idx_st = self.index_underlyings.get(underlying_key)
+        idx_st, _ = self._get_underlying_state(underlying_key)
         spot = idx_st.get("spot_price") if idx_st else self.spot_price
         if not spot or spot <= 0:
             return self._select_best_strike(side)
@@ -2236,7 +2204,7 @@ class GapEntryStrategyEngine:
             (idx_st.get("atm_plus_minus_keys") or [])
             + (idx_st.get("locked_keys") or [])
             + (idx_st.get("ce_basket_keys" if side == "CE" else "pe_basket_keys") or [])
-        )
+        ) if idx_st else []
         candidates = [
             e for e in self.hot_cache.values()
             if (not target_keys or e.get("instrument_key") in target_keys)
@@ -2252,22 +2220,103 @@ class GapEntryStrategyEngine:
         candidates.sort(key=lambda x: (abs(float(x.get("strike") or 0.0) - spot), x.get("spread_pct") or 999.0))
         return candidates[0]
 
-    def evaluate_all_active_underlyings(self) -> list[dict[str, Any]]:
-        """Evaluates all enabled indices for Sum Signal trades."""
-        trades = []
+    def evaluate_all_stocks_ranking(self, allow_entries: bool = True) -> dict[str, Any]:
+        """
+        Brief Req #6: Every 1 second, computes CE %, PE %, and Score = CE % - PE %
+        for all 50 NIFTY stocks, sorts Rank 1..50, identifies Confirmed Top N Bullish & Bearish,
+        and executes entries on newly confirmed Top N stocks.
+        """
         now_dt = datetime.now(IST)
         now_hms = now_dt.strftime("%H:%M:%S")
-        if not (self.entry_start_time <= now_hms < self.entry_end_time):
+        in_entry_window = (self.entry_start_time <= now_hms < self.entry_end_time)
+
+        with self._lock:
+            rankings: list[dict[str, Any]] = []
+            for sym, st in self.stock_underlyings.items():
+                if not st.get("enabled", True):
+                    continue
+                # Evaluate signal metrics (reversal exits handled here; fresh entries wait for Top N filter)
+                self.evaluate_sum_signal(underlying_key=sym, allow_stock_entry=False)
+                rankings.append({
+                    "symbol": sym,
+                    "key": st.get("key"),
+                    "spot_price": round(float(st.get("spot_price") or 0.0), 2),
+                    "atm_strike": st.get("atm_strike") or 0.0,
+                    "lot_size": st.get("lot_size") or 1,
+                    "ce_baseline_sum": st.get("ce_baseline_sum") or 0.0,
+                    "pe_baseline_sum": st.get("pe_baseline_sum") or 0.0,
+                    "ce_current_sum": st.get("ce_current_sum") or 0.0,
+                    "pe_current_sum": st.get("pe_current_sum") or 0.0,
+                    "ce_pct": float(st.get("ce_pct") or 0.0),
+                    "pe_pct": float(st.get("pe_pct") or 0.0),
+                    "score": float(st.get("score") or 0.0),
+                    "raw_signal": st.get("raw_signal") or "Neutral",
+                    "confirmed_signal": st.get("confirmed_signal"),
+                    "hold_elapsed_sec": float(st.get("hold_elapsed_sec") or 0.0),
+                    "whipsaw_sec": float(st.get("whipsaw_sec") or self.whipsaw_sec),
+                    "has_position": st.get("path2_position") is not None,
+                    "status": (
+                        f"IN POSITION ({st['path2_position'].get('side')})" if st.get("path2_position")
+                        else (f"CONFIRMED {st['confirmed_signal']}" if st.get("confirmed_signal")
+                              else (f"{st['raw_signal']} ({int(st.get('hold_elapsed_sec') or 0)}s)" if st.get("raw_signal") != "Neutral" else "Neutral"))
+                    ),
+                })
+
+            # Sort descending by Score = CE % - PE % (Rank 1 = highest positive, Rank 50 = lowest negative)
+            rankings.sort(key=lambda r: r["score"], reverse=True)
+            for idx_r, row in enumerate(rankings, start=1):
+                row["rank"] = idx_r
+                if row["symbol"] in self.stock_underlyings:
+                    self.stock_underlyings[row["symbol"]]["rank"] = idx_r
+
+            top_bull = [r for r in rankings if r["confirmed_signal"] == "CE Buy"][:self.max_bullish_stocks]
+            top_bear = [r for r in reversed(rankings) if r["confirmed_signal"] == "PE Buy"][:self.max_bearish_stocks]
+
+            if allow_entries and in_entry_window:
+                for row in top_bull + top_bear:
+                    sym = row["symbol"]
+                    st = self.stock_underlyings.get(sym)
+                    if not st or st.get("path2_position") is not None:
+                        continue
+                    side = "CE" if row["confirmed_signal"] == "CE Buy" else "PE"
+                    cd_until = st.get("cooldown_until")
+                    if cd_until and now_dt < cd_until and st.get("last_closed_side") == side:
+                        continue
+                    if st.get("today_trades_count", 0) >= st.get("max_trades_per_day", self.stock_max_trades_per_day):
+                        continue
+                    if st.get("realized_pnl", 0.0) <= -st.get("daily_loss_limit_inr", self.daily_loss_limit_inr):
+                        continue
+                    self._enter_sum_signal_trade(underlying_key=sym, side=side)
+
+            self._stock_rankings = rankings
+            self._top_bullish = top_bull
+            self._top_bearish = top_bear
+            return {
+                "rankings": rankings,
+                "top_bullish": top_bull,
+                "top_bearish": top_bear,
+            }
+
+    def evaluate_all_active_underlyings(self) -> list[dict[str, Any]]:
+        """Evaluates all 53 underlyings (3 Indices + 50 NIFTY Stocks) every second."""
+        trades: list[dict[str, Any]] = []
+        now_dt = datetime.now(IST)
+        now_hms = now_dt.strftime("%H:%M:%S")
+        if not (self.entry_start_time <= now_hms < "15:30:00"):
             return trades
 
         with self._lock:
             for ukey, idx_st in self.index_underlyings.items():
                 if idx_st.get("enabled", True):
-                    max_t = idx_st.get("max_trades_per_day", self.max_trades_per_day)
-                    if idx_st.get("current_position") is None and idx_st.get("today_trades_count", 0) < max_t:
-                        t = self.evaluate_sum_signal(underlying_key=ukey)
-                        if t and isinstance(t, dict) and t.get("status") == "OPEN":
-                            trades.append(t)
+                    t = self.evaluate_sum_signal(underlying_key=ukey)
+                    if t and isinstance(t, dict) and t.get("status") == "OPEN":
+                        trades.append(t)
+
+            # Every-second ranking & evaluation of all 50 NIFTY stocks
+            if time.time() - self._last_stock_rank_ts >= 1.0:
+                self._last_stock_rank_ts = time.time()
+                self.evaluate_all_stocks_ranking(allow_entries=True)
+
         return trades
 
     # -------------------------------------------------------------------------
@@ -2287,8 +2336,37 @@ class GapEntryStrategyEngine:
 
         now_dt = datetime.now(IST)
         now_time_hms = now_dt.strftime("%H:%M:%S")
+        # In replay/test mode (re_eval_min_interval_sec == 0), honor explicit tick ISO timestamp if provided
+        if self.re_eval_min_interval_sec == 0.0 and isinstance(tick.get("timestamp"), str) and "T" in tick["timestamp"]:
+            try:
+                now_dt = datetime.fromisoformat(tick["timestamp"]).astimezone(IST)
+                now_time_hms = now_dt.strftime("%H:%M:%S")
+            except Exception:
+                pass
 
-        # --- 1. SPOT INDEX TICK ---
+        # --- 1. SPOT INDEX OR CASH STOCK TICK ---
+        eq_sym = self._key_to_underlying.get(inst_key)
+        if eq_sym and eq_sym in self.stock_underlyings:
+            self.last_tick_time = time.time()
+            st_obj = self.stock_underlyings[eq_sym]
+            if ltp > 0:
+                st_obj["spot_price"] = ltp
+            if tick.get("prev_close") is not None and not st_obj.get("prev_close"):
+                st_obj["prev_close"] = float(tick["prev_close"])
+            with self._lock:
+                market_open_hms = getattr(self, "market_open_time", getattr(self, "snapshot_time", "09:15:00"))
+                if self.enabled and st_obj.get("enabled", True) and ltp > 0:
+                    if not st_obj.get("ce_basket_keys") and not st_obj.get("pe_basket_keys"):
+                        self.plan_stock_contracts(eq_sym, ltp)
+                    if self.lock_time <= now_time_hms < market_open_hms:
+                        if st_obj.get("state") != "LOCKED":
+                            self.lock_stock_contracts(eq_sym)
+                    elif now_time_hms >= market_open_hms and not st_obj.get("snapshot_taken"):
+                        if not st_obj.get("locked_keys"):
+                            self.lock_stock_contracts(eq_sym)
+                        self.take_stock_snapshot(eq_sym)
+            return None
+
         if inst_key in self.index_underlyings:
             self.last_tick_time = time.time()
             idx_st = self.index_underlyings[inst_key]
@@ -2345,149 +2423,40 @@ class GapEntryStrategyEngine:
 
             return None
 
-        # --- 1b. STOCK SPOT TICK ---
-        stock_sym_for_spot = next((sym for sym, d in self.stock_underlyings.items() if d.get("key") == inst_key), None)
-        if stock_sym_for_spot:
-            self.last_tick_time = time.time()
-            st = self.stock_underlyings[stock_sym_for_spot]
-            st["spot_price"] = ltp
-            with self._lock:
-                if st.get("state") in ("SETUP", "PLANNING"):
-                    if now_time_hms < self.lock_time:
-                        last_p = float(st.get("_last_planned_spot") or 0.0)
-                        step = float(st.get("strike_step") or 10.0)
-                        if not st.get("planned_keys") or abs(ltp - last_p) >= step:
-                            st["_last_planned_spot"] = ltp
-                            st["state"] = "PLANNING"
-                            self.plan_stock_contracts(stock_sym_for_spot, ltp)
-                    elif self.lock_time <= now_time_hms < self.snapshot_time:
-                        if st.get("state") != "LOCKED":
-                            self.lock_stock_contracts(stock_sym_for_spot)
-                    elif now_time_hms >= self.snapshot_time:
-                        if not st.get("snapshot_taken"):
-                            self.take_stock_snapshot(stock_sym_for_spot)
-
-                if now_time_hms >= self.snapshot_time and not st.get("snapshot_taken"):
-                    self.take_stock_snapshot(stock_sym_for_spot)
-
-                # Path 1 check: First tick above/below 09:15 open price for ★★★+ stocks
-                trigger_stock_side = None
-                if (
-                    st.get("state") == "ARMED"
-                    and not st.get("path1_done")
-                    and not st.get("path1_evaluating")
-                    and not st.get("gap_against")
-                    and st.get("current_position") is None
-                    and st.get("today_trades_count", 0) < self.stock_max_trades_per_day
-                    and st.get("watchlist_rank") in ("★★★", "★★★★")
-                ):
-                    open_p = float(st.get("open_price") or 0.0)
-                    dir_pref = str(st.get("watchlist_direction") or "BULLISH").upper()
-                    if open_p > 0 and ltp > 0:
-                        if dir_pref == "BULLISH" and ltp > open_p:
-                            trigger_stock_side = "CE"
-                            st["path1_evaluating"] = True
-                        elif dir_pref == "BEARISH" and ltp < open_p:
-                            trigger_stock_side = "PE"
-                            st["path1_evaluating"] = True
-
-            if trigger_stock_side:
-                # Dispatched outside self._lock so Priority 0 index ticks experience ZERO lock contention!
-                return self._execute_stock_path1_entry(stock_sym_for_spot, trigger_stock_side, trigger_ms=ts_ms)
-            return None
-
-        # --- 1c. STOCK FUTURES TICK ---
-        stock_sym_for_fut = next((sym for sym, d in self.stock_underlyings.items() if d.get("futures_key") == inst_key), None)
-        if stock_sym_for_fut:
-            self.last_tick_time = time.time()
-            st = self.stock_underlyings[stock_sym_for_fut]
-            st["futures_ltp"] = ltp
-            if tick.get("open_interest") is not None:
-                st["futures_oi"] = float(tick["open_interest"])
-            if tick.get("prev_close") is not None and not st.get("futures_prev_close"):
-                st["futures_prev_close"] = float(tick["prev_close"])
-
-            # Live futures buildup classification
-            pc = st.get("futures_prev_close") or st.get("futures_snap_ltp")
-            oi_curr = st.get("futures_oi")
-            oi_prev = st.get("futures_prev_oi") or st.get("futures_snap_oi")
-            if ltp > 0 and pc and pc > 0 and oi_curr and oi_prev and oi_prev > 0:
-                dp = (ltp - pc) / pc
-                doi = (oi_curr - oi_prev) / oi_prev
-                thresh = 0.001
-                if abs(dp) < thresh or abs(doi) < thresh:
-                    st["futures_buildup"] = "Neutral"
-                elif dp > 0 and doi > 0:
-                    st["futures_buildup"] = "LB"
-                elif dp < 0 and doi > 0:
-                    st["futures_buildup"] = "SB"
-                elif dp > 0 and doi < 0:
-                    st["futures_buildup"] = "SC"
-                elif dp < 0 and doi < 0:
-                    st["futures_buildup"] = "LU"
-
-            # Check Futures Flip exit if holding position
-            with self._lock:
-                if st.get("state") == "HOLDING" and st.get("current_position"):
-                    pos = st["current_position"]
-                    fut_bu = st.get("futures_buildup", "Neutral")
-                    if "CE" in pos.get("side", "") and fut_bu in ("SB", "LU"):
-                        return self._exit_single_trade(pos, "FUTURES_FLIP_BEARISH", stock_sym_for_fut)
-                    elif "PE" in pos.get("side", "") and fut_bu in ("LB", "SC"):
-                        return self._exit_single_trade(pos, "FUTURES_FLIP_BULLISH", stock_sym_for_fut)
-            return None
-
-        # --- 1d. INDEX FUTURES TICK (Phase 2 & 3) ---
-        idx_sym_for_fut = next((ukey for ukey, d in self.index_underlyings.items() if d.get("futures_key") == inst_key), None)
-        if idx_sym_for_fut:
-            self.last_tick_time = time.time()
-            idx_st = self.index_underlyings[idx_sym_for_fut]
-            idx_st["futures_ltp"] = ltp
-            if tick.get("open_interest") is not None:
-                idx_st["futures_oi"] = float(tick["open_interest"])
-            if tick.get("prev_close") is not None and not idx_st.get("futures_prev_close"):
-                idx_st["futures_prev_close"] = float(tick["prev_close"])
-            if tick.get("average_price"):
-                idx_st["futures_vwap"] = float(tick["average_price"])
-
-            # Live futures buildup classification
-            pc = idx_st.get("futures_prev_close") or idx_st.get("futures_snap_ltp")
-            oi_curr = idx_st.get("futures_oi")
-            oi_prev = idx_st.get("futures_prev_oi") or idx_st.get("futures_snap_oi")
-            if ltp > 0 and pc and pc > 0 and oi_curr and oi_prev and oi_prev > 0:
-                dp = (ltp - pc) / pc
-                doi = (oi_curr - oi_prev) / oi_prev
-                thresh = 0.001
-                if abs(dp) < thresh or abs(doi) < thresh:
-                    idx_st["futures_buildup"] = "Neutral"
-                elif dp > 0 and doi > 0:
-                    idx_st["futures_buildup"] = "LB"
-                elif dp < 0 and doi > 0:
-                    idx_st["futures_buildup"] = "SB"
-                elif dp > 0 and doi < 0:
-                    idx_st["futures_buildup"] = "SC"
-                elif dp < 0 and doi < 0:
-                    idx_st["futures_buildup"] = "LU"
-
-            # Check Futures Flip exit if holding position on NIFTY/BANKNIFTY
-            with self._lock:
-                if idx_st.get("state") == "HOLDING" and idx_st.get("current_position"):
-                    pos = idx_st["current_position"]
-                    fut_bu = idx_st.get("futures_buildup", "Neutral")
-                    if "CE" in pos.get("side", "") and fut_bu in ("SB", "LU"):
-                        return self._exit_single_trade(pos, "FUTURES_FLIP_BEARISH", idx_sym_for_fut)
-                    elif "PE" in pos.get("side", "") and fut_bu in ("LB", "SC"):
-                        return self._exit_single_trade(pos, "FUTURES_FLIP_BULLISH", idx_sym_for_fut)
-            return None
-
         # --- 2. OPTION CONTRACT TICK ---
         with self._lock:
             entry = self.hot_cache.get(inst_key)
+            if entry is None:
+                contract = self.contracts_by_key.get(inst_key, {})
+                entry = {
+                    "instrument_key": inst_key,
+                    "trading_symbol": contract.get("trading_symbol") or inst_key,
+                    "underlying_key": contract.get("underlying_key") or "",
+                    "strike": float(contract.get("strike_price") or 0.0),
+                    "side": str(contract.get("instrument_type") or "").upper(),
+                    "ref_ltp": None,
+                    "ref_source": None,
+                    "prev_close": float(contract.get("prev_close") or 0.0),
+                    "prev_oi": float(contract.get("open_interest") or 0.0),
+                    "oi": None,
+                    "build_up": "Neutral",
+                    "build_up_class": "bu-neutral",
+                    "ltp": ltp,
+                    "bid_price": float(tick.get("bid_price") or 0.0),
+                    "ask_price": float(tick.get("ask_price") or 0.0),
+                }
+                self.hot_cache[inst_key] = entry
+
             oi_changed = False
             if entry is not None:
                 if ltp > 0:
                     entry["ltp"] = ltp
                     entry["last_trade_ms"] = ts_ms
+
+                if tick.get("bid_price") is not None:
+                    entry["bid_price"] = float(tick["bid_price"])
+                if tick.get("ask_price") is not None:
+                    entry["ask_price"] = float(tick["ask_price"])
 
                 if tick.get("open_interest") is not None:
                     new_oi = float(tick["open_interest"])
@@ -2553,102 +2522,55 @@ class GapEntryStrategyEngine:
                         self.current_position["pnl_points"] = pts
                         self.current_position["net_pnl"] = net
 
-            # Check if this contract belongs to a stock option underlying
-            stock_sym = next((sym for sym, d in self.stock_underlyings.items() if inst_key in d.get("locked_keys", [])), None)
-            if stock_sym:
-                st = self.stock_underlyings[stock_sym]
-                if not st.get("enabled", True):
-                    return None
+            # O(1) fast underlying lookup for 53 underlyings (3 Indices + 50 Stocks)
+            idx_key = self._key_to_underlying.get(inst_key)
+            if not idx_key:
+                idx_key = next(
+                    (ukey for ukey, d in self.index_underlyings.items()
+                     if inst_key in d.get("locked_keys", [])
+                     or inst_key in d.get("atm_plus_minus_keys", [])
+                     or inst_key in d.get("ce_basket_keys", [])
+                     or inst_key in d.get("pe_basket_keys", [])),
+                    None
+                )
+                if not idx_key and inst_key in self.locked_keys:
+                    idx_key = NIFTY_KEY
+                if idx_key:
+                    self._key_to_underlying[inst_key] = idx_key
 
-                # If holding: update unrealized P&L and monitor risk/exit rules
-                if st.get("state") == "HOLDING" and st.get("current_position"):
-                    pos = st["current_position"]
-                    if pos.get("instrument_key") == inst_key:
-                        e_bid = float(entry.get("bid_price") or 0.0) if entry else 0.0
-                        current_price = e_bid if e_bid > 0 else float(ltp or 0.0)
-                        if current_price > 0:
-                            entry_price = float(pos["entry_price"])
-                            qty = int(pos["lot_size"])
-                            pts = round(current_price - entry_price, 2)
-                            net = round(pts * qty, 2)
-                            pos["current_price"] = current_price
-                            pos["pnl_points"] = pts
-                            pos["net_pnl"] = net
-
-                            # 1. Stop-Loss Check (25% below entry price)
-                            sl_p = float(pos.get("stop_loss_price") or (entry_price * 0.75))
-                            if current_price <= sl_p:
-                                return self._exit_single_trade(pos, "STOP_LOSS_25PCT", stock_sym)
-
-                            # 2. Target Check (40% above entry price)
-                            tgt_p = float(pos.get("target_price") or (entry_price * 1.40))
-                            if current_price >= tgt_p:
-                                return self._exit_single_trade(pos, "TARGET_40PCT", stock_sym)
-
-                            # 3. Path 1 09:45 Cutoff (only for trades entered before 09:45)
-                            entry_time = str(pos.get("entry_time_ist") or "")
-                            if self.re_eval_min_interval_sec > 0 and pos.get("entry_path") == "PATH_1_0915" and now_time_hms >= "09:45:00" and entry_time < "09:45:00":
-                                return self._exit_single_trade(pos, "TIME_EXIT_0945", stock_sym)
-
-                            # 4. Futures Flip Check
-                            fut_bu = st.get("futures_buildup", "Neutral")
-                            if "CE" in pos.get("side", "") and fut_bu in ("SB", "LU"):
-                                return self._exit_single_trade(pos, "FUTURES_FLIP_BEARISH", stock_sym)
-                            elif "PE" in pos.get("side", "") and fut_bu in ("LB", "SC"):
-                                return self._exit_single_trade(pos, "FUTURES_FLIP_BULLISH", stock_sym)
-
-                            # 5. Signal Reversal Check
-                            last_dec = st.get("last_evaluation", {}).get("decision")
-                            if "CE" in pos.get("side", "") and last_dec == "PE Buy":
-                                return self._exit_single_trade(pos, "SIGNAL_REVERSAL_PE", stock_sym)
-                            elif "PE" in pos.get("side", "") and last_dec == "CE Buy":
-                                return self._exit_single_trade(pos, "SIGNAL_REVERSAL_CE", stock_sym)
-
-                if st.get("current_position") is not None or st.get("today_trades_count", 0) >= self.stock_max_trades_per_day:
-                    return None
-
-                if now_time_hms >= self.entry_start_time and now_time_hms < self.entry_end_time:
-                    trade = self.evaluate_stock_oi_buildup(stock_sym, trigger_ms=ts_ms, require_consecutive=True)
-                    return trade
+            if not idx_key:
                 return None
 
-            # Check if this contract belongs to an index option underlying
-            idx_key = next(
-                (ukey for ukey, d in self.index_underlyings.items()
-                 if inst_key in d.get("locked_keys", [])
-                 or inst_key in d.get("atm_plus_minus_keys", [])
-                 or inst_key in d.get("ce_basket_keys", [])
-                 or inst_key in d.get("pe_basket_keys", [])),
-                None
-            )
-            if not idx_key and inst_key in self.locked_keys:
-                idx_key = NIFTY_KEY
+            idx_st, is_stock = self._get_underlying_state(idx_key)
+            if not idx_st or not idx_st.get("enabled", True):
+                return None
 
-            if idx_key:
-                idx_st = self.index_underlyings[idx_key]
-                if not idx_st.get("enabled", True):
-                    return None
+            # 1. Evaluate open position(s) risk and exit rules
+            active_positions = []
+            if idx_st.get("path1_position"):
+                active_positions.append(("path1_position", idx_st["path1_position"]))
+            if idx_st.get("path2_position"):
+                active_positions.append(("path2_position", idx_st["path2_position"]))
+            if not active_positions and idx_st.get("current_position"):
+                active_positions.append(("current_position", idx_st["current_position"]))
 
-                # If holding: update unrealized P&L and evaluate risk/exit rules
-                if idx_st.get("state") == "HOLDING" and idx_st.get("current_position"):
-                    pos = idx_st["current_position"]
-                    if pos.get("instrument_key") == inst_key:
-                        e_bid = float(entry.get("bid_price") or 0.0) if entry else 0.0
-                        current_price = e_bid if e_bid > 0 else float(ltp or 0.0)
-                        if current_price > 0:
-                            entry_price = float(pos["entry_price"])
-                            qty = int(pos.get("total_qty") or pos.get("lot_size") or 1)
-                            pts = round(current_price - entry_price, 2)
-                            net = round(pts * qty, 2)
-                            pos["current_price"] = current_price
-                            pos["pnl_points"] = pts
-                            pos["net_pnl"] = net
+            for p_type, pos in active_positions:
+                if pos.get("instrument_key") == inst_key and pos.get("status") == "OPEN":
+                    e_bid = float(entry.get("bid_price") or 0.0) if entry else 0.0
+                    current_price = e_bid if e_bid > 0 else float(ltp or 0.0)
+                    if current_price > 0:
+                        entry_price = float(pos["entry_price"])
+                        qty = int(pos.get("total_qty") or pos.get("lot_size") or 1)
+                        pts = round(current_price - entry_price, 2)
+                        net = round(pts * qty, 2)
+                        pos["current_price"] = current_price
+                        pos["pnl_points"] = pts
+                        pos["net_pnl"] = net
 
-                            # Stepped Trailing Stop-Loss calculation (Dr. Vijay Bhilwade specification)
-                            # - Initial SL: -20% of entry price
-                            # - Target: +40% of entry price
-                            # - At +5% profit: SL moves to Cost (Break-even, 0% profit)
-                            # - For every further +3% profit (at +8%, +11%, +14%...): raise SL by +2%
+                        is_path1 = (p_type == "path1_position" or pos.get("entry_path") == "PATH_1_0915")
+
+                        if not is_path1:
+                            # Strategy 2 (Sum Signal Live %): Stepped Trailing SL
                             profit_pct = ((current_price - entry_price) / entry_price) * 100.0
                             if profit_pct >= 5.0:
                                 steps = int((profit_pct - 5.0) // 3.0)
@@ -2662,28 +2584,19 @@ class GapEntryStrategyEngine:
                                         pos.get("symbol"), new_sl, trail_pct, profit_pct
                                     )
 
-                            # 1. Stop-Loss Check (sold at live bid)
-                            sl_p = float(pos.get("stop_loss_price") or (entry_price * 0.80))
-                            if current_price <= sl_p:
-                                if pos.get("trailing_active"):
-                                    reason = "TRAILING_STOP_LOSS"
-                                elif pos.get("entry_path") == "PATH_1_0915":
-                                    reason = "STOP_LOSS_25PCT"
-                                else:
-                                    reason = "STOP_LOSS_20PCT"
-                                return self._exit_single_trade(pos, reason, idx_key)
+                        # Stop-Loss Check (-20% initial SL, or trailing SL for Strategy 2)
+                        sl_p = float(pos.get("stop_loss_price") or (entry_price * 0.80))
+                        if current_price <= sl_p:
+                            reason = "TRAILING_STOP_LOSS" if pos.get("trailing_active") else "STOP_LOSS_20PCT"
+                            return self._exit_single_trade(pos, reason, idx_key)
 
-                            # 2. Target Check (+40% above entry price, sold at live bid)
-                            tgt_p = float(pos.get("target_price") or (entry_price * 1.40))
-                            if current_price >= tgt_p:
-                                return self._exit_single_trade(pos, "TARGET_40PCT", idx_key)
+                        # Target Check (+40% above entry price)
+                        tgt_p = float(pos.get("target_price") or (entry_price * 1.40))
+                        if current_price >= tgt_p:
+                            return self._exit_single_trade(pos, "TARGET_40PCT", idx_key)
 
-                            # 3. Path 1 (09:15 entry) 09:45:00 Cutoff Exit (only for trades entered under PATH_1_0915 before 09:45)
-                            entry_time = str(pos.get("entry_time_ist") or "")
-                            if self.re_eval_min_interval_sec > 0 and pos.get("entry_path") == "PATH_1_0915" and now_time_hms >= "09:45:00" and entry_time < "09:45:00":
-                                return self._exit_single_trade(pos, "TIME_EXIT_0945", idx_key)
-
-                            # 4. Confirmed Signal Reversal Check (Opposite signal confirmed after 5 minutes hold)
+                        # Confirmed Signal Reversal Check (Strategy 2 only: opposite signal confirmed after 300s hold)
+                        if not is_path1:
                             confirmed_sig = idx_st.get("confirmed_signal")
                             if "CE" in pos.get("side", "") and confirmed_sig == "PE Buy":
                                 exited_trade = self._exit_single_trade(pos, "SIGNAL_REVERSAL_PE", idx_key)
@@ -2694,68 +2607,76 @@ class GapEntryStrategyEngine:
                                 self._enter_sum_signal_trade(underlying_key=idx_key, side="CE")
                                 return exited_trade
 
-                # Check daily limits: max 3 trades per index, daily loss limit, cutoff 14:45
-                max_t = idx_st.get("max_trades_per_day", self.max_trades_per_day)
-                if idx_st.get("current_position") is not None or idx_st.get("today_trades_count", 0) >= max_t:
-                    return None
-                if idx_st.get("realized_pnl", 0.0) <= -idx_st.get("daily_loss_limit_inr", self.daily_loss_limit_inr):
-                    return None
-                if self.re_eval_min_interval_sec > 0 and now_time_hms >= self.entry_end_time:
+            # Stocks only run Strategy 2 (evaluated in 1s ranking loop + above exit monitoring)
+            if is_stock:
+                return None
+
+            # =========================================================================
+            # STRATEGY 2: LIVE % MOMENTUM EVALUATION (Independent of Strategy 1)
+            # =========================================================================
+            if now_time_hms >= self.entry_start_time and not idx_st.get("path2_position"):
+                trade = self.evaluate_sum_signal(underlying_key=idx_key, trigger_ms=ts_ms)
+                if trade and isinstance(trade, dict) and trade.get("status") == "OPEN":
+                    return trade
+
+            # Check daily trade limits, loss limit and cutoff 14:45 for Strategy 1
+            max_t = idx_st.get("max_trades_per_day", self.max_trades_per_day)
+            if idx_st.get("today_trades_count", 0) >= max_t:
+                return None
+            if idx_st.get("realized_pnl", 0.0) <= -idx_st.get("daily_loss_limit_inr", self.daily_loss_limit_inr):
+                return None
+            if self.re_eval_min_interval_sec > 0 and now_time_hms >= self.entry_end_time:
+                return None
+
+            # =========================================================================
+            # STRATEGY 1: FIRST POSITIVE TICK EVALUATION (Rule R8 strictly 09:15 to 09:18)
+            # =========================================================================
+            if self.re_eval_min_interval_sec > 0 and now_time_hms >= self.entry_start_time:
+                idx_st["path1_done"] = True
+                if idx_key == NIFTY_KEY:
+                    self.path1_done = True
+            elif idx_st.get("state") in ("ARMED", "LOCKED") and not idx_st.get("path1_position") and not idx_st.get("path1_done"):
+                ref = entry.get("ref_ltp")
+                ref_src = entry.get("ref_source")
+                if ref is None or float(ref or 0.0) <= 0.0 or ref_src == "MISSING_091455":
+                    # Brief Req #3 / Instr #3: If 09:14:55 price is 0 or missing, log it and capture real non-zero price WITHOUT false positive trigger
+                    if ltp > 0:
+                        LOGGER.info("09:14:55 reference missing/zero for %s (%s) — recording initial opening tick %.2f (skipping false >0 trigger).", entry.get("trading_symbol"), idx_key, ltp)
+                        entry["ref_ltp"] = ltp
+                        entry["ref_source"] = "initial_tick"
                     return None
 
-                # =========================================================================
-                # PATH 2: SUM SIGNAL EVALUATION (From 09:18:00 onwards)
-                # =========================================================================
-                if now_time_hms >= self.entry_start_time:
-                    trade = self.evaluate_sum_signal(underlying_key=idx_key, trigger_ms=ts_ms)
-                    if trade and isinstance(trade, dict) and trade.get("status") == "OPEN":
-                        return trade
-
-                # =========================================================================
-                # PATH 1: FIRST POSITIVE TICK EVALUATION (Rule R8 strictly 09:15 to 09:18)
-                # =========================================================================
-                if self.re_eval_min_interval_sec > 0 and now_time_hms >= self.entry_start_time:
-                    idx_st["path1_done"] = True
+                # Rule R8: Fresh trade strictly above real non-zero ref_ltp
+                if ltp > float(ref):
+                    chosen_side = entry.get("side") or ("CE" if "CE" in entry.get("trading_symbol", "") else "PE")
+                    LOGGER.info(
+                        "FIRST POSITIVE TICK DETECTED on %s (%s) for %s! LTP %.2f > Ref %.2f. Side: %s",
+                        entry.get("trading_symbol"), inst_key, idx_key, ltp, ref, chosen_side,
+                    )
+                    idx_st["state"] = "ORDER_SENT"
                     if idx_key == NIFTY_KEY:
-                        self.path1_done = True
-                elif idx_st.get("state") == "ARMED" and idx_st.get("today_trades_count", 0) == 0 and not idx_st.get("path1_done"):
-                    ref = entry.get("ref_ltp")
-                    if ref is None or float(ref or 0.0) <= 0.0:
-                        if ltp > 0:
-                            entry["ref_ltp"] = ltp
-                            entry["ref_source"] = "initial_tick"
-                        return None
+                        self.state = "ORDER_SENT"
 
-                    # Rule R8: Fresh trade strictly above stored ref_ltp
-                    if ltp > float(ref):
-                        chosen_side = entry.get("side") or ("CE" if "CE" in entry.get("trading_symbol", "") else "PE")
-                        LOGGER.info(
-                            "FIRST POSITIVE TICK DETECTED on %s (%s) for %s! LTP %.2f > Ref %.2f. Side: %s",
-                            entry.get("trading_symbol"),
-                            inst_key,
-                            idx_key,
-                            ltp,
-                            ref,
-                            chosen_side,
-                        )
-                        idx_st["state"] = "ORDER_SENT"
-                        if idx_key == NIFTY_KEY:
-                            self.state = "ORDER_SENT"
-
+                    winner = self._select_itm_strike(
+                        idx_key, chosen_side,
+                        spot=idx_st.get("spot_price"),
+                        allowed_keys=idx_st.get("locked_keys"),
+                    )
+                    if not winner:
                         winner = self._select_best_strike(chosen_side, locked_keys=idx_st.get("locked_keys"))
-                        if not winner:
-                            winner = entry
+                    if not winner:
+                        winner = entry
 
-                        trigger_time_str = now_dt.strftime("%H:%M:%S.%f")[:-3]
-                        trade = self._execute_positive_tick_entry(
-                            winner=winner,
-                            side=chosen_side,
-                            trigger_time_str=trigger_time_str,
-                            trigger_ms=ts_ms,
-                            underlying_key=idx_key,
-                            t_recv_perf=t_recv_perf,
-                        )
-                        return trade
+                    trigger_time_str = now_dt.strftime("%H:%M:%S.%f")[:-3]
+                    trade = self._execute_positive_tick_entry(
+                        winner=winner,
+                        side=chosen_side,
+                        trigger_time_str=trigger_time_str,
+                        trigger_ms=ts_ms,
+                        underlying_key=idx_key,
+                        t_recv_perf=t_recv_perf,
+                    )
+                    return trade
 
                 return None
 
@@ -2809,227 +2730,6 @@ class GapEntryStrategyEngine:
     # Order Execution (Paper Mode / Simulation - Section 6 & 8)
     # -------------------------------------------------------------------------
 
-    def _execute_entry_order(
-        self,
-        winner: dict[str, Any],
-        side: str,
-        size: str,
-        rule_num: int | None,
-        stars: str,
-        delta_ce: float,
-        delta_pe: float,
-        ce_type: str,
-        pe_type: str,
-        time_str: str,
-        trigger_ms: int,
-        underlying_key: str | None = None,
-    ) -> dict[str, Any]:
-        with self._lock:
-            today_str = datetime.now(IST).strftime("%Y-%m-%d")
-            trade_id = f"OIBU-{datetime.now(IST).strftime('%m%d%H%M%S')}-{self._trade_counter}"
-            self._trade_counter += 1
-            self.today_trades_count += 1
-
-            underlying_key = underlying_key or winner.get("underlying_key") or NIFTY_KEY
-            if underlying_key in self.stock_underlyings:
-                st = self.stock_underlyings[underlying_key]
-                lot_sz = st.get("lot_size", self.lot_size)
-                base_lots = st.get("lots", 1)
-                if size == "full":
-                    lots = max(1, base_lots * 2)
-                elif size == "normal":
-                    lots = base_lots
-                elif size == "scalp":
-                    lots = max(1, base_lots // 2) if base_lots > 1 else 1
-                else:
-                    lots = base_lots
-            elif underlying_key in self.index_underlyings:
-                idx_st = self.index_underlyings[underlying_key]
-                lot_sz = idx_st.get("lot_size") or self.index_lot_sizes.get(underlying_key, self.lot_size)
-                if size == "full":
-                    lots = self.lots_full
-                elif size == "normal":
-                    lots = self.lots_normal
-                elif size == "scalp":
-                    lots = self.lots_scalp
-                else:
-                    lots = self.index_lots.get(underlying_key, idx_st.get("lots", 1))
-            else:
-                lot_sz = self.index_lot_sizes.get(underlying_key, self.lot_size)
-                # Sizing as per stars/size (Section 6.3)
-                if size == "full":
-                    lots = self.lots_full
-                elif size == "normal":
-                    lots = self.lots_normal
-                elif size == "scalp":
-                    lots = self.lots_scalp
-                else:
-                    lots = self.index_lots.get(underlying_key, self.lots)
-
-            total_qty = lots * lot_sz
-
-            # Phase 1 & 2: Paper entry fills at live ask!
-            ask = float(winner.get("ask_price") or 0.0)
-            ltp = float(winner.get("ltp") or 0.0)
-            bid = float(winner.get("bid_price") or 0.0)
-            ref_price = ask if ask > 0 else (ltp if ltp > 0 else 0.0)
-            if ref_price <= 0.0:
-                LOGGER.warning("ORDER REJECTED: No live quotes (ask=%.2f, ltp=%.2f) for %s (%s)", ask, ltp, winner.get("trading_symbol"), winner.get("instrument_key"))
-                return None
-
-            # Difference 4: Guard for stocks - Reject if bid-ask spread exceeds max_spread_pct (3.0%)
-            if underlying_key in self.stock_underlyings and bid > 0 and ask > 0:
-                spread = ((ask - bid) / ask) * 100.0
-                if spread > self.max_spread_pct:
-                    LOGGER.warning("STOCK ORDER REJECTED: Spread %.2f%% exceeds max %.1f%% guard for %s", spread, self.max_spread_pct, winner.get("trading_symbol"))
-                    return None
-            limit_price = round(round((ref_price + self.order_buffer) / 0.05) * 0.05, 2)
-            entry_price = ref_price if self.mode == "paper" else limit_price
-            sl_price = round(entry_price * 0.75, 2)
-            tgt_price = round(entry_price * 1.40, 2)
-
-            order_side = f"BUY_{side}"
-            symbol = winner.get("trading_symbol") or f"NIFTY {winner.get('strike')} {side}"
-            inst_key = winner["instrument_key"]
-            strike = winner["strike"]
-            bu_label = f"Rule #{rule_num} {stars} | CE:{ce_type} PE:{pe_type}"
-
-            trade = {
-                "trade_id": trade_id,
-                "trade_date": today_str,
-                "entry_path": "PATH_2_0918_OI",
-                "stop_loss_price": sl_price,
-                "target_price": tgt_price,
-                "side": order_side,
-                "symbol": symbol,
-                "instrument_key": inst_key,
-                "underlying_key": underlying_key,
-                "strike": strike,
-                "lots": lots,
-                "lot_size": total_qty,
-                "entry_time_ist": time_str,
-                "entry_price": entry_price,
-                "entry_timestamp_ms": trigger_ms,
-                "exit_time_ist": None,
-                "exit_price": None,
-                "exit_timestamp_ms": None,
-                "exit_reason": None,
-                "pnl_points": 0.0,
-                "net_pnl": 0.0,
-                "status": "OPEN",
-                "spot_price": self.index_underlyings.get(underlying_key, {}).get("spot_price") or self.spot_price,
-                "atm_strike": strike,
-                "current_price": entry_price,
-                "build_up": bu_label,
-                "rule_number": rule_num,
-                "stars": stars,
-                "size_category": size,
-                "delta_ce": delta_ce,
-                "delta_pe": delta_pe,
-                "ce_buildup": ce_type,
-                "pe_buildup": pe_type,
-                "decision": f"{side} Buy",
-                "bot_latency_ms": 0.25,
-                "network_latency_ms": 0.0,
-            }
-
-            if underlying_key in self.index_underlyings:
-                idx_st = self.index_underlyings[underlying_key]
-                idx_st["current_position"] = trade
-                idx_st["today_trades_count"] = idx_st.get("today_trades_count", 0) + 1
-                idx_st["state"] = "HOLDING"
-                if underlying_key == NIFTY_KEY:
-                    self.current_position = trade
-                    self.state = "HOLDING"
-            elif underlying_key in self.stock_underlyings:
-                st = self.stock_underlyings[underlying_key]
-                st["current_position"] = trade
-                st["today_trades_count"] = st.get("today_trades_count", 0) + 1
-                st["state"] = "HOLDING"
-
-            self.current_positions[underlying_key] = trade
-
-            self.last_decision = {
-                "timestamp_ist": time_str,
-                "side": side,
-                "chosen_strike": strike,
-                "symbol": symbol,
-                "entry_price": entry_price,
-                "spread_pct": winner.get("spread_pct"),
-                "build_up": bu_label,
-                "rule": rule_num,
-                "stars": stars,
-                "size": size,
-                "delta_ce": delta_ce,
-                "delta_pe": delta_pe,
-                "reason": f"OI_BUILDUP_RULE_{rule_num}",
-            }
-
-            # Save in database
-            try:
-                self.database.insert_strategy_trade(trade)
-                self.database.insert_strategy_signal({
-                    "timestamp_ist": time_str,
-                    "timestamp_ms": trigger_ms,
-                    "instrument_name": self.index_underlyings.get(underlying_key, {}).get("name", underlying_key),
-                    "side": side,
-                    "strike": strike,
-                    "contract_key": inst_key,
-                    "ltp": entry_price,
-                    "prev_ltp": winner.get("ref_ltp") or entry_price,
-                    "qty_delta": total_qty,
-                    "value_lakhs": round((entry_price * total_qty) / 100000.0, 2),
-                    "day_high": entry_price,
-                    "prev_close": winner.get("ref_ltp") or entry_price,
-                    "bid_price": winner.get("bid_price") or entry_price,
-                    "ask_price": winner.get("ask_price") or entry_price,
-                    "spread_pct": winner.get("spread_pct") or 0.0,
-                    "oi_change": delta_ce if side == "CE" else delta_pe,
-                    "confidence": f"{stars} Rule #{rule_num}",
-                    "action_taken": f"ENTERED_{order_side}",
-                })
-                self.add_alert(
-                    "ENTRY_ORDER_FILLED",
-                    f"ENTERED {order_side} {symbol} @ {entry_price:.2f} (09:18 OI Rule #{rule_num} {stars}, Lots: {lots}, SL: {sl_price:.2f}, Tgt: {tgt_price:.2f})",
-                    level="INFO",
-                    details={"underlying": underlying_key, "trade_id": trade_id, "side": order_side, "entry_price": entry_price, "lots": lots},
-                )
-            except Exception as exc:
-                LOGGER.error("Failed to insert trade into DB: %s", exc)
-
-            # Append to paper_trades.csv
-            try:
-                with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        trade_id, today_str, order_side, symbol, strike, lots, total_qty,
-                        time_str, entry_price,
-                        "", "", "", "", "", "OPEN",
-                        rule_num, stars, delta_ce, delta_pe,
-                        ce_type, pe_type, f"{side} Buy",
-                        0.25, 0.0,
-                    ])
-            except Exception as exc:
-                LOGGER.error("Failed to append paper trade to CSV: %s", exc)
-
-            LOGGER.info(
-                "ENTRY EXECUTED: %s %s Qty %s @ %.2f (Rule #%s %s %s lots, ΔCE: %+,.0f, ΔPE: %+,.0f)",
-                order_side,
-                symbol,
-                total_qty,
-                entry_price,
-                rule_num,
-                stars,
-                size,
-                delta_ce,
-                delta_pe,
-            )
-            return trade
-
-    # -------------------------------------------------------------------------
-    # Active First Positive Tick Order Execution (Rule R16-R18)
-    # -------------------------------------------------------------------------
-
     def _execute_positive_tick_entry(
         self,
         winner: dict[str, Any],
@@ -3063,8 +2763,8 @@ class GapEntryStrategyEngine:
                 return None
             limit_price = round(round((ref_price + self.order_buffer) / 0.05) * 0.05, 2)
             entry_price = ref_price if self.mode == "paper" else limit_price
-            sl_price = round(entry_price * 0.75, 2)
-            tgt_price = round(entry_price * 1.40, 2)
+            sl_price = round(entry_price * 0.80, 2)   # -20% SL as per Dr. Bhilwade specification
+            tgt_price = round(entry_price * 1.40, 2)  # +40% Target
 
             order_side = f"BUY_{side}"
             symbol = winner.get("trading_symbol") or f"{idx_st.get('symbol_prefix', 'INDEX')} {winner.get('strike')} {side}"
@@ -3075,6 +2775,7 @@ class GapEntryStrategyEngine:
             trade = {
                 "trade_id": trade_id,
                 "trade_date": today_str,
+                "strategy": "PATH_1_0915",
                 "entry_path": "PATH_1_0915",
                 "stop_loss_price": sl_price,
                 "target_price": tgt_price,
@@ -3105,8 +2806,11 @@ class GapEntryStrategyEngine:
                 "decision": f"{side} Buy",
                 "bot_latency_ms": bot_latency_ms,
                 "network_latency_ms": net_latency_ms,
+                "score": 0.0,
+                "rank": 0,
             }
 
+            idx_st["path1_position"] = trade
             idx_st["current_position"] = trade
             idx_st["today_trades_count"] = idx_st.get("today_trades_count", 0) + 1
             idx_st["path1_done"] = True
@@ -3238,12 +2942,18 @@ class GapEntryStrategyEngine:
 
         if underlying_key in self.index_underlyings:
             idx_st = self.index_underlyings[underlying_key]
-            idx_st["current_position"] = None
+            is_p1 = (pos.get("entry_path") == "PATH_1_0915" or pos.get("strategy") == "PATH_1_0915" or str(pos.get("trade_id", "")).startswith("GAP-"))
+            if is_p1:
+                idx_st["path1_position"] = None
+            else:
+                idx_st["path2_position"] = None
+                idx_st["cooldown_until"] = now_dt + timedelta(minutes=15)
+                idx_st["last_closed_side"] = "CE" if "CE" in pos.get("side", "") else "PE"
+
+            idx_st["current_position"] = idx_st.get("path2_position") or idx_st.get("path1_position")
             idx_st["realized_pnl"] = round(idx_st.get("realized_pnl", 0.0) + net_pnl, 2)
-            idx_st["cooldown_until"] = now_dt + timedelta(minutes=15)
-            idx_st["last_closed_side"] = "CE" if "CE" in pos.get("side", "") else "PE"
             loss_lim = idx_st.get("daily_loss_limit_inr", self.daily_loss_limit_inr)
-            max_t = idx_st.get("max_trades_per_day", self.max_trades_per_day)
+            max_t = idx_state.get("max_trades_per_day", self.max_trades_per_day) if 'idx_state' in locals() and idx_state else idx_st.get("max_trades_per_day", self.max_trades_per_day)
 
             if reason == "SQUAREOFF_1515" or idx_st["realized_pnl"] <= -loss_lim:
                 idx_st["state"] = "CLOSED"
@@ -3251,20 +2961,34 @@ class GapEntryStrategyEngine:
                     msg = f"DAILY LOSS LIMIT REACHED for {idx_st['name']}: Loss ₹{abs(idx_st['realized_pnl']):,.2f} exceeds limit ₹{loss_lim:,.2f}. Trading stopped for today."
                     LOGGER.warning(msg)
                     self.add_alert("DAILY_LOSS_LIMIT", msg, level="WARNING", details={"underlying": underlying_key, "loss": idx_st["realized_pnl"], "limit": loss_lim})
-            elif idx_st.get("today_trades_count", 0) < max_t:
+            elif is_p1:
+                # Path 1 exit leaves Strategy 2 armed and running
                 idx_st["state"] = "ARMED"
-                LOGGER.info("Index %s auto-rearmed after trade exit (trade #%d of %d max).", underlying_key, idx_st["today_trades_count"], max_t)
+                LOGGER.info("Index %s Strategy 1 trade exited. State remains ARMED for Strategy 2.", underlying_key)
+            elif idx_st.get("path2_trades_count", 0) < max_t:
+                idx_st["state"] = "ARMED"
+                LOGGER.info("Index %s Strategy 2 auto-rearmed after trade exit (trade #%d of %d max).", underlying_key, idx_st.get("path2_trades_count", 0), max_t)
             else:
                 idx_st["state"] = "CLOSED"
-                LOGGER.info("Index %s completed daily maximum %d trades. Closed for today.", underlying_key, max_t)
+                LOGGER.info("Index %s completed daily maximum %d trades for Strategy 2. Closed for today.", underlying_key, max_t)
 
             if underlying_key == NIFTY_KEY:
-                self.current_position = None
+                self.current_position = idx_st["current_position"]
                 self.state = idx_st["state"]
 
         if underlying_key in self.stock_underlyings:
             st = self.stock_underlyings[underlying_key]
-            st["current_position"] = None
+            is_p1 = (pos.get("entry_path") == "PATH_1_0915" or pos.get("strategy") == "PATH_1_0915" or str(pos.get("trade_id", "")).startswith("GAP-"))
+            if is_p1:
+                st["path1_position"] = None
+            else:
+                st["path2_position"] = None
+                st["cooldown_until"] = now_dt + timedelta(minutes=15)
+                st["last_closed_side"] = "CE" if "CE" in pos.get("side", "") else "PE"
+
+            st["current_position"] = st.get("path2_position") or st.get("path1_position")
+            st["realized_pnl"] = round(st.get("realized_pnl", 0.0) + net_pnl, 2)
+
             if reason == "SQUAREOFF_1515":
                 st["state"] = "CLOSED"
             elif self.stock_max_trades_per_day > 0 and st.get("today_trades_count", 0) >= self.stock_max_trades_per_day:
@@ -3272,10 +2996,11 @@ class GapEntryStrategyEngine:
                 LOGGER.info("Stock %s completed daily maximum %d trades. Closed for today.", underlying_key, self.stock_max_trades_per_day)
             else:
                 st["state"] = "ARMED"
-                LOGGER.info("Stock %s auto-rearmed after trade exit (trade #%d). Ready for next setup.", underlying_key, st.get("today_trades_count", 0))
+                LOGGER.info("Stock %s auto-rearmed after trade exit (trade #%d, 15m same-direction cooldown active).", underlying_key, st.get("today_trades_count", 0))
 
-            # JIT: Clean up / unsubscribe the closed option contract from WebSocket 2
-            if self.feed and hasattr(self.feed, "unsubscribe") and inst_key:
+            # Only unsubscribe if this option key is NOT part of the active 22-strike basket
+            basket_set = set(st.get("ce_basket_keys") or []) | set(st.get("pe_basket_keys") or [])
+            if self.feed and hasattr(self.feed, "unsubscribe") and inst_key and inst_key not in basket_set:
                 try:
                     self.feed.unsubscribe([inst_key])
                 except Exception as ex:
@@ -3379,79 +3104,31 @@ class GapEntryStrategyEngine:
             LOGGER.info("MANUAL EXIT INDICES: Closed %d open index positions", len(closed_positions))
             return closed_positions
 
-    def manual_exit_stocks(self, reason: str = "MANUAL") -> list[dict[str, Any]]:
-        """Manual Exit for all open stock option positions."""
-        closed_positions: list[dict[str, Any]] = []
-        with self._lock:
-            for sym, st in list(self.stock_underlyings.items()):
-                p = st.get("current_position") or self.current_positions.get(sym)
-                if p and p.get("status") == "OPEN":
-                    res = self._exit_single_trade(p, reason, sym)
-                    if res:
-                        closed_positions.append(res)
-
-            LOGGER.info("MANUAL EXIT STOCKS: Closed %d open stock positions", len(closed_positions))
-            return closed_positions
-
     def manual_exit(self, reason: str = "MANUAL", underlying_key: str | None = None) -> dict[str, Any] | None:
-        """Manual Exit Now button: exits specified open position or all open positions across indices and stocks."""
+        """Manual Exit Now button: exits specified open position or all open positions across indices."""
         with self._lock:
             u_clean = str(underlying_key).strip().upper() if underlying_key else ""
-            if u_clean in ("INDICES", "INDEX"):
+            if u_clean in ("INDICES", "INDEX", "ALL", "", "NONE"):
                 closed = self.manual_exit_indices(reason)
                 return closed[0] if closed else None
 
-            if u_clean in ("STOCKS", "STOCK"):
-                closed = self.manual_exit_stocks(reason)
-                return closed[0] if closed else None
-
-            if underlying_key and u_clean not in ("ALL", "", "NONE"):
-                # Check if it matches a stock symbol or key
-                sym_match = next((s for s, d in self.stock_underlyings.items() if s == u_clean or d.get("key") == underlying_key), None)
-                if sym_match:
-                    st = self.stock_underlyings[sym_match]
-                    pos = st.get("current_position") or self.current_positions.get(sym_match)
-                    if pos and pos.get("status") == "OPEN":
-                        return self._exit_single_trade(pos, reason, sym_match)
-                    return None
-
-                ukey = self.resolve_underlying_key(underlying_key)
-                pos = self.current_positions.get(ukey)
-                if not pos and ukey in self.index_underlyings:
-                    pos = self.index_underlyings[ukey].get("current_position")
-                if pos and pos.get("status") == "OPEN":
-                    return self._exit_single_trade(pos, reason, ukey)
-                return None
-
-            closed_any = None
-            for ukey, idx_st in list(self.index_underlyings.items()):
-                p = idx_st.get("current_position") or self.current_positions.get(ukey)
-                if p and p.get("status") == "OPEN":
-                    res = self._exit_single_trade(p, reason, ukey)
-                    if not closed_any:
-                        closed_any = res
-
-            for sym, st in list(self.stock_underlyings.items()):
-                p = st.get("current_position") or self.current_positions.get(sym)
-                if p and p.get("status") == "OPEN":
-                    res = self._exit_single_trade(p, reason, sym)
-                    if not closed_any:
-                        closed_any = res
-
-            if self.current_position and self.current_position.get("status") == "OPEN":
-                res = self._exit_single_trade(self.current_position, reason, NIFTY_KEY)
-                if not closed_any:
-                    closed_any = res
-
-            return closed_any
+            ukey = self.resolve_underlying_key(underlying_key)
+            pos = self.current_positions.get(ukey)
+            if not pos and ukey in self.index_underlyings:
+                pos = self.index_underlyings[ukey].get("current_position")
+            if pos and pos.get("status") == "OPEN":
+                return self._exit_single_trade(pos, reason, ukey)
+            return None
 
     def squareoff_all_indices_1515(self) -> None:
         """15:15:00 EOD clock square-off across all active index positions."""
         with self._lock:
             for ukey, idx_st in self.index_underlyings.items():
-                pos = idx_st.get("current_position")
-                if pos and pos.get("status") == "OPEN":
-                    self._exit_single_trade(pos, "SQUAREOFF_1515", ukey)
+                for p_key in ("path1_position", "path2_position", "current_position"):
+                    pos = idx_st.get(p_key)
+                    if pos and isinstance(pos, dict) and pos.get("status") == "OPEN":
+                        self._exit_single_trade(pos, "SQUAREOFF_1515", ukey)
+                idx_st["state"] = "CLOSED"
 
     def emergency_stop(self) -> dict[str, Any]:
         """Emergency stop: exits open position and disables further entries."""
@@ -3627,89 +3304,26 @@ class GapEntryStrategyEngine:
         # PREVIOUS OI BUILDUP EVALUATION (COMMENTED OUT AS PER CLIENT REQUEST):
         # trade = self.evaluate_oi_buildup(underlying_key=ukey, force=True)
         LOGGER.info("FORCE ARM COMPLETED for index %s: State=ARMED (Watching for first positive tick).", ukey)
-
-    def _force_arm_stock(self, sym: str) -> None:
-        sym = sym.upper().strip()
-        st = self.stock_underlyings.get(sym)
-        if not st:
-            return
-        if st.get("current_position") is not None or self.current_positions.get(sym) is not None:
-            LOGGER.warning("force_arm_now: Cannot arm stock %s because it already has an active open position!", sym)
-            return
-
-        st["today_trades_count"] = 0
-        spot = st.get("spot_price")
-        if not spot or spot <= 0:
-            key = st.get("key") or f"NSE_EQ|{sym}"
-            try:
-                ticks = self.database.latest_ticks(instrument_key=key, limit=1)
-                if ticks and float(ticks[0].get("ltp") or 0.0) > 0:
-                    spot = float(ticks[0]["ltp"])
-                    st["spot_price"] = spot
-            except Exception as e:
-                LOGGER.debug("Could not get tick for stock %s: %s", sym, e)
-
-        if not spot or spot <= 0:
-            meta = next((s for s in NIFTY_50_STOCKS if s["symbol"] == sym), None)
-            spot = float(meta.get("strike_step", 10.0) * 100) if meta else 1000.0
-            st["spot_price"] = spot
-
-        self.plan_stock_contracts(sym, spot)
-        self.lock_stock_contracts(sym)
-        self.take_stock_snapshot(sym)
-        st["state"] = "ARMED"
-
-        # Dynamically subscribe feed to locked option keys
-        locked = st.get("locked_keys") or []
-        if self.feed and locked:
-            try:
-                self.feed.subscribe(locked, target="stocks")
-            except Exception as e:
-                LOGGER.debug("Feed subscribe on stock arm: %s", e)
-
-        trade = self.evaluate_stock_oi_buildup(sym)
-        LOGGER.info("FORCE ARM COMPLETED for stock %s: State=ARMED, Trade=%s", sym, trade)
+        self.add_alert(
+            "INDEX_ARMED",
+            f"{idx_st['name']}: ARMED at spot ₹{spot:.2f} (Watching Sum Signal & First Positive Tick)",
+            level="INFO",
+            details={"underlying": ukey, "spot": spot},
+        )
 
     def force_arm_now(self, underlying_key: str | None = None) -> dict[str, Any]:
-        """
-        Forces immediate planning, locking, fresh snapshot, and arming for an index or stock.
-        - Enables 1 more trade for the instrument today.
-        - Only affects the targeted instrument (single-single isolation).
-        """
+        """Forces immediate planning, locking, fresh snapshot, and arming for indices."""
         with self._lock:
             u_clean = str(underlying_key).strip().upper() if underlying_key else ""
 
-            # Check if targeting all stocks
-            if u_clean in ("STOCKS", "STOCK"):
-                armed_count = 0
-                for sym, st in self.stock_underlyings.items():
-                    if st.get("enabled", True):
-                        self._force_arm_stock(sym)
-                        armed_count += 1
-                LOGGER.info("FORCE ARM NOW: Armed %d active constituent stocks (%s)", armed_count, list(self.stock_underlyings.keys()))
-                return self.get_status()
-
-            # Check if targeting all indices
-            if u_clean in ("INDICES", "INDEX"):
+            if u_clean in ("INDICES", "INDEX", "ALL", ""):
                 for ukey in self.index_underlyings:
                     self._force_arm_single_index(ukey)
                 return self.get_status()
 
-            # Check if targeting a specific stock
-            sym_target = None
-            if underlying_key:
-                if u_clean in self.stock_underlyings:
-                    sym_target = u_clean
-                else:
-                    for s, d in self.stock_underlyings.items():
-                        if d.get("key") == underlying_key or s == u_clean.replace("NSE_EQ|", ""):
-                            sym_target = s
-                            break
-            if sym_target:
-                self._force_arm_stock(sym_target)
+            if u_clean in ("STOCKS", "STOCK"):
                 return self.get_status()
 
-            # Otherwise, target index
             ukey = self.resolve_underlying_key(underlying_key)
             self._force_arm_single_index(ukey)
             return self.get_status()
@@ -3731,27 +3345,13 @@ class GapEntryStrategyEngine:
             LOGGER.info("Bot state reset to PLANNING.")
             return self.get_status()
 
-    def rehearse_entry(self) -> dict[str, Any]:
-        """Audit rehearsal for 16-condition evaluation."""
-        with self._lock:
-            t_start = time.perf_counter()
-            eval_res = self.last_evaluation
-            t_ms = round((time.perf_counter() - t_start) * 1000, 3)
-            return {
-                "rehearsal": True,
-                "strategy": "OI Build-up Entry from 09:18",
-                "latency_ms": t_ms,
-                "evaluation": eval_res,
-                "summary": eval_res.get("summary_line", ""),
-            }
-
     # -------------------------------------------------------------------------
     # Status & Configuration API
     # -------------------------------------------------------------------------
 
     def get_config(self) -> dict[str, Any]:
         return {
-            "strategy": "OI Build-up Entry from 09:18",
+            "strategy": "Dr. Vijay Bhilwade Sum Signal (Score = CE % - PE %) + Opening Tick",
             "enabled": self.enabled,
             "mode": self.mode,
             "lots": self.lots,
@@ -3761,6 +3361,13 @@ class GapEntryStrategyEngine:
             "lots_scalp": self.lots_scalp,
             "max_bullish_stocks": getattr(self, "max_bullish_stocks", 5),
             "max_bearish_stocks": getattr(self, "max_bearish_stocks", 5),
+            "stock_lots": getattr(self, "stock_lots", 1),
+            "stock_max_trades_per_day": getattr(self, "stock_max_trades_per_day", 5),
+            "entry_itm_depth": getattr(self, "entry_itm_depth", 2),
+            "min_entry_premium": getattr(self, "min_entry_premium", 50.0),
+            "max_entry_premium": getattr(self, "max_entry_premium", 2500.0),
+            "whipsaw_sec": getattr(self, "whipsaw_sec", 300.0),
+            "allow_double_exposure": getattr(self, "allow_double_exposure", False),
             "price_threshold_pct": self.price_threshold_pct,
             "oi_threshold_pct": self.oi_threshold_pct,
             "max_trades_per_day": self.max_trades_per_day,
@@ -3778,6 +3385,84 @@ class GapEntryStrategyEngine:
             "squareoff_time": self.squareoff_time,
         }
 
+    def get_locked_091455(self) -> dict[str, Any]:
+        """Returns the 09:14:55 locked baseline strikes and non-zero prices for all 3 indices."""
+        res = {}
+        for ukey, idx_st in self.index_underlyings.items():
+            contracts = list(idx_st.get("locked_091455_snapshot") or [])
+            is_locked = bool(idx_st.get("locked_091455_snapshot"))
+            if not contracts:
+                p_keys = idx_st.get("planned_keys") or (idx_st.get("ce_basket_keys", []) + idx_st.get("pe_basket_keys", []))
+                for k in p_keys:
+                    c_info = self.contracts_by_key.get(k, {})
+                    h_info = self.hot_cache.get(k, {})
+                    ref_val = float(h_info.get("ref_ltp") or h_info.get("ltp") or 0.0)
+                    contracts.append({
+                        "instrument_key": k,
+                        "symbol": h_info.get("trading_symbol") or c_info.get("trading_symbol") or k,
+                        "strike": float(h_info.get("strike") or c_info.get("strike_price") or 0.0),
+                        "side": str(h_info.get("side") or c_info.get("instrument_type") or ("CE" if "CE" in str(k) else "PE")).upper(),
+                        "ref_ltp": ref_val,
+                        "ref_source": h_info.get("ref_source") or "planned (pre-lock)",
+                        "lock_time": "PENDING (09:14:55)",
+                    })
+            res[ukey] = {
+                "name": idx_st.get("name", ukey),
+                "locked": is_locked,
+                "lock_time": self.lock_time if is_locked else "09:14:55",
+                "atm_strike": idx_st.get("atm_strike"),
+                "spot_price": idx_st.get("spot_price"),
+                "contracts": contracts,
+            }
+        return res
+
+    def get_baseline_proof_rows(self, include_stocks: bool = True) -> list[dict[str, Any]]:
+        """Generates full 09:14:55 lock + 09:15:00 baseline proof rows for indices and stocks."""
+        rows: list[dict[str, Any]] = []
+        with self._lock:
+            underlyings = list(self.index_underlyings.items())
+            if include_stocks:
+                underlyings.extend(list(self.stock_underlyings.items()))
+            for ukey, st in underlyings:
+                name = st.get("name") or st.get("symbol") or ukey
+                lock_map = {c.get("instrument_key"): c for c in (st.get("locked_091455_snapshot") or []) if c.get("instrument_key")}
+                base_prices = st.get("baseline_prices") or {}
+                snap = st.get("snapshot") or {}
+                keys = (st.get("ce_basket_keys") or []) + (st.get("pe_basket_keys") or [])
+                if not keys:
+                    keys = st.get("locked_keys") or []
+                for k in keys:
+                    hc = self.hot_cache.get(k, {})
+                    lk = lock_map.get(k, {})
+                    ref_091455 = float(lk.get("ref_ltp") if lk.get("ref_ltp") is not None else (hc.get("ref_ltp") or 0.0))
+                    ref_src = str(lk.get("ref_source") or hc.get("ref_source") or ("MISSING_091455" if ref_091455 <= 0 else "live_091455"))
+                    base_0915 = float(base_prices.get(k) or (snap.get(k) or {}).get("ltp") or 0.0)
+                    ltp = float(hc.get("ltp") or 0.0)
+                    bid = float(hc.get("bid_price") or 0.0)
+                    ask = float(hc.get("ask_price") or 0.0)
+                    mid = round((bid + ask) / 2.0, 2) if bid > 0 and ask > 0 else ltp
+                    pct_vs_base = round(((ltp - base_0915) / base_0915) * 100.0, 2) if base_0915 > 0 and ltp > 0 else 0.0
+                    rows.append({
+                        "underlying_key": ukey,
+                        "name": name,
+                        "spot_price": float(st.get("spot_price") or 0.0),
+                        "atm_strike": float(st.get("atm_strike") or 0.0),
+                        "lot_size": int(st.get("lot_size") or 1),
+                        "instrument_key": k,
+                        "symbol": hc.get("trading_symbol") or lk.get("symbol") or k,
+                        "side": str(hc.get("side") or lk.get("side") or "").upper(),
+                        "strike": float(hc.get("strike") or lk.get("strike") or 0.0),
+                        "locked_091455_ltp": round(ref_091455, 2),
+                        "locked_091455_source": ref_src,
+                        "baseline_091500_ltp": round(base_0915, 2),
+                        "live_ltp": round(ltp, 2),
+                        "live_mid": mid,
+                        "pct_vs_0915": pct_vs_base,
+                        "ce_baseline_sum": float(st.get("ce_baseline_sum") or 0.0),
+                        "pe_baseline_sum": float(st.get("pe_baseline_sum") or 0.0),
+                    })
+        return rows
+
     def update_config(self, body: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             if "lots_full" in body:
@@ -3787,9 +3472,25 @@ class GapEntryStrategyEngine:
             if "lots_scalp" in body:
                 self.lots_scalp = max(1, int(body["lots_scalp"]))
             if "max_bullish_stocks" in body:
-                self.max_bullish_stocks = max(1, min(5, int(body["max_bullish_stocks"])))
+                self.max_bullish_stocks = max(1, min(10, int(body["max_bullish_stocks"])))
             if "max_bearish_stocks" in body:
-                self.max_bearish_stocks = max(1, min(5, int(body["max_bearish_stocks"])))
+                self.max_bearish_stocks = max(1, min(10, int(body["max_bearish_stocks"])))
+            if "stock_lots" in body:
+                self.stock_lots = max(1, int(body["stock_lots"]))
+            if "stock_max_trades_per_day" in body:
+                self.stock_max_trades_per_day = max(1, int(body["stock_max_trades_per_day"]))
+            if "entry_itm_depth" in body:
+                self.entry_itm_depth = max(1, min(5, int(body["entry_itm_depth"])))
+            if "min_entry_premium" in body:
+                self.min_entry_premium = max(0.0, float(body["min_entry_premium"]))
+            if "max_entry_premium" in body:
+                self.max_entry_premium = max(self.min_entry_premium + 1.0, float(body["max_entry_premium"]))
+            if "whipsaw_sec" in body:
+                self.whipsaw_sec = max(10.0, float(body["whipsaw_sec"]))
+                for d in list(self.index_underlyings.values()) + list(self.stock_underlyings.values()):
+                    d["whipsaw_sec"] = self.whipsaw_sec
+            if "allow_double_exposure" in body:
+                self.allow_double_exposure = bool(body["allow_double_exposure"])
             if "price_threshold_pct" in body:
                 self.price_threshold_pct = float(body["price_threshold_pct"])
             if "oi_threshold_pct" in body:
@@ -3830,34 +3531,41 @@ class GapEntryStrategyEngine:
             return self.get_config()
 
     def get_live_open_positions(self) -> dict[str, dict[str, Any]]:
-        """Returns all currently open positions with live tick-by-tick marked-to-market P&L."""
+        """Returns all currently open positions (indices + stocks) with live marked-to-market P&L."""
         live_pos = {}
         with self._lock:
-            for key, pos in self.current_positions.items():
-                if not pos or pos.get("status") == "CLOSED":
-                    continue
-                ik = pos.get("instrument_key")
-                hc = self.hot_cache.get(ik) or {}
-                bid = float(hc.get("bid_price") or hc.get("ltp") or pos.get("entry_price") or 0.0)
-                ask = float(hc.get("ask_price") or hc.get("ltp") or pos.get("entry_price") or 0.0)
-                entry_p = float(pos.get("entry_price") or 0.0)
-                qty = int(pos.get("lot_size") or 1)
-                cur_p = bid if bid > 0 else (ask if ask > 0 else entry_p)
-                pts = round(cur_p - entry_p, 2)
-                net = round(pts * qty, 2)
-                p_copy = dict(pos)
-                p_copy["current_price"] = cur_p
-                p_copy["bid_price"] = bid
-                p_copy["ask_price"] = ask
-                p_copy["pnl_points"] = pts
-                p_copy["net_pnl"] = net
-                live_pos[key] = p_copy
+            all_states = list(self.index_underlyings.values()) + list(self.stock_underlyings.values())
+            for idx_st in all_states:
+                for p_key in ("path1_position", "path2_position", "current_position"):
+                    pos = idx_st.get(p_key)
+                    if not pos or not isinstance(pos, dict) or pos.get("status") == "CLOSED":
+                        continue
+                    tid = pos.get("trade_id")
+                    if not tid or tid in live_pos:
+                        continue
+                    ik = pos.get("instrument_key")
+                    hc = self.hot_cache.get(ik) or {}
+                    bid = float(hc.get("bid_price") or 0.0)
+                    ask = float(hc.get("ask_price") or 0.0)
+                    ltp_val = float(hc.get("ltp") or 0.0)
+                    entry_p = float(pos.get("entry_price") or 0.0)
+                    qty = int(pos.get("total_qty") or pos.get("lot_size") or 1)
+                    cur_p = bid if bid > 0 else (ltp_val if ltp_val > 0 else (ask if ask > 0 else entry_p))
+                    pts = round(cur_p - entry_p, 2)
+                    net = round(pts * qty, 2)
+                    p_copy = dict(pos)
+                    p_copy["current_price"] = cur_p
+                    p_copy["bid_price"] = bid
+                    p_copy["ask_price"] = ask
+                    p_copy["pnl_points"] = pts
+                    p_copy["net_pnl"] = net
+                    live_pos[tid] = p_copy
         return live_pos
 
     def get_status(self) -> dict[str, Any]:
         with self._lock:
             today_str = datetime.now(IST).strftime("%Y-%m-%d")
-            trades = self.database.get_strategy_trades(limit=100, trade_date=today_str)
+            trades = self.database.get_strategy_trades(limit=200, trade_date=today_str)
             today_trades = trades
             today_closed = [t for t in today_trades if t.get("status") == "CLOSED"]
             realized_pnl = sum(float(t.get("net_pnl") or 0.0) for t in today_closed)
@@ -3900,7 +3608,7 @@ class GapEntryStrategyEngine:
             eval_res = self.last_evaluation or {}
 
             return {
-                "strategy_name": "Opening Gap Entry - First Positive Tick (NIFTY 50, BANK NIFTY, SENSEX)",
+                "strategy_name": "Dr. Vijay Bhilwade Sum Signal (NIFTY 50, BANK NIFTY, SENSEX + 50 Stocks)",
                 "state": self.state,
                 "enabled": self.enabled,
                 "mode": self.mode,
@@ -3973,52 +3681,48 @@ class GapEntryStrategyEngine:
                 "futures_oi": self.index_underlyings.get(NIFTY_KEY, {}).get("futures_oi"),
                 "futures_buildup": self.index_underlyings.get(NIFTY_KEY, {}).get("futures_buildup", "Neutral"),
                 "alerts": self.get_alerts(limit=20),
+                "stocks_tracked": len(self.stock_underlyings),
+                "stock_rankings": list(getattr(self, "_stock_rankings", [])),
+                "top_bullish": list(getattr(self, "_top_bullish", [])),
+                "top_bearish": list(getattr(self, "_top_bearish", [])),
                 "stock_underlyings": {
-                    sym: {
-                        "symbol": d["symbol"],
-                        "name": d.get("name", sym),
-                        "lot_size": d["lot_size"],
-                        "lots": d["lots"],
-                        "enabled": d["enabled"],
-                        "state": d["state"],
-                        "spot_price": d["spot_price"],
-                        "open_price": d.get("open_price"),
-                        "prev_close": d.get("prev_close"),
-                        "gap_pct": d.get("gap_pct", 0.0),
-                        "gap_against": d.get("gap_against", False),
-                        "gap_reason": d.get("gap_reason", ""),
-                        "watchlist_rank": d.get("watchlist_rank", "★★★"),
-                        "watchlist_direction": d.get("watchlist_direction", "BULLISH"),
-                        "futures_buildup": d.get("futures_buildup", "Neutral"),
+                    ukey: {
+                        "key": d["key"],
+                        "symbol": d.get("symbol", ukey),
+                        "state": d.get("state"),
+                        "spot_price": d.get("spot_price"),
+                        "ce_pct": d.get("ce_pct", 0.0),
+                        "pe_pct": d.get("pe_pct", 0.0),
+                        "score": d.get("score", 0.0),
+                        "raw_signal": d.get("raw_signal", "Neutral"),
+                        "confirmed_signal": d.get("confirmed_signal"),
+                        "has_position": (d.get("path2_position") or d.get("path1_position") or d.get("current_position")) is not None,
                         "today_trades_count": d.get("today_trades_count", 0),
-                        "max_trades_per_day": self.stock_max_trades_per_day,
-                        "path1_done": d.get("path1_done", False),
-                        "last_evaluation": d["last_evaluation"],
-                        "has_position": d["current_position"] is not None,
-                        "position": d["current_position"],
                     }
-                    for sym, d in self.stock_underlyings.items()
+                    for ukey, d in self.stock_underlyings.items()
+                    if d.get("spot_price")
                 },
                 "config": self.get_config(),
                 "csv_path": str(self.csv_path),
             }
 
 
-# Backwards compatibility alias
-PressureStrategyEngine = GapEntryStrategyEngine
-
-
 # =========================================================================
-# STRATEGY STATUS & PRESERVED ARCHITECTURE
+# ACTIVE STRATEGY SPECIFICATION (Indices & All 50 NIFTY Stocks)
 # =========================================================================
 """
-ACTIVE STRATEGY:
-- Opening Gap Entry - First Positive Tick at 09:15:00 for NIFTY 50, BANK NIFTY, and SENSEX.
-  Rule R8: Locks 8 ITM contracts at 09:14:55, stores fixed ref_ltp, arms at 09:15:00.
-  First positive tick (LTP > ref_ltp) enters tightest spread contract on that side.
+1. STRATEGY 1: Opening Gap Entry - First Positive Tick (Indices: 09:14:55 to 09:18:00)
+   - Locks ATM ± 10 contracts (42 options per index) at 09:14:55, stores fixed ref_ltp, arms at 09:15:00.
+   - First positive tick (LTP > ref_ltp) enters tightest spread contract on that side.
 
-PRESERVED STRATEGY:
-- 09:18:00 OI Build-up 16-condition table strategy (Strategy_OI_Buildup_0918_for_LLM.md).
-  Preserved in code and commented out for index live execution as per client request.
-  Constituent stock options evaluate via the 09:18 OI buildup table.
+2. STRATEGY 2: Dr. Vijay Bhilwade Sum Signal & Real-Time Ranking Strategy
+   - Indices: ATM ± 10 basket (21 CE + 21 PE = 42 contracts per index).
+   - Stocks: ATM ± 5 basket (11 CE + 11 PE = 22 contracts per stock) across all 50 Nifty stocks.
+   - 09:15:00 Baseline snapshot locked for CE sum and PE sum across all 53 underlyings.
+   - Live Score = CE % - PE %
+   - Real-time 1 to 50 stock ranking:
+       * Top 3 Bullish (Rank 1, 2, 3): BUY CE (ITM-2) with 300s confirmation.
+       * Bottom 3 Bearish (Rank 48, 49, 50): BUY PE (ITM-2) with 300s confirmation.
+   - Position Management: -20% initial SL, +40% target, +5% to cost stepped trailing SL.
+   - Trade Isolation Rule: Open positions are NEVER cut due to rank drop; managed solely by SL/TP/Reversal.
 """

@@ -24,9 +24,8 @@ from pathlib import Path
 from candle_builder import OneMinuteCandleBuilder
 from config import IST, load_settings
 from database import MarketDatabase
-from flow_engine import FLOW_ENGINE
 from stock_screener import NIFTY_50_STOCKS, StockScreener
-from strategy_engine import GapEntryStrategyEngine, PressureStrategyEngine
+from strategy_engine import GapEntryStrategyEngine
 from upstox_feed import DualUpstoxFeed, UpstoxFeed
 
 logging.basicConfig(
@@ -42,6 +41,7 @@ strategy_engine = GapEntryStrategyEngine(
     base_dir=settings.db_path.parent,
     access_token=settings.access_token,
 )
+strategy_engine.on_alert = lambda a: publish("alert", a)
 stock_screener = StockScreener(
     base_dir=settings.db_path.parent,
     access_token=settings.access_token,
@@ -107,21 +107,10 @@ candle_builder = OneMinuteCandleBuilder(
 
 def handle_tick(tick: dict[str, Any]) -> None:
     try:
-        database.insert_tick(tick)
+        database.enqueue_tick(tick)
         recent_ticks.appendleft(tick)
         publish("tick", tick)
         candle_builder.process_tick(tick)
-
-        # Feed tick to PCR Flow Engine (v0.0.5 Section 6A)
-        inst_k = str(tick.get("instrument_key") or "")
-        FLOW_ENGINE.on_tick(
-            inst_k,
-            ltp=float(tick.get("ltp") or 0.0),
-            oi=float(tick["open_interest"]) if tick.get("open_interest") is not None else None,
-            vol=float(tick["volume"]) if tick.get("volume") is not None else None,
-            bid=float(tick.get("bid_price") or 0.0),
-            ask=float(tick.get("ask_price") or 0.0),
-        )
 
         trade = strategy_engine.on_tick(tick)
         if trade:
@@ -129,22 +118,19 @@ def handle_tick(tick: dict[str, Any]) -> None:
     except Exception:
         LOGGER.exception("Failed to store or aggregate a market tick.")
 
-# SINGLE WebSocket: Upstox standard accounts only allow 1 concurrent WebSocket connection per token.
-# We combine all index + stock keys into one UpstoxFeed, wrapped in DualUpstoxFeed for routing compatibility.
-# DualUpstoxFeed is kept intact but forced into single-feed mode by passing empty stock_keys and
-# a combined index_keys list that includes all 50 equity keys + index/futures keys.
-
-# Indices Only: Stream strictly index spot and index option instruments
+# Dual/Triple WebSocket Feed (Upstox Plus Plan allows up to 5 concurrent connections, 1,500 full keys/socket):
+# Socket 1 (indices-feed): 3 Indices spot/futures + 66 index basket options + dynamic ITM strikes
+# Socket 2 & 3 (stocks-feed / stocks-feed-2): 50 NIFTY EQ spots + up to 1,100 stock basket options
 initial_index_keys = list(settings.instrument_keys)
-all_initial_keys = initial_index_keys
+initial_stock_keys = [s["key"] for s in NIFTY_50_STOCKS]
 
-# Use a single UpstoxFeed instead of DualUpstoxFeed to avoid 403 from second connection
-feed = UpstoxFeed(
+feed = DualUpstoxFeed(
     settings=settings,
     on_tick=handle_tick,
     on_status=handle_status,
-    name="main-feed",
-    initial_keys=all_initial_keys,
+    classifier=strategy_engine.classify_instrument,
+    index_keys=initial_index_keys,
+    stock_keys=initial_stock_keys,
 )
 strategy_engine.set_feed(feed)
 
@@ -211,57 +197,32 @@ def strategy_schedule_worker() -> None:
     """
     LOGGER.info("Opening Gap Entry Strategy schedule worker started.")
     time.sleep(2)
-    # Preload contracts once at startup for all 3 supported indices
+    # Preload contracts once at startup for all 3 indices + 50 NIFTY stocks
     if settings.configured and settings.access_token:
         for ukey in ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank", "BSE_INDEX|SENSEX"]:
             try:
                 strategy_engine.load_contracts_if_needed(ukey)
             except Exception as exc:
                 LOGGER.warning("Startup contract load failed for %s: %s", ukey, exc)
-        LOGGER.info("Gap Entry Strategy contracts preloaded across indices.")
+        if hasattr(strategy_engine, "plan_all_stocks"):
+            try:
+                strategy_engine.plan_all_stocks()
+            except Exception as exc:
+                LOGGER.warning("Startup stock planning failed: %s", exc)
+        LOGGER.info("Gap Entry Strategy contracts preloaded across indices & NIFTY 50 stocks.")
 
     last_broadcast_ms = 0
-    _last_flow_bar_min = -1
     while True:
         try:
             now_dt = datetime.now(IST)
             now_time = now_dt.strftime("%H:%M:%S")
 
-            # Sync basket contracts to FLOW_ENGINE (v0.0.5 Section 6A)
-            for ukey, idx_st in strategy_engine.index_underlyings.items():
-                if ukey in FLOW_ENGINE.trackers:
-                    trk = FLOW_ENGINE.trackers[ukey]
-                    if not trk.basket_contracts and idx_st.get("locked_keys"):
-                        b_contracts = [
-                            strategy_engine.hot_cache[k] for k in idx_st["locked_keys"]
-                            if k in strategy_engine.hot_cache
-                        ]
-                        if b_contracts:
-                            spot_p = idx_st.get("spot_price") or 0.0
-                            trk.set_basket(b_contracts, atm_strike=spot_p)
-                            if not trk.baseline_taken:
-                                trk.take_0915_baseline()
-                            if feed and hasattr(feed, "subscribe"):
-                                b_keys = [c["instrument_key"] for c in b_contracts if c.get("instrument_key")]
-                                if b_keys:
-                                    feed.subscribe(b_keys)
-
-            # Trigger 1-minute bar evaluation for Flow Engine
-            cur_minute = now_dt.minute
-            if cur_minute != _last_flow_bar_min:
-                _last_flow_bar_min = cur_minute
-                cur_bar_ms = int(time.time() * 1000)
-                for ukey, trk in FLOW_ENGINE.trackers.items():
-                    if trk.is_index and ukey in strategy_engine.index_underlyings:
-                        st_item = strategy_engine.index_underlyings[ukey]
-                        s_p = float(st_item.get("spot_price") or 0.0)
-                        if s_p > 0:
-                            trk.on_minute_bar_closed(cur_bar_ms, s_p, s_p)
-
             if strategy_engine.enabled:
-                # Dynamic planning for indices
+                # Dynamic planning for indices & 50 stocks before 09:14:55 lock
                 if hasattr(strategy_engine, "plan_all_indices"):
                     strategy_engine.plan_all_indices()
+                if hasattr(strategy_engine, "plan_all_stocks"):
+                    strategy_engine.plan_all_stocks()
 
                 # Lock at 09:14:55
                 if "09:14:55" <= now_time < "09:15:00":
@@ -301,7 +262,7 @@ def strategy_schedule_worker() -> None:
                         strategy_engine.arm_all_stocks()
 
                     # Periodic evaluation across active underlyings (indices & stocks)
-                    if now_time < "14:45:00" and hasattr(strategy_engine, "evaluate_all_active_underlyings"):
+                    if now_time < "15:30:00" and hasattr(strategy_engine, "evaluate_all_active_underlyings"):
                         strategy_engine.evaluate_all_active_underlyings()
 
                 # Phase 3 Alerts: 14:45 Cutoff alert
@@ -409,51 +370,20 @@ def api_dashboard_data() -> Response:
         net_chg_pct = round(((spot - prev_c) / prev_c) * 100.0, 2) if prev_c > 0 else 0.0
 
         last_eval = idx_st.get("last_evaluation") or {}
-        decision = last_eval.get("decision") or "No trade"
-        rule_num = last_eval.get("rule")
-        stars = last_eval.get("stars", "")
-        size = last_eval.get("size", "")
-        ce_type = last_eval.get("ce_type") or "Neutral"
-        pe_type = last_eval.get("pe_type") or "Neutral"
         delta_ce = float(last_eval.get("delta_ce") or 0.0)
         delta_pe = float(last_eval.get("delta_pe") or 0.0)
         ce_price_pct = float(last_eval.get("ce_price_pct") or 0.0)
         pe_price_pct = float(last_eval.get("pe_price_pct") or 0.0)
-
-        # OI Balance ratio I = (delta_pe - delta_ce) / (|delta_pe| + |delta_ce|)
-        tot_oi_abs = abs(delta_pe) + abs(delta_ce)
-        oi_i = round((delta_pe - delta_ce) / tot_oi_abs, 2) if tot_oi_abs > 0 else 0.0
-
-        # Futures
-        fut_snap_ltp = float(idx_st.get("futures_snap_ltp") or idx_st.get("prev_close") or 1.0)
-        fut_ltp = float(idx_st.get("futures_ltp") or fut_snap_ltp)
-        fut_price_pct = round(((fut_ltp - fut_snap_ltp) / fut_snap_ltp) * 100.0, 2) if fut_snap_ltp > 0 else 0.0
-
-        fut_snap_oi = float(idx_st.get("futures_snap_oi") or 0.0)
-        fut_oi = float(idx_st.get("futures_oi") or 0.0)
-        fut_oi_pct = round(((fut_oi - fut_snap_oi) / fut_snap_oi) * 100.0, 2) if (fut_snap_oi > 100 and fut_oi > 0) else 0.0
-        fut_bu = idx_st.get("futures_buildup", "Neutral")
-
-        # Gate status
-        if ukey == "BSE_INDEX|SENSEX":
-            gate_status = "OFF"
-        else:
-            if decision == "CE Buy":
-                gate_status = "Pass" if fut_bu in ("LB", "SC") else "Block"
-            elif decision == "PE Buy":
-                gate_status = "Pass" if fut_bu in ("SB", "LU") else "Block"
-            else:
-                gate_status = "Pass"
-
-        # Action status
-        if decision == "CE Buy":
-            action = "ENTER CE"
-        elif decision == "PE Buy":
-            action = "ENTER PE"
-        elif idx_st.get("has_position"):
-            action = "EXIT 1/2"
-        else:
-            action = "NO_TRADE"
+        ce_type = last_eval.get("ce_type") or "Neutral"
+        pe_type = last_eval.get("pe_type") or "Neutral"
+        rule_num = last_eval.get("rule")
+        stars = last_eval.get("stars", "")
+        size = last_eval.get("size", "")
+        oi_i = 0.0
+        fut_price_pct = 0.0
+        fut_oi_pct = 0.0
+        fut_bu = "Neutral"
+        gate_status = "Pass"
 
         atm_strike = idx_st.get("atm_strike")
         if not atm_strike and spot > 0:
@@ -469,6 +399,7 @@ def api_dashboard_data() -> Response:
         snap = idx_st.get("snapshot") or {}
 
         by_strike: dict[float, dict[str, Any]] = {}
+        base_prices = idx_st.get("baseline_prices") or {}
         for k in l_keys:
             c = hot_cache.get(k, {})
             stk = float(c.get("strike") or 0.0)
@@ -478,56 +409,21 @@ def api_dashboard_data() -> Response:
             if stk not in by_strike:
                 by_strike[stk] = {"strike": stk}
             ltp = float(c.get("ltp") or 0.0)
-            oi = float(c.get("oi") or 0.0)
             c_snap = snap.get(k, {})
-            snap_ltp = float(c_snap.get("ltp") or c.get("ref_ltp") or ltp or 1.0)
-            snap_oi = float(c_snap.get("oi") or c.get("prev_oi") or oi or 1.0)
-
-            d_oi = oi - snap_oi if snap_oi > 0 else 0.0
-            d_oi_pct = round((d_oi / snap_oi) * 100.0, 2) if snap_oi > 0 else 0.0
-            p_pct = round(((ltp - snap_ltp) / snap_ltp) * 100.0, 2) if snap_ltp > 0 else 0.0
-
-            p_dir = "UP" if p_pct >= 0.5 else ("DOWN" if p_pct <= -0.5 else "FLAT")
-            oi_dir = "UP" if d_oi_pct >= 1.0 else ("DOWN" if d_oi_pct <= -1.0 else "FLAT")
-            if p_dir == "UP" and oi_dir == "UP":
-                bu = "LB"
-            elif p_dir == "DOWN" and oi_dir == "UP":
-                bu = "SB"
-            elif p_dir == "UP" and oi_dir == "DOWN":
-                bu = "SC"
-            elif p_dir == "DOWN" and oi_dir == "DOWN":
-                bu = "LU"
-            else:
-                bu = "NEU"
+            # Strictly use single unified 09:15 baseline (never prev_close)
+            snap_ltp = float(base_prices.get(k) or c_snap.get("ltp") or 0.0)
+            p_pct = round(((ltp - snap_ltp) / snap_ltp) * 100.0, 2) if snap_ltp > 0 and ltp > 0 else 0.0
 
             if side == "CE":
+                by_strike[stk]["ce_snap_ltp"] = snap_ltp
                 by_strike[stk]["ce_ltp"] = ltp
-                by_strike[stk]["ce_oi"] = oi
-                by_strike[stk]["ce_delta_oi"] = d_oi
-                by_strike[stk]["ce_delta_oi_pct"] = d_oi_pct
                 by_strike[stk]["ce_price_pct"] = p_pct
-                by_strike[stk]["ce_buildup"] = bu
             else:
+                by_strike[stk]["pe_snap_ltp"] = snap_ltp
                 by_strike[stk]["pe_ltp"] = ltp
-                by_strike[stk]["pe_oi"] = oi
-                by_strike[stk]["pe_delta_oi"] = d_oi
-                by_strike[stk]["pe_delta_oi_pct"] = d_oi_pct
                 by_strike[stk]["pe_price_pct"] = p_pct
-                by_strike[stk]["pe_buildup"] = bu
 
         sorted_stks = sorted(by_strike.values(), key=lambda x: x["strike"])
-
-        # Aggregate live sum across ATM ±1 strikes if last_eval delta is 0
-        sum_delta_ce = sum(stk_val.get("ce_delta_oi", 0.0) for stk_val in by_strike.values())
-        sum_delta_pe = sum(stk_val.get("pe_delta_oi", 0.0) for stk_val in by_strike.values())
-        if delta_ce == 0.0 and sum_delta_ce != 0.0:
-            delta_ce = sum_delta_ce
-        if delta_pe == 0.0 and sum_delta_pe != 0.0:
-            delta_pe = sum_delta_pe
-
-        # Re-derive OI Balance ratio I with live delta
-        tot_oi_abs = abs(delta_pe) + abs(delta_ce)
-        oi_i = round((delta_pe - delta_ce) / tot_oi_abs, 2) if tot_oi_abs > 0 else 0.0
 
         # Sum Signal metrics
         ce_current_sum = float(idx_st.get("ce_current_sum") or 0.0)
@@ -596,9 +492,10 @@ def api_dashboard_data() -> Response:
             "strikes": sorted_stks,
         })
 
-    # 2. Platform in Indices-Only Mode: Stocks disabled
-    top_bullish: list[dict[str, Any]] = []
-    top_bearish: list[dict[str, Any]] = []
+    # 2. Live 50-Stock Rankings (Score = CE % - PE %) & Confirmed Top Bullish / Bearish
+    stock_rankings = list(st.get("stock_rankings") or [])
+    top_bullish = list(st.get("top_bullish") or [])
+    top_bearish = list(st.get("top_bearish") or [])
 
     # 3. Alerts
     recent_alerts = strategy_engine.get_alerts(limit=50)
@@ -615,17 +512,29 @@ def api_dashboard_data() -> Response:
         "last_market_update": last_update_str,
         "today_trades": st.get("today_trades", 0),
         "today_net_pnl": st.get("today_net_pnl_inr", 0.0),
+        "stocks_tracked": st.get("stocks_tracked", len(getattr(strategy_engine, "stock_underlyings", {}))),
         "indices": indices_out,
+        "stock_rankings": stock_rankings,
         "top_bullish": top_bullish,
         "top_bearish": top_bearish,
         "recent_alerts": recent_alerts,
+        "locked_091455": getattr(strategy_engine, "get_locked_091455", lambda: {})(),
+        "momentum_feed": getattr(strategy_engine, "get_momentum_history", lambda: [])(limit=50),
         "config": {
-            "max_bullish_stocks": max_bull,
-            "max_bearish_stocks": max_bear,
+            "max_bullish_stocks": getattr(strategy_engine, "max_bullish_stocks", 5),
+            "max_bearish_stocks": getattr(strategy_engine, "max_bearish_stocks", 5),
+            "stock_lots": getattr(strategy_engine, "stock_lots", 1),
+            "stock_max_trades_per_day": getattr(strategy_engine, "stock_max_trades_per_day", 5),
+            "entry_itm_depth": getattr(strategy_engine, "entry_itm_depth", 2),
+            "min_entry_premium": getattr(strategy_engine, "min_entry_premium", 50.0),
+            "max_entry_premium": getattr(strategy_engine, "max_entry_premium", 2500.0),
+            "whipsaw_sec": getattr(strategy_engine, "whipsaw_sec", 300.0),
+            "allow_double_exposure": getattr(strategy_engine, "allow_double_exposure", False),
             "lots_full": getattr(strategy_engine, "lots_full", 1),
             "lots_normal": getattr(strategy_engine, "lots_normal", 1),
             "lots_scalp": getattr(strategy_engine, "lots_scalp", 1),
             "index_lots": getattr(strategy_engine, "index_lots", {}),
+            "index_lot_sizes": getattr(strategy_engine, "index_lot_sizes", {}),
         },
         "timestamp_ist": datetime.now(IST).strftime("%H:%M:%S"),
     })
@@ -822,12 +731,6 @@ def api_option_chain() -> Response:
     if status != 200:
         return jsonify({"error": f"Upstox API error: {status}", "detail": payload}), status
 
-    if hasattr(strategy_engine, "process_option_chain_snapshot") and spot_price and data and getattr(strategy_engine, "enabled", False):
-        sig = strategy_engine.process_option_chain_snapshot(spot_price, data, instrument_key)
-        if sig:
-            publish("strategy_signal", sig)
-
-
     return jsonify({
         "status": "success",
         "expiry_date": resolved_expiry,
@@ -938,6 +841,18 @@ def api_strategy_trades() -> Response:
                         t["pnl_points"] = live.get("pnl_points", 0.0)
                         t["current_price"] = live.get("current_price", 0.0)
                         t["exit_price"] = live.get("bid_price", 0.0)
+                    else:
+                        ik = t.get("instrument_key")
+                        hc = strategy_engine.hot_cache.get(ik) or {}
+                        cur_p = float(hc.get("bid_price") or hc.get("ltp") or 0.0)
+                        if cur_p > 0:
+                            entry_p = float(t.get("entry_price") or 0.0)
+                            qty = int(t.get("lot_size") or 1)
+                            pts = round(cur_p - entry_p, 2)
+                            t["pnl_points"] = pts
+                            t["net_pnl"] = round(pts * qty, 2)
+                            t["current_price"] = cur_p
+                            t["exit_price"] = cur_p
         except Exception as ex:
             LOGGER.debug("Could not merge live trades PnL: %s", ex)
 
@@ -972,13 +887,15 @@ def api_strategy_trades_export_csv() -> Response:
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "Trade ID", "Trade Date", "Symbol", "Side", "Strike", "Lot Size",
+        "Trade ID", "Strategy", "Trade Date", "Symbol", "Side", "Strike", "Lot Size",
         "Entry Price", "Entry Time (IST ms)", "Exit Price", "Exit Time (IST ms)",
         "PnL Points", "Net PnL (INR)", "Status", "Profit / Exit Type", "Underlying"
     ])
     for t in trades:
+        strat_col = t.get("strategy") or ("PATH_1_0915" if "PATH_1" in str(t.get("entry_path", "")) or "PATH_1" in str(t.get("build_up", "")) or "GAP-" in str(t.get("trade_id", "")) or "P1_" in str(t.get("trade_id", "")) else "SUM_SIGNAL")
         writer.writerow([
             t.get("trade_id", ""),
+            strat_col,
             t.get("trade_date", ""),
             t.get("symbol", ""),
             t.get("side", ""),
@@ -1112,14 +1029,197 @@ def api_strategy_alerts_export_csv() -> Response:
         },
     )
 
-@app.get("/api/strategy/flow")
-def api_strategy_flow() -> Response:
-    """Section 6B Phase 1 Simple PCR Flow Monitor endpoint."""
-    try:
-        return jsonify(FLOW_ENGINE.get_phase1_dashboard())
-    except Exception as exc:
-        LOGGER.error("Failed to generate flow dashboard: %s", exc)
-        return jsonify({"status": "LIVE", "timestamp": "", "rows": [], "alerts": []})
+@app.get("/api/strategy/baseline-proof.csv")
+def api_strategy_baseline_proof_csv() -> Response:
+    """Downloads the 09:16 Baseline Proof CSV showing 09:14:55 lock and 09:15:00 baseline per strike."""
+    include_stocks = request.args.get("include_stocks", default="1", type=str).strip() != "0"
+    rows = (
+        strategy_engine.get_baseline_proof_rows(include_stocks=include_stocks)
+        if hasattr(strategy_engine, "get_baseline_proof_rows")
+        else []
+    )
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Underlying Key", "Symbol Name", "Spot Price", "ATM Strike", "Lot Size",
+        "Instrument Key", "Trading Symbol", "Side", "Strike",
+        "09:14:55 Lock LTP", "09:14:55 Source", "09:15:00 Baseline LTP",
+        "Live LTP", "Live Mid Price", "% vs 09:15 Baseline",
+        "CE Basket 09:15 Sum", "PE Basket 09:15 Sum",
+    ])
+    for r in rows:
+        writer.writerow([
+            r.get("underlying_key", ""),
+            r.get("name", ""),
+            f"{float(r.get('spot_price') or 0.0):.2f}",
+            f"{float(r.get('atm_strike') or 0.0):.2f}",
+            int(r.get("lot_size") or 1),
+            r.get("instrument_key", ""),
+            r.get("symbol", ""),
+            r.get("side", ""),
+            f"{float(r.get('strike') or 0.0):.2f}",
+            f"{float(r.get('locked_091455_ltp') or 0.0):.2f}",
+            r.get("locked_091455_source", ""),
+            f"{float(r.get('baseline_091500_ltp') or 0.0):.2f}",
+            f"{float(r.get('live_ltp') or 0.0):.2f}",
+            f"{float(r.get('live_mid') or 0.0):.2f}",
+            f"{float(r.get('pct_vs_0915') or 0.0):+.2f}%",
+            f"{float(r.get('ce_baseline_sum') or 0.0):.2f}",
+            f"{float(r.get('pe_baseline_sum') or 0.0):.2f}",
+        ])
+
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    csv_data = output.getvalue().encode("utf-8")
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=baseline_proof_0916_{today_str}.csv",
+            "Cache-Control": "no-cache, no-store",
+        },
+    )
+
+@app.get("/api/strategy/momentum-logs")
+def api_strategy_momentum_logs() -> Response:
+    limit = request.args.get("limit", default=100000, type=int)
+    date_param = request.args.get("date", default=None, type=str)
+    index_param = request.args.get("index", default=None, type=str)
+
+    if not date_param or date_param.strip().lower() == "today":
+        target_date = datetime.now(IST).strftime("%Y-%m-%d")
+    elif date_param.strip().lower() == "all":
+        target_date = None
+    else:
+        target_date = date_param.strip()
+
+    logs = database.get_momentum_logs(date=target_date, underlying_key=index_param, limit=limit)
+    if not logs and (target_date == datetime.now(IST).strftime("%Y-%m-%d") or not target_date):
+        mem_logs = getattr(strategy_engine, "momentum_history", [])
+        today_s = datetime.now(IST).strftime("%Y-%m-%d")
+        logs = []
+        for m in reversed(mem_logs):
+            if index_param and index_param.upper() not in ("ALL", ""):
+                if m.get("key") != index_param and index_param not in m.get("name", ""):
+                    continue
+            ce_p = float(m.get("ce_pct", 0.0) or 0.0)
+            pe_p = float(m.get("pe_pct", 0.0) or 0.0)
+            logs.append({
+                "id": m.get("id"),
+                "log_date": today_s,
+                "timestamp_ist": m.get("time", ""),
+                "timestamp_ms": int(time.time() * 1000),
+                "underlying_key": m.get("key", ""),
+                "index_name": m.get("name", ""),
+                "prev_ce_pct": m.get("prev_ce_pct", 0.0),
+                "ce_pct": ce_p,
+                "delta_ce": m.get("delta_ce", 0.0),
+                "prev_pe_pct": m.get("prev_pe_pct", 0.0),
+                "pe_pct": pe_p,
+                "delta_pe": m.get("delta_pe", 0.0),
+                "score": round(float(m.get("score", ce_p - pe_p) or 0.0), 2),
+                "raw_signal": m.get("raw_signal", "Neutral"),
+                "hold_sec": m.get("hold_sec", 0),
+                "confirmed": 1 if m.get("confirmed") else 0,
+            })
+
+    return jsonify({
+        "logs": logs,
+        "date": target_date or "all",
+        "index": index_param or "ALL",
+        "today": datetime.now(IST).strftime("%Y-%m-%d"),
+        "count": len(logs),
+    })
+
+@app.get("/api/strategy/momentum-dates")
+def api_strategy_momentum_dates() -> Response:
+    dates = database.get_momentum_dates()
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    if today_str not in dates:
+        dates.insert(0, today_str)
+    return jsonify({"dates": dates, "today": today_str})
+
+@app.get("/api/strategy/momentum/export.csv")
+def api_strategy_momentum_export_csv() -> Response:
+    """Exports second-by-second momentum progression logs as CSV.
+    Supports index filtering: NIFTY, BANK NIFTY, SENSEX, or ALL."""
+    date_param = request.args.get("date", default=None, type=str)
+    index_param = request.args.get("index", default=None, type=str)
+
+    if not date_param or date_param.strip().lower() == "today":
+        target_date = datetime.now(IST).strftime("%Y-%m-%d")
+    elif date_param.strip().lower() == "all":
+        target_date = None
+    else:
+        target_date = date_param.strip()
+
+    logs = database.get_momentum_logs(date=target_date, underlying_key=index_param, limit=100000)
+    if not logs and (target_date == datetime.now(IST).strftime("%Y-%m-%d") or not target_date):
+        mem_logs = getattr(strategy_engine, "momentum_history", [])
+        today_s = datetime.now(IST).strftime("%Y-%m-%d")
+        logs = []
+        for m in reversed(mem_logs):
+            if index_param and index_param.upper() not in ("ALL", ""):
+                if m.get("key") != index_param and index_param not in m.get("name", ""):
+                    continue
+            ce_p = float(m.get("ce_pct", 0.0) or 0.0)
+            pe_p = float(m.get("pe_pct", 0.0) or 0.0)
+            logs.append({
+                "log_date": today_s,
+                "timestamp_ist": m.get("time", ""),
+                "index_name": m.get("name", ""),
+                "prev_ce_pct": m.get("prev_ce_pct", 0.0),
+                "ce_pct": ce_p,
+                "delta_ce": m.get("delta_ce", 0.0),
+                "prev_pe_pct": m.get("prev_pe_pct", 0.0),
+                "pe_pct": pe_p,
+                "delta_pe": m.get("delta_pe", 0.0),
+                "score": round(float(m.get("score", ce_p - pe_p) or 0.0), 2),
+                "raw_signal": m.get("raw_signal", "Neutral"),
+                "hold_sec": m.get("hold_sec", 0),
+                "confirmed": 1 if m.get("confirmed") else 0,
+            })
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Date", "Time (IST)", "Underlying", "Prev CE %", "Live CE %", "Delta CE %",
+        "Prev PE %", "Live PE %", "Delta PE %", "Score (CE%-PE%)", "Signal", "Whipsaw Hold (Sec)", "Confirmed"
+    ])
+    for l in logs:
+        ce_p = float(l.get('ce_pct') or 0.0)
+        pe_p = float(l.get('pe_pct') or 0.0)
+        sc = float(l.get('score') if l.get('score') is not None else (ce_p - pe_p))
+        writer.writerow([
+            l.get("log_date", ""),
+            l.get("timestamp_ist", ""),
+            l.get("index_name", ""),
+            f"{float(l.get('prev_ce_pct') or 0.0):+.2f}%",
+            f"{ce_p:+.2f}%",
+            f"{float(l.get('delta_ce') or 0.0):+.2f}%",
+            f"{float(l.get('prev_pe_pct') or 0.0):+.2f}%",
+            f"{pe_p:+.2f}%",
+            f"{float(l.get('delta_pe') or 0.0):+.2f}%",
+            f"{sc:+.2f}",
+            l.get("raw_signal", ""),
+            l.get("hold_sec", 0),
+            "YES" if l.get("confirmed") else "NO",
+        ])
+
+    csv_data = output.getvalue().encode("utf-8")
+    idx_slug = "all"
+    if index_param:
+        clean_p = index_param.replace("NSE_INDEX|", "").replace("BSE_INDEX|", "").replace(" ", "_").lower()
+        idx_slug = clean_p if clean_p else "all"
+
+    fname = f"momentum_{idx_slug}_{target_date or 'all'}.csv"
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={fname}",
+            "Cache-Control": "no-cache, no-store",
+        },
+    )
 
 # -------------------------------------------------------------------------
 # Release 2: NIFTY 50 Stock Screener & Selection Endpoints
@@ -1179,12 +1279,6 @@ def api_stocks_plan(symbol: str) -> Response:
     spot = request.args.get("spot", default=0.0, type=float)
     plan = stock_screener.plan_stock_itm_contracts(symbol=symbol, spot=spot)
     return jsonify(plan)
-
-@app.post("/api/strategy/rehearsal")
-def api_strategy_rehearsal() -> Response:
-    """Run morning rehearsal mode to audit trigger & strike selector latency."""
-    res = strategy_engine.rehearse_entry()
-    return jsonify(res)
 
 @app.get("/api/strategy/export")
 def api_strategy_export() -> Response:

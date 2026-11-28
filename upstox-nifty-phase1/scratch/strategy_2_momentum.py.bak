@@ -1,0 +1,385 @@
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+LOGGER = logging.getLogger("strategy_2_momentum")
+IST = ZoneInfo("Asia/Kolkata")
+
+NIFTY_KEY = "NSE_INDEX|Nifty 50"
+BANKNIFTY_KEY = "NSE_INDEX|Nifty Bank"
+SENSEX_KEY = "BSE_INDEX|SENSEX"
+
+INDEX_CONFIG: dict[str, dict[str, Any]] = {
+    NIFTY_KEY: {"name": "NIFTY 50", "step": 50.0, "lot_size": 65, "symbol_prefix": "NIFTY"},
+    BANKNIFTY_KEY: {"name": "BANK NIFTY", "step": 100.0, "lot_size": 15, "symbol_prefix": "BANKNIFTY"},
+    SENSEX_KEY: {"name": "SENSEX", "step": 100.0, "lot_size": 10, "symbol_prefix": "SENSEX"},
+}
+
+
+class Strategy2MomentumEngine:
+    """
+    STRATEGY 2: 09:15 Sum Signal Live % Momentum Strategy.
+    Runs from 09:18:00 to 14:45:00 based on 12 ITM Strike Basket Sum % momentum.
+    - Score = CE % - PE %
+    - Signal: PE Buy (PE % > +2, CE % < -2) / CE Buy (CE % > +2, PE % < -2)
+    - Whipsaw Control: Signal must hold continuously for 300 seconds (5 minutes).
+    - Capacity: Up to 3 active setups at a time.
+    - Continuation: After exit and 15-minute cooldown, re-enters if trend persists.
+    - Reversals: On confirmed opposite signal, closes and reverses.
+    - Trailing SL: +5% to cost, +2% per +3% step; -20% initial SL; +40% target.
+    Completely decoupled from Strategy 1.
+    """
+
+    def __init__(self, database=None, add_alert_cb=None):
+        self._lock = threading.RLock()
+        self.database = database
+        self.add_alert_cb = add_alert_cb
+
+        self.entry_start_time: str = "09:18:00"
+        self.entry_end_time: str = "14:45:00"
+        self.whipsaw_sec: float = 300.0
+        self.mode: str = "paper"
+        self.order_buffer: float = 0.50
+        self.max_trades_at_a_time: int = 3
+
+        # State tracking per index
+        self.index_state: dict[str, dict[str, Any]] = {}
+        for k, v in INDEX_CONFIG.items():
+            self.index_state[k] = {
+                "key": k,
+                "name": v["name"],
+                "ce_baseline_sum": 0.0,
+                "pe_baseline_sum": 0.0,
+                "ce_current_sum": 0.0,
+                "pe_current_sum": 0.0,
+                "ce_pct": 0.0,
+                "pe_pct": 0.0,
+                "score": 0.0,
+                "raw_signal": "Neutral",
+                "candidate_signal": None,
+                "candidate_start_time": None,
+                "hold_elapsed_sec": 0.0,
+                "confirmed_signal": None,
+                "cooldown_until": None,
+                "last_closed_side": None,
+                "current_position": None,
+                "ce_basket_keys": [],
+                "pe_basket_keys": [],
+                "today_trades_count": 0,
+            }
+
+        self._trade_counter: int = 1
+
+    def set_add_alert(self, cb) -> None:
+        self.add_alert_cb = cb
+
+    def add_alert(self, alert_type: str, message: str, level: str = "INFO", details: dict[str, Any] | None = None) -> None:
+        if self.add_alert_cb:
+            try:
+                self.add_alert_cb(alert_type, message, level=level, details=details)
+            except Exception as e:
+                LOGGER.debug("Error in add_alert callback: %s", e)
+
+    def set_baseline(self, underlying_key: str, ce_base: float, pe_base: float) -> None:
+        """Sets or restores the locked 09:15 baseline sums."""
+        with self._lock:
+            st = self.index_state.get(underlying_key)
+            if st:
+                st["ce_baseline_sum"] = round(ce_base, 2)
+                st["pe_baseline_sum"] = round(pe_base, 2)
+                LOGGER.info("[Strategy 2] Baseline set for %s: CE=%.2f, PE=%.2f", underlying_key, ce_base, pe_base)
+
+    def set_baskets(self, underlying_key: str, ce_keys: list[str], pe_keys: list[str]) -> None:
+        with self._lock:
+            st = self.index_state.get(underlying_key)
+            if st:
+                st["ce_basket_keys"] = list(ce_keys)
+                st["pe_basket_keys"] = list(pe_keys)
+
+    def on_tick(
+        self,
+        tick: dict[str, Any],
+        hot_cache: dict[str, Any],
+        underlying_key: str,
+    ) -> dict[str, Any] | None:
+        """Evaluates incoming tick: manages active position trailing SL or evaluates new Sum Signal entries."""
+        with self._lock:
+            st = self.index_state.get(underlying_key)
+            if not st:
+                return None
+
+            inst_key = tick.get("instrument_key") or ""
+            ltp = float(tick.get("ltp") or 0.0)
+            if ltp <= 0:
+                return None
+
+            pos = st.get("current_position")
+
+            # 1. Manage Active Position (Trailing SL & Target)
+            if pos and pos.get("status") == "OPEN":
+                if inst_key == pos.get("instrument_key"):
+                    exited = self._manage_trailing_position(pos, ltp, underlying_key)
+                    if exited:
+                        return exited
+
+            # 2. Re-compute Basket Sums & Live % Momentum
+            self._update_basket_sums(st, hot_cache)
+
+            # 3. Evaluate Signal Confirmation (300s Whipsaw Filter)
+            return self._evaluate_signals_and_entry(st, hot_cache, underlying_key)
+
+    def _update_basket_sums(self, st: dict[str, Any], hot_cache: dict[str, Any]) -> None:
+        ce_sum = sum(float((hot_cache.get(k) or {}).get("ltp") or 0.0) for k in st["ce_basket_keys"])
+        pe_sum = sum(float((hot_cache.get(k) or {}).get("ltp") or 0.0) for k in st["pe_basket_keys"])
+        st["ce_current_sum"] = round(ce_sum, 2)
+        st["pe_current_sum"] = round(pe_sum, 2)
+
+        ce_b = st["ce_baseline_sum"]
+        pe_b = st["pe_baseline_sum"]
+        st["ce_pct"] = round(((ce_sum - ce_b) / ce_b) * 100.0, 2) if ce_b > 0 else 0.0
+        st["pe_pct"] = round(((pe_sum - pe_b) / pe_b) * 100.0, 2) if pe_b > 0 else 0.0
+        st["score"] = round(st["ce_pct"] - st["pe_pct"], 2)
+
+        # Signal Classification
+        if st["ce_pct"] > 2.0 and st["pe_pct"] < -2.0:
+            st["raw_signal"] = "CE Buy"
+        elif st["pe_pct"] > 2.0 and st["ce_pct"] < -2.0:
+            st["raw_signal"] = "PE Buy"
+        else:
+            st["raw_signal"] = "Neutral"
+
+    def _evaluate_signals_and_entry(
+        self,
+        st: dict[str, Any],
+        hot_cache: dict[str, Any],
+        underlying_key: str,
+    ) -> dict[str, Any] | None:
+        now_dt = datetime.now(IST)
+        now_time_hms = now_dt.strftime("%H:%M:%S")
+        now_ts = time.time()
+        raw = st["raw_signal"]
+
+        # 300s Hold Timer
+        if raw == "Neutral":
+            st["candidate_signal"] = None
+            st["candidate_start_time"] = None
+            st["hold_elapsed_sec"] = 0.0
+            st["confirmed_signal"] = None
+        else:
+            if st.get("candidate_signal") == raw:
+                elapsed = round(now_ts - (st.get("candidate_start_time") or now_ts), 1)
+                st["hold_elapsed_sec"] = elapsed
+                if elapsed >= self.whipsaw_sec:
+                    if st.get("confirmed_signal") != raw:
+                        st["confirmed_signal"] = raw
+                        self.add_alert(
+                            "SIGNAL_CONFIRMED",
+                            f"{st['name']}: {raw} CONFIRMED after {int(elapsed)}s hold (Sum Score: {st['score']:+.2f}%)",
+                            level="INFO",
+                            details={"underlying": underlying_key, "signal": raw, "score": st["score"], "hold_sec": elapsed},
+                        )
+            else:
+                st["candidate_signal"] = raw
+                st["candidate_start_time"] = now_ts
+                st["hold_elapsed_sec"] = 0.0
+                st["confirmed_signal"] = None
+
+        confirmed = st.get("confirmed_signal")
+
+        # Position Reversal Check
+        pos = st.get("current_position")
+        if pos and pos.get("status") == "OPEN":
+            if "CE" in pos.get("side", "") and confirmed == "PE Buy":
+                LOGGER.info("[Strategy 2] Confirmed Reversal to PE Buy for %s. Closing CE.", underlying_key)
+                self.exit_trade(pos, "SIGNAL_REVERSAL_PE", underlying_key)
+                return self._enter_trade(underlying_key, "PE", hot_cache)
+            elif "PE" in pos.get("side", "") and confirmed == "CE Buy":
+                LOGGER.info("[Strategy 2] Confirmed Reversal to CE Buy for %s. Closing PE.", underlying_key)
+                self.exit_trade(pos, "SIGNAL_REVERSAL_CE", underlying_key)
+                return self._enter_trade(underlying_key, "CE", hot_cache)
+            return None
+
+        # Fresh Entry or Continuation Entry Check
+        if confirmed in ("CE Buy", "PE Buy"):
+            side = "CE" if confirmed == "CE Buy" else "PE"
+
+            # Check 15-minute cooldown for same direction
+            cd_until = st.get("cooldown_until")
+            if cd_until and now_dt < cd_until:
+                if st.get("last_closed_side") == side:
+                    return None
+
+            # Trading Hours Check (09:18 to 14:45)
+            if now_time_hms < self.entry_start_time or now_time_hms >= self.entry_end_time:
+                return None
+
+            # Execute Strategy 2 Entry
+            return self._enter_trade(underlying_key, side, hot_cache)
+
+        return None
+
+    def _enter_trade(self, underlying_key: str, side: str, hot_cache: dict[str, Any]) -> dict[str, Any] | None:
+        st = self.index_state.get(underlying_key)
+        if not st:
+            return None
+
+        # Pick candidate strike from the 6 ITM basket of the chosen side
+        target_keys = st["ce_basket_keys"] if side == "CE" else st["pe_basket_keys"]
+        candidates = [hot_cache[k] for k in target_keys if k in hot_cache and (hot_cache[k].get("ltp") or 0.0) > 0]
+        if not candidates:
+            return None
+
+        # Choose tightest spread / nearest to spot candidate
+        candidates.sort(key=lambda x: (x.get("spread_pct") or 999.0, -float(x.get("ltp") or 0.0)))
+        winner = candidates[0]
+
+        entry_price = float(winner.get("ask_price") or winner.get("ltp") or 0.0)
+        if entry_price <= 0.0:
+            return None
+
+        now_dt = datetime.now(IST)
+        sl_price = round(entry_price * 0.80, 2)   # -20% SL as per Dr. Bhilwade
+        tgt_price = round(entry_price * 1.40, 2)  # +40% Target
+
+        cfg = INDEX_CONFIG.get(underlying_key, {})
+        lots = cfg.get("lots", 1)
+        lot_sz = cfg.get("lot_size", 65)
+
+        trade_id = f"SUM-{now_dt.strftime('%m%d%H%M%S')}-{self._trade_counter}"
+        self._trade_counter += 1
+
+        trade = {
+            "trade_id": trade_id,
+            "trade_date": now_dt.strftime("%Y-%m-%d"),
+            "strategy": "SUM_SIGNAL",
+            "entry_path": "SUM_SIGNAL",
+            "stop_loss_price": sl_price,
+            "target_price": tgt_price,
+            "side": f"BUY_{side}",
+            "symbol": winner.get("trading_symbol") or f"{cfg.get('name')} {winner.get('strike')} {side}",
+            "instrument_key": winner.get("instrument_key"),
+            "underlying_key": underlying_key,
+            "strike": winner.get("strike"),
+            "lots": lots,
+            "lot_size": lots * lot_sz,
+            "entry_time_ist": now_dt.strftime("%H:%M:%S.%f")[:-3],
+            "entry_price": entry_price,
+            "entry_timestamp_ms": int(time.time() * 1000),
+            "exit_time_ist": None,
+            "exit_price": None,
+            "exit_timestamp_ms": None,
+            "exit_reason": None,
+            "pnl_points": 0.0,
+            "net_pnl": 0.0,
+            "status": "OPEN",
+            "spot_price": winner.get("spot_price"),
+            "atm_strike": winner.get("strike"),
+            "current_price": entry_price,
+            "build_up": "Short Buildup" if side == "PE" else "Long Buildup",
+            "bot_latency_ms": 5.0,
+            "network_latency_ms": 0.0,
+        }
+
+        # Persist to DB
+        if self.database and hasattr(self.database, "insert_strategy_trade"):
+            try:
+                self.database.insert_strategy_trade(trade)
+            except Exception as e:
+                LOGGER.debug("Could not insert Strategy 2 trade to DB: %s", e)
+
+        st["current_position"] = trade
+        st["today_trades_count"] += 1
+
+        self.add_alert(
+            "SUM_SIGNAL_ENTRY",
+            f"Strategy 2 Entry: {trade['symbol']} at ₹{entry_price:.2f} (SL: ₹{sl_price:.2f}, Tgt: ₹{tgt_price:.2f})",
+            level="INFO",
+            details={"underlying": underlying_key, "trade_id": trade_id, "strike": trade["strike"]},
+        )
+        return trade
+
+    def _manage_trailing_position(self, pos: dict[str, Any], ltp: float, underlying_key: str) -> dict[str, Any] | None:
+        entry_price = float(pos.get("entry_price") or 0.0)
+        if entry_price <= 0:
+            return None
+
+        # Check Target (+40%)
+        target_price = float(pos.get("target_price") or entry_price * 1.40)
+        if ltp >= target_price:
+            return self.exit_trade(pos, "TARGET_40PCT", underlying_key, exit_price=target_price)
+
+        # Update Highest Price & Stepped Trailing SL
+        highest_price = float(pos.get("highest_price") or entry_price)
+        if ltp > highest_price:
+            highest_price = ltp
+            pos["highest_price"] = highest_price
+
+            gain_pct = ((highest_price - entry_price) / entry_price) * 100.0
+            if gain_pct >= 5.0:
+                cost_sl = entry_price
+                steps = int((gain_pct - 5.0) / 3.0)
+                trailing_sl = round(cost_sl * (1.0 + (steps * 0.02)), 2)
+                cur_sl = float(pos.get("stop_loss_price") or 0.0)
+                if trailing_sl > cur_sl:
+                    pos["stop_loss_price"] = trailing_sl
+
+        # Check Stop Loss Hit
+        effective_sl = float(pos.get("stop_loss_price") or entry_price * 0.80)
+        if ltp <= effective_sl:
+            reason = "TRAILING_STOP_LOSS" if effective_sl > entry_price * 0.80 else "STOP_LOSS_20PCT"
+            return self.exit_trade(pos, reason, underlying_key, exit_price=effective_sl)
+
+        return None
+
+    def exit_trade(self, pos: dict[str, Any], reason: str, underlying_key: str, exit_price: float | None = None) -> dict[str, Any]:
+        """Exits Strategy 2 trade and sets 15-minute cooldown for continuation re-entry."""
+        now_dt = datetime.now(IST)
+        entry_price = float(pos["entry_price"])
+        if exit_price is None or exit_price <= 0:
+            exit_price = float(pos.get("current_price") or entry_price)
+
+        qty = int(pos.get("lot_size") or 1)
+        pnl_pts = round(exit_price - entry_price, 2)
+        net_pnl = round(pnl_pts * qty, 2)
+
+        pos["exit_time_ist"] = now_dt.strftime("%H:%M:%S.%f")[:-3]
+        pos["exit_price"] = exit_price
+        pos["exit_timestamp_ms"] = int(time.time() * 1000)
+        pos["exit_reason"] = reason
+        pos["pnl_points"] = pnl_pts
+        pos["net_pnl"] = net_pnl
+        pos["status"] = "CLOSED"
+
+        # Update in database
+        if self.database and hasattr(self.database, "update_strategy_trade_exit"):
+            try:
+                self.database.update_strategy_trade_exit(
+                    trade_id=pos["trade_id"],
+                    exit_time_ist=pos["exit_time_ist"],
+                    exit_price=exit_price,
+                    exit_timestamp_ms=pos["exit_timestamp_ms"],
+                    exit_reason=reason,
+                    pnl_points=pnl_pts,
+                    net_pnl=net_pnl,
+                )
+            except Exception as e:
+                LOGGER.debug("Could not update trade exit in DB: %s", e)
+
+        st = self.index_state.get(underlying_key)
+        if st:
+            st["current_position"] = None
+            st["cooldown_until"] = now_dt + timedelta(minutes=15)
+            st["last_closed_side"] = "CE" if "CE" in pos.get("side", "") else "PE"
+
+        self.add_alert(
+            "TRAILING_STOP_LOSS" if "TRAILING" in reason else "EXIT_ORDER_FILLED",
+            f"Strategy 2: {pos['symbol']} EXITED ({reason}) @ {exit_price:.2f} | P&L: {pnl_pts:+.2f} pts (₹{net_pnl:+,.2f})",
+            level="INFO",
+            details={"underlying": underlying_key, "trade_id": pos["trade_id"], "exit_price": exit_price, "pnl": net_pnl},
+        )
+        return pos
